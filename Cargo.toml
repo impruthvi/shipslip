@@ -1,0 +1,10 @@
+[package]
+name = "shipslip"
+version = "0.0.1"
+edition = "2021"
+description = "Deploy with a receipt. Early development."
+license = "MIT"
+repository = "https://github.com/impruthvi/shipslip"
+readme = "README.md"
+
+[dependencies]
