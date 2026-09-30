@@ -2,7 +2,7 @@
 name = "shipslip"
 version = "0.0.1"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Deploy with a receipt. Early development."
 license = "MIT"
 repository = "https://github.com/impruthvi/shipslip"
@@ -11,4 +11,18 @@ readme = "README.md"
 [dependencies]
 sha2 = "0.11.0"
 thiserror = "2.0.21"
-tokio = { version = "1.53.1", features = ["macros", "rt", "sync"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "rt", "sync"] }
+
+[target.'cfg(unix)'.dependencies]
+openssh = { version = "0.11.6", default-features = false, features = ["native-mux"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["time"] }
+
+[features]
+integration = []
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+required-features = ["integration"]

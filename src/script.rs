@@ -5,13 +5,15 @@ pub(crate) fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Wraps a step so it runs in the app directory, in strict mode, without stdin.
+/// Wraps a step so it runs in the app directory, in strict mode, without
+/// stdin, with stderr merged into stdout so output keeps its order.
 ///
 /// The step text is inserted verbatim: it is user-authored shell and is
 /// treated as arbitrary execution.
 pub(crate) fn wrap_step(path: &str, body: &str) -> String {
     format!(
-        "cd {} || exit $?\n\
+        "exec 2>&1\n\
+         cd {} || exit $?\n\
          export GIT_TERMINAL_PROMPT=0 SSH_ASKPASS_REQUIRE=never\n\
          (\n\
          set -eo pipefail\n\
@@ -49,7 +51,7 @@ mod tests {
     #[test]
     fn wrapper_is_strict_and_has_no_stdin() {
         let s = wrap_step("/var/www/app", "php artisan migrate --force");
-        assert!(s.starts_with("cd '/var/www/app' || exit $?\n"));
+        assert!(s.starts_with("exec 2>&1\ncd '/var/www/app' || exit $?\n"));
         assert!(s.contains("set -eo pipefail\nphp artisan migrate --force\n) </dev/null"));
     }
 
