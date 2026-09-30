@@ -13,6 +13,11 @@ pub enum StepStatus {
     NotStarted,
 }
 
+/// A down command may have changed the app unless it definitely never started.
+pub(crate) fn down_may_have_started(status: &StepStatus) -> bool {
+    !matches!(status, StepStatus::NotStarted)
+}
+
 /// `php artisan down` before step 0, or `php artisan up` after the last step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MaintenancePhase {
@@ -83,6 +88,10 @@ pub enum DeployEvent {
         index: usize,
         reason: String,
     },
+    /// A local receipt or lock operation failed outside a running step.
+    RunError {
+        reason: String,
+    },
     MaintenanceStarted {
         phase: MaintenancePhase,
     },
@@ -95,8 +104,8 @@ pub enum DeployEvent {
         status: StepStatus,
         exit_code: Option<i32>,
     },
-    /// Maintenance mode was switched on and is still on: the app is down
-    /// until someone brings it up. Sent before the final event.
+    /// Maintenance down may have started and maintenance up did not succeed.
+    /// The app may still be down. Sent before the final event.
     AppLeftDown,
     /// The server's checkout after step 0 failed; `None` where it could not
     /// be read.

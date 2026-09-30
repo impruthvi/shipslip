@@ -188,6 +188,10 @@ impl LogObserver {
         let _ = self.control.send(Mode::During);
     }
 
+    pub(crate) fn abort(self) {
+        self.task.abort();
+    }
+
     pub(crate) async fn finish(self, status: WatchStatus, post_window: Duration) -> WatchResult {
         if status == WatchStatus::Complete {
             let _ = self.control.send(Mode::After(Instant::now() + post_window));
