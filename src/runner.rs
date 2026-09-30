@@ -1,7 +1,7 @@
 //! Runs deploy steps detached on the server, so a step survives a dropped
 //! connection, a sleeping laptop, or a detach, and can be re-attached.
 //!
-//! Each step gets `~/.shipslip/runs/<run_id>/step-<n>/` holding `script.sh`,
+//! Each step gets `~/.shipslip/runs/<run_id>/<key>/` holding `script.sh`,
 //! `log` (stdout + stderr), `pid`, and `exit` (written atomically when the
 //! step ends). A step is launched at most once: nothing here ever re-sends
 //! the launch.
@@ -51,15 +51,15 @@ fn run_dir(run_id: &str) -> String {
     format!("\"$HOME\"/.shipslip/runs/{}", shell_quote(run_id))
 }
 
-pub(crate) fn launch_script(run_id: &str, index: usize, script: &str) -> String {
+pub(crate) fn launch_script(run_id: &str, key: &str, script: &str) -> String {
     format!(
         r#"set -e
 umask 077
 mkdir -p {runs}
 chmod 700 "$HOME"/.shipslip "$HOME"/.shipslip/runs
-printf '%s' {script} > {runs}/step-{index}.sh
-mkdir {runs}/step-{index}
-d={runs}/step-{index}
+printf '%s' {script} > {runs}/{key}.sh
+mkdir {runs}/{key}
+d={runs}/{key}
 mv "$d.sh" "$d/script.sh"
 setsid nohup bash -c 'echo $$ > "$1/pid.tmp" && mv "$1/pid.tmp" "$1/pid"; bash -l -s < "$1/script.sh"; echo $? > "$1/exit.tmp"; mv "$1/exit.tmp" "$1/exit"' _ "$d" > "$d/log" 2>&1 < /dev/null &
 for _ in $(seq 100); do [ -s "$d/pid" ] && exit 0; sleep 0.05; done
@@ -71,9 +71,9 @@ exit 1
 }
 
 /// Streams the step's log from line `skip + 1` until the step's process ends.
-pub(crate) fn observe_script(run_id: &str, index: usize, skip: usize) -> String {
+pub(crate) fn observe_script(run_id: &str, key: &str, skip: usize) -> String {
     format!(
-        "d={runs}/step-{index}\n\
+        "d={runs}/{key}\n\
          echo {LOG_START}\n\
          exec tail -n +{from} -s 0.2 --pid=\"$(cat \"$d/pid\")\" -f \"$d/log\" 2>/dev/null\n",
         runs = run_dir(run_id),
@@ -81,9 +81,9 @@ pub(crate) fn observe_script(run_id: &str, index: usize, skip: usize) -> String 
     )
 }
 
-pub(crate) fn probe_script(run_id: &str, index: usize) -> String {
+pub(crate) fn probe_script(run_id: &str, key: &str) -> String {
     format!(
-        r#"d={runs}/step-{index}
+        r#"d={runs}/{key}
 state() {{
   if [ -e "$d/exit" ]; then echo "exited $(cat "$d/exit")"
   elif [ ! -d "$d" ]; then echo not-started
@@ -112,17 +112,17 @@ fn parse_probe(lines: &[String]) -> Option<Probe> {
     }
 }
 
-/// Launches step `index` of `run_id` detached and follows it to the end,
-/// re-attaching after dropped connections. Output lines go to `output`.
+/// Launches `script` detached as `key` (e.g. `step-2`) of `run_id` and
+/// follows it to the end, re-attaching after dropped connections. Output
+/// lines go to `output`.
 pub(crate) async fn run_step<T: Transport>(
     transport: &T,
     run_id: &str,
-    index: usize,
+    key: &str,
     script: &str,
     output: &mpsc::UnboundedSender<String>,
 ) -> StepResult {
-    let (launch, launch_output) =
-        run_collect(transport, &launch_script(run_id, index, script)).await;
+    let (launch, launch_output) = run_collect(transport, &launch_script(run_id, key, script)).await;
     if let Err(e @ TransportError::Connect(_)) = &launch {
         return StepResult::NotStarted(e.to_string());
     }
@@ -134,7 +134,7 @@ pub(crate) async fn run_step<T: Transport>(
             if let Err(reason) = reconnect_if_lost(transport, &last, &mut reattaches).await {
                 return StepResult::Interrupted(reason);
             }
-            let (result, lines) = run_collect(transport, &probe_script(run_id, index)).await;
+            let (result, lines) = run_collect(transport, &probe_script(run_id, key)).await;
             if result.is_err() {
                 last = result;
                 continue;
@@ -158,14 +158,14 @@ pub(crate) async fn run_step<T: Transport>(
     // while disconnected is still shown.
     let mut seen = 0;
     loop {
-        let observed = observe(transport, run_id, index, &mut seen, output).await;
+        let observed = observe(transport, run_id, key, &mut seen, output).await;
         if let Err(reason) = reconnect_if_lost(transport, &observed, &mut reattaches).await {
             return StepResult::Interrupted(reason);
         }
         if observed.is_err() {
             continue;
         }
-        let (result, lines) = run_collect(transport, &probe_script(run_id, index)).await;
+        let (result, lines) = run_collect(transport, &probe_script(run_id, key)).await;
         if let Err(reason) = reconnect_if_lost(transport, &result, &mut reattaches).await {
             return StepResult::Interrupted(reason);
         }
@@ -211,11 +211,11 @@ pub(crate) async fn run_collect<T: Transport>(
 async fn observe<T: Transport>(
     transport: &T,
     run_id: &str,
-    index: usize,
+    key: &str,
     seen: &mut usize,
     output: &mpsc::UnboundedSender<String>,
 ) -> Result<i32, TransportError> {
-    let script = observe_script(run_id, index, *seen);
+    let script = observe_script(run_id, key, *seen);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let forward = async {
         let mut started = false;
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn launch_refuses_to_start_a_step_twice() {
-        let s = launch_script("r1", 2, "true");
+        let s = launch_script("r1", "step-2", "true");
         let guard = s
             .find("mkdir \"$HOME\"/.shipslip/runs/'r1'/step-2\n")
             .unwrap();
@@ -273,14 +273,14 @@ mod tests {
 
     #[test]
     fn launch_embeds_the_script_quoted() {
-        let s = launch_script("r1", 0, "echo 'hi' \"$HOME\"");
+        let s = launch_script("r1", "step-0", "echo 'hi' \"$HOME\"");
         assert!(s.contains(r#"printf '%s' 'echo '\''hi'\'' "$HOME"' >"#));
     }
 
     #[test]
     fn observe_resumes_after_seen_lines() {
-        assert!(observe_script("r1", 1, 0).contains("tail -n +1 "));
-        assert!(observe_script("r1", 1, 7).contains("tail -n +8 "));
+        assert!(observe_script("r1", "step-1", 0).contains("tail -n +1 "));
+        assert!(observe_script("r1", "step-1", 7).contains("tail -n +8 "));
     }
 
     #[test]

@@ -8,6 +8,9 @@ RUN apt-get update \
     && printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\nPermitRootLogin no\n' \
         > /etc/ssh/sshd_config.d/test.conf
 
+COPY php /usr/local/bin/php
+RUN chmod 755 /usr/local/bin/php
+
 # origin.git has two commits; tests clone it and reset to the first.
 USER deploy
 RUN git config --global user.email test@example.com \
@@ -16,7 +19,8 @@ RUN git config --global user.email test@example.com \
     && git init -q --bare /home/deploy/origin.git \
     && git clone -q /home/deploy/origin.git /tmp/seed \
     && cd /tmp/seed \
-    && echo one > file && git add file && git commit -qm "First" \
+    && echo one > file && echo 'storage/' > .gitignore \
+    && git add file .gitignore && git commit -qm "First" \
     && echo two > file && git commit -qam "Second" \
     && git push -q origin main \
     && rm -rf /tmp/seed

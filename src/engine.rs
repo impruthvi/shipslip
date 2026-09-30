@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
-use crate::event::{DeployEvent, DeployOutcome, StepStatus, StopReason};
+use crate::event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason};
 use crate::lock::{self, Acquire, Break, LockInfo, LockOwner};
 use crate::preflight::{self, AbortReason, BlockReason, State};
 use crate::runner::{self, run_collect, StepResult};
@@ -24,6 +24,9 @@ pub struct DeployTarget {
     pub branch: String,
     /// Recipe steps 1..=N (step 0, the git fast-forward, is built in).
     pub steps: Vec<String>,
+    /// Run `php artisan down` before step 0 and `php artisan up` after the
+    /// last step succeeds. On any failure the app stays down.
+    pub maintenance: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -211,6 +214,85 @@ pub async fn prepare<T: Transport>(
     })
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum BringUpError {
+    #[error("deploy lock is {0}")]
+    LockHeld(LockInfo),
+    #[error("could not take the deploy lock: {0}")]
+    Lock(String),
+    #[error("`php artisan up` exited with {code}: {output}")]
+    Failed { code: i32, output: String },
+    #[error("could not confirm whether `php artisan up` completed; the deploy lock was kept")]
+    Unknown,
+    #[error("`php artisan up` was not started: {0}")]
+    NotStarted(String),
+    #[error("could not follow `php artisan up`: {0}; the deploy lock was kept")]
+    Interrupted(String),
+    #[error(transparent)]
+    Transport(#[from] TransportError),
+}
+
+/// Runs `php artisan up`, e.g. after a failed deploy left the app in
+/// maintenance mode. Holds the deploy lock meanwhile, so it cannot run
+/// during a deploy. Returns the command's output.
+pub async fn bring_app_up<T: Transport>(
+    target: &DeployTarget,
+    transport: &T,
+) -> Result<Vec<String>, BringUpError> {
+    let run_id = new_run_id();
+    let owner = LockOwner::current(&run_id, "");
+    match lock::acquire(transport, &target.path, &owner)
+        .await
+        .map_err(BringUpError::Lock)?
+    {
+        Acquire::Acquired => {}
+        Acquire::Held(info) => return Err(BringUpError::LockHeld(info)),
+    }
+    let (line_tx, mut line_rx) = mpsc::unbounded_channel();
+    let script = wrap_step(&target.path, "php artisan up");
+    let run = {
+        let tx = line_tx;
+        let step_run_id = run_id.clone();
+        async move { runner::run_step(transport, &step_run_id, "maintenance-up", &script, &tx).await }
+    };
+    let collect = async {
+        let mut lines = Vec::new();
+        while let Some(line) = line_rx.recv().await {
+            lines.push(line);
+        }
+        lines
+    };
+    let heartbeat = async {
+        loop {
+            tokio::time::sleep(lock::HEARTBEAT_EVERY).await;
+            lock::heartbeat(transport, &target.path, &run_id).await;
+        }
+    };
+    let (result, lines) = tokio::select! {
+        result = async { tokio::join!(run, collect) } => result,
+        () = heartbeat => unreachable!("heartbeat never ends"),
+    };
+    match result {
+        StepResult::Exited(0) => {
+            lock::release(transport, &target.path, &run_id).await?;
+            Ok(lines)
+        }
+        StepResult::Exited(code) => {
+            lock::release(transport, &target.path, &run_id).await?;
+            Err(BringUpError::Failed {
+                code,
+                output: lines.join("\n"),
+            })
+        }
+        StepResult::NotStarted(reason) => {
+            lock::release(transport, &target.path, &run_id).await?;
+            Err(BringUpError::NotStarted(reason))
+        }
+        StepResult::Gone => Err(BringUpError::Unknown),
+        StepResult::Interrupted(reason) => Err(BringUpError::Interrupted(reason)),
+    }
+}
+
 /// Gives up a prepared deploy without running it, releasing its lock.
 pub async fn cancel<T: Transport>(preview: Preview, transport: &T) -> Result<(), TransportError> {
     lock::release(transport, &preview.target.path, &preview.run_id).await
@@ -273,6 +355,13 @@ pub fn execute<T: Transport>(
     Ok((rx, handle))
 }
 
+/// How a run ends: with an outcome, or leaving a command on the server.
+enum End {
+    Finished(DeployOutcome),
+    Detached(usize),
+    Interrupted { index: usize, reason: String },
+}
+
 async fn run_steps<T: Transport>(
     preview: Preview,
     transport: Arc<T>,
@@ -287,31 +376,40 @@ async fn run_steps<T: Transport>(
             lock::heartbeat(&*transport, path, run_id).await;
         }
     };
-    let outcome = tokio::select! {
-        outcome = run_steps_locked(&preview, &*transport, &events, &stop, detach) => outcome,
+    let mut app_down = false;
+    let end = tokio::select! {
+        end = run_steps_locked(&preview, &*transport, &events, &stop, detach, &mut app_down) => end,
         () = heartbeat => unreachable!("heartbeat never ends"),
     };
-    let Some(outcome) = outcome else {
-        return;
-    };
-    // After an unknown outcome the server's state needs checking first, so
-    // the lock is kept and goes stale.
-    if !matches!(outcome, DeployOutcome::Unknown { .. }) {
-        let _ = lock::release(&*transport, path, run_id).await;
+    if app_down {
+        let _ = events.send(DeployEvent::AppLeftDown);
     }
-    let _ = events.send(DeployEvent::Finished(outcome));
+    let event = match end {
+        End::Finished(outcome) => {
+            // After an unknown outcome the server's state needs checking
+            // first, so the lock is kept and goes stale.
+            if !matches!(outcome, DeployOutcome::Unknown { .. }) {
+                let _ = lock::release(&*transport, path, run_id).await;
+            }
+            DeployEvent::Finished(outcome)
+        }
+        End::Detached(index) => DeployEvent::Detached { index },
+        End::Interrupted { index, reason } => DeployEvent::Interrupted { index, reason },
+    };
+    let _ = events.send(event);
 }
 
-/// Runs the steps and returns the outcome to finish with, or `None` after a
-/// `Detached` or `Interrupted` event.
+/// Runs maintenance down, the steps, and maintenance up. `app_down` is left
+/// set if maintenance mode may still be on.
 async fn run_steps_locked<T: Transport>(
     preview: &Preview,
     transport: &T,
     events: &mpsc::UnboundedSender<DeployEvent>,
     stop: &AtomicBool,
     mut detach: watch::Receiver<bool>,
-) -> Option<DeployOutcome> {
-    let (path, run_id) = (&preview.target.path, &preview.run_id);
+    app_down: &mut bool,
+) -> End {
+    let path = &preview.target.path;
     let mut steps = vec![(
         "git fast-forward".to_string(),
         format!("git merge --ff-only {}", preview.target_sha),
@@ -321,12 +419,14 @@ async fn run_steps_locked<T: Transport>(
     for (index, (name, body)) in steps.into_iter().enumerate() {
         // Detaching between steps leaves nothing running, so it is a stop.
         if stop.load(Ordering::SeqCst) || *detach.borrow() {
-            return Some(stopped_before(index, StopReason::Requested));
+            return End::Finished(stopped_before(index, StopReason::Requested));
         }
-        match lock_owned(transport, path, run_id).await {
+        match lock_owned(transport, path, &preview.run_id).await {
             Ok(true) => {}
-            Ok(false) => return Some(stopped_before(index, StopReason::LockLost)),
-            Err(reason) => return Some(stopped_before(index, StopReason::ConnectFailed(reason))),
+            Ok(false) => return End::Finished(stopped_before(index, StopReason::LockLost)),
+            Err(reason) => {
+                return End::Finished(stopped_before(index, StopReason::ConnectFailed(reason)))
+            }
         }
         if index == 0 {
             let changed = match read_state(transport, path).await {
@@ -334,31 +434,62 @@ async fn run_steps_locked<T: Transport>(
                 Err(reason) => Some(reason),
             };
             if let Some(reason) = changed {
-                return Some(DeployOutcome::AbortedBeforeChanges(reason));
+                return End::Finished(DeployOutcome::AbortedBeforeChanges(reason));
+            }
+            if preview.target.maintenance {
+                let down = maintenance(
+                    transport,
+                    preview,
+                    MaintenancePhase::Down,
+                    events,
+                    &mut detach,
+                    true,
+                );
+                match down.await {
+                    None => return End::Detached(0),
+                    Some(StepResult::Exited(0)) => *app_down = true,
+                    Some(StepResult::Exited(code)) => {
+                        *app_down = false;
+                        let reason = AbortReason::MaintenanceDownFailed(code);
+                        return End::Finished(DeployOutcome::AbortedBeforeChanges(reason));
+                    }
+                    Some(StepResult::NotStarted(reason)) => {
+                        *app_down = false;
+                        let reason = AbortReason::ConnectFailed(reason);
+                        return End::Finished(DeployOutcome::AbortedBeforeChanges(reason));
+                    }
+                    Some(StepResult::Gone) => {
+                        return End::Finished(DeployOutcome::Unknown {
+                            step: 0,
+                            reason: "`php artisan down` ended without recording an exit code"
+                                .into(),
+                        })
+                    }
+                    Some(StepResult::Interrupted(reason)) => {
+                        return End::Interrupted { index: 0, reason }
+                    }
+                }
+                if stop.load(Ordering::SeqCst) || *detach.borrow() {
+                    return End::Finished(stopped_before(0, StopReason::Requested));
+                }
             }
         }
 
         let _ = events.send(DeployEvent::StepStarted { index, name });
-
-        let (line_tx, mut line_rx) = mpsc::unbounded_channel();
-        let step = async {
-            let tx = line_tx;
-            let script = wrap_step(path, &body);
-            runner::run_step(transport, run_id, index, &script, &tx).await
-        };
-        // All output for this step is delivered before its StepFinished.
-        let forward = async {
-            while let Some(line) = line_rx.recv().await {
-                let _ = events.send(DeployEvent::Output { index, line });
-            }
-        };
-        let result = tokio::select! {
-            biased;
-            _ = wait_for_detach(&mut detach) => {
-                let _ = events.send(DeployEvent::Detached { index });
-                return None;
-            }
-            (r, ()) = async { tokio::join!(step, forward) } => r,
+        let key = format!("step-{index}");
+        let output = |line| DeployEvent::Output { index, line };
+        let Some(result) = follow(
+            transport,
+            preview,
+            &key,
+            &body,
+            events,
+            Some(&mut detach),
+            output,
+        )
+        .await
+        else {
+            return End::Detached(index);
         };
 
         let mut server_state = None;
@@ -397,10 +528,7 @@ async fn run_steps_locked<T: Transport>(
                     reason: "the step's process ended without recording an exit code".into(),
                 }),
             ),
-            StepResult::Interrupted(reason) => {
-                let _ = events.send(DeployEvent::Interrupted { index, reason });
-                return None;
-            }
+            StepResult::Interrupted(reason) => return End::Interrupted { index, reason },
         };
         let _ = events.send(DeployEvent::StepFinished {
             index,
@@ -410,11 +538,117 @@ async fn run_steps_locked<T: Transport>(
         if let Some(event) = server_state {
             let _ = events.send(event);
         }
-        if outcome.is_some() {
-            return outcome;
+        if let Some(outcome) = outcome {
+            return End::Finished(outcome);
         }
     }
-    Some(DeployOutcome::Succeeded)
+
+    if *app_down {
+        let up = maintenance(
+            transport,
+            preview,
+            MaintenancePhase::Up,
+            events,
+            &mut detach,
+            false,
+        );
+        match up.await {
+            Some(StepResult::Exited(0)) => *app_down = false,
+            Some(StepResult::Gone) => *app_down = false,
+            Some(StepResult::Interrupted(reason)) => {
+                *app_down = false;
+                return End::Interrupted {
+                    index: preview.target.steps.len() + 1,
+                    reason,
+                };
+            }
+            None => *app_down = false,
+            Some(StepResult::Exited(_) | StepResult::NotStarted(_)) => {}
+        }
+    }
+    End::Finished(DeployOutcome::Succeeded)
+}
+
+/// Runs `body` detached on the server as `key`, turning its output lines
+/// into events. `None` if the front-end detached meanwhile.
+async fn follow<T: Transport>(
+    transport: &T,
+    preview: &Preview,
+    key: &str,
+    body: &str,
+    events: &mpsc::UnboundedSender<DeployEvent>,
+    detach: Option<&mut watch::Receiver<bool>>,
+    to_event: impl Fn(String) -> DeployEvent,
+) -> Option<StepResult> {
+    let (line_tx, mut line_rx) = mpsc::unbounded_channel();
+    let step = async {
+        let tx = line_tx;
+        let script = wrap_step(&preview.target.path, body);
+        runner::run_step(transport, &preview.run_id, key, &script, &tx).await
+    };
+    // All output is delivered before the caller reports the result.
+    let forward = async {
+        while let Some(line) = line_rx.recv().await {
+            let _ = events.send(to_event(line));
+        }
+    };
+    if let Some(detach) = detach {
+        tokio::select! {
+            biased;
+            _ = wait_for_detach(detach) => None,
+            (result, ()) = async { tokio::join!(step, forward) } => Some(result),
+        }
+    } else {
+        let (result, ()) = tokio::join!(step, forward);
+        Some(result)
+    }
+}
+
+async fn maintenance<T: Transport>(
+    transport: &T,
+    preview: &Preview,
+    phase: MaintenancePhase,
+    events: &mpsc::UnboundedSender<DeployEvent>,
+    detach: &mut watch::Receiver<bool>,
+    detachable: bool,
+) -> Option<StepResult> {
+    let (key, command) = match phase {
+        MaintenancePhase::Down => ("maintenance-down", "php artisan down"),
+        MaintenancePhase::Up => ("maintenance-up", "php artisan up"),
+    };
+    let _ = events.send(DeployEvent::MaintenanceStarted { phase });
+    let output = |line| DeployEvent::MaintenanceOutput { phase, line };
+    let Some(result) = follow(
+        transport,
+        preview,
+        key,
+        command,
+        events,
+        if detachable { Some(detach) } else { None },
+        output,
+    )
+    .await
+    else {
+        let _ = events.send(DeployEvent::MaintenanceFinished {
+            phase,
+            status: StepStatus::Unknown,
+            exit_code: None,
+        });
+        return None;
+    };
+    let (status, exit_code) = match &result {
+        StepResult::Exited(0) => (StepStatus::Ok, Some(0)),
+        StepResult::Exited(code) => (StepStatus::Failed, Some(*code)),
+        StepResult::NotStarted(_) => (StepStatus::NotStarted, None),
+        StepResult::Gone => (StepStatus::Unknown, None),
+        StepResult::Interrupted(_) => (StepStatus::Unknown, None),
+    };
+    let _ = events.send(DeployEvent::MaintenanceFinished {
+        phase,
+        status,
+        exit_code,
+    });
+    Some(result)
 }
 
 /// The outcome of stopping before step `index` starts.
@@ -484,7 +718,7 @@ fn recipe_hash(target: &DeployTarget) -> String {
     for part in [&target.env, &target.ssh_alias, &target.path, &target.branch] {
         field(part.as_bytes());
     }
-    field(&[target.production as u8]);
+    field(&[target.production as u8, target.maintenance as u8]);
     for step in &target.steps {
         field(step.as_bytes());
     }
@@ -522,7 +756,7 @@ mod tests {
     struct Fake {
         rules: Vec<Rule>,
         ran: Mutex<Vec<String>>,
-        launched: Mutex<HashMap<usize, usize>>,
+        launched: Mutex<HashMap<String, usize>>,
         reconnect_fails: bool,
         reconnects: AtomicUsize,
         lock: Mutex<LockSim>,
@@ -637,6 +871,19 @@ mod tests {
             .find(|c: char| !c.is_ascii_digit())
             .unwrap_or(rest.len());
         rest[..end].parse().unwrap()
+    }
+
+    fn runner_key(script: &str) -> String {
+        let start = script
+            .find("/step-")
+            .or_else(|| script.find("/maintenance-"))
+            .unwrap_or_else(|| panic!("no runner key in script:\n{script}"))
+            + 1;
+        let rest = &script[start..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .unwrap_or(rest.len());
+        rest[..end].to_string()
     }
 
     impl Fake {
@@ -802,10 +1049,10 @@ mod tests {
         }
 
         fn launch_step(&self, script: &str) -> Result<i32, TransportError> {
-            let index = number_after(script, "step-");
+            let key = runner_key(script);
             let rule = self.matching(script);
             let mut launched = self.launched.lock().unwrap();
-            if launched.contains_key(&index) {
+            if launched.contains_key(&key) {
                 return Ok(1);
             }
             match self.rules[rule].launch {
@@ -813,11 +1060,11 @@ mod tests {
                 Launch::LostBeforeStart => return Err(lost()),
                 Launch::Ok | Launch::LostAfterStart => {}
             }
-            launched.insert(index, rule);
+            launched.insert(key.clone(), rule);
             let mut server = self.server.lock().unwrap();
-            match (index, self.rules[rule].code) {
-                (0, 0) => server.head = server.target.clone(),
-                (0, _) if server.ff_fails_partially => server.dirty = vec![" M file".into()],
+            match (key.as_str(), self.rules[rule].code) {
+                ("step-0", 0) => server.head = server.target.clone(),
+                ("step-0", _) if server.ff_fails_partially => server.dirty = vec![" M file".into()],
                 _ => {}
             }
             match self.rules[rule].launch {
@@ -831,9 +1078,9 @@ mod tests {
             script: &str,
             output: &mpsc::UnboundedSender<String>,
         ) -> Result<i32, TransportError> {
-            let index = number_after(script, "step-");
+            let key = runner_key(script);
             let skip = number_after(script, "tail -n +") - 1;
-            let Some(&rule) = self.launched.lock().unwrap().get(&index) else {
+            let Some(&rule) = self.launched.lock().unwrap().get(&key) else {
                 return Ok(1);
             };
             let rule = &self.rules[rule];
@@ -858,8 +1105,8 @@ mod tests {
         }
 
         fn probe(&self, script: &str) -> String {
-            let index = number_after(script, "step-");
-            match self.launched.lock().unwrap().get(&index) {
+            let key = runner_key(script);
+            match self.launched.lock().unwrap().get(&key) {
                 None => "not-started".into(),
                 Some(&rule) if self.rules[rule].vanishes => "gone".into(),
                 Some(&rule) => format!("exited {}", self.rules[rule].code),
@@ -891,7 +1138,7 @@ mod tests {
                 Ok(0)
             } else if script.contains("@head") {
                 let server = self.server.lock().unwrap();
-                if server.inspect_fails && self.launched.lock().unwrap().contains_key(&0) {
+                if server.inspect_fails && self.launched.lock().unwrap().contains_key("step-0") {
                     return Err(lost());
                 }
                 for line in server.state_lines() {
@@ -924,6 +1171,14 @@ mod tests {
             path: "/var/www/app".into(),
             branch: "main".into(),
             steps: steps.iter().map(|s| s.to_string()).collect(),
+            maintenance: false,
+        }
+    }
+
+    fn maintenance_target(production: bool, steps: &[&str]) -> DeployTarget {
+        DeployTarget {
+            maintenance: true,
+            ..target(production, steps)
         }
     }
 
@@ -1112,6 +1367,229 @@ mod tests {
         let c = Confirmation::from(&p, None).unwrap();
         let (rx, _h) = execute(p, c, fake.clone()).unwrap();
         collect(rx).await
+    }
+
+    async fn deploy_target(fake: &Arc<Fake>, target: DeployTarget) -> Vec<DeployEvent> {
+        let p = prepare(target, &**fake).await.unwrap();
+        let c = Confirmation::from(&p, None).unwrap();
+        let (rx, _h) = execute(p, c, fake.clone()).unwrap();
+        collect(rx).await
+    }
+
+    #[tokio::test]
+    async fn maintenance_runs_down_before_deploy_and_up_after_success() {
+        let fake = Arc::new(
+            preflight()
+                .on("php artisan down", &["down output"], 0)
+                .on("git merge --ff-only", &[], 0)
+                .on("deploy command", &[], 0)
+                .on("php artisan up", &["up output"], 0),
+        );
+        let events = deploy_target(&fake, maintenance_target(false, &["deploy command"])).await;
+
+        let down = events
+            .iter()
+            .position(|e| {
+                *e == DeployEvent::MaintenanceStarted {
+                    phase: MaintenancePhase::Down,
+                }
+            })
+            .unwrap();
+        let merge = events
+            .iter()
+            .position(|e| matches!(e, DeployEvent::StepStarted { index: 0, .. }))
+            .unwrap();
+        let up = events
+            .iter()
+            .position(|e| {
+                *e == DeployEvent::MaintenanceStarted {
+                    phase: MaintenancePhase::Up,
+                }
+            })
+            .unwrap();
+        assert!(down < merge && merge < up);
+        assert!(events.contains(&DeployEvent::MaintenanceOutput {
+            phase: MaintenancePhase::Down,
+            line: "down output".into(),
+        }));
+        assert!(events.contains(&DeployEvent::MaintenanceOutput {
+            phase: MaintenancePhase::Up,
+            line: "up output".into(),
+        }));
+        assert!(!events.contains(&DeployEvent::AppLeftDown));
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_down_failure_aborts_before_fast_forward() {
+        let fake = Arc::new(preflight().on("php artisan down", &["down failed"], 9).on(
+            "git merge --ff-only",
+            &[],
+            0,
+        ));
+        let events = deploy_target(&fake, maintenance_target(false, &[])).await;
+
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
+                AbortReason::MaintenanceDownFailed(9)
+            )))
+        );
+        assert_eq!(fake.launched("git merge --ff-only"), 0);
+        assert!(!events.contains(&DeployEvent::AppLeftDown));
+    }
+
+    #[tokio::test]
+    async fn stopping_during_maintenance_down_skips_fast_forward() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(preflight().gated("php artisan down", gate.clone()).on(
+            "git merge --ff-only",
+            &[],
+            0,
+        ));
+        let p = prepare(maintenance_target(false, &[]), &*fake)
+            .await
+            .unwrap();
+        let c = Confirmation::from(&p, None).unwrap();
+        let (mut rx, handle) = execute(p, c, fake.clone()).unwrap();
+
+        while rx.recv().await
+            != Some(DeployEvent::MaintenanceStarted {
+                phase: MaintenancePhase::Down,
+            })
+        {}
+        handle.stop_after_step();
+        gate.notify_one();
+        let events = collect(rx).await;
+
+        assert_eq!(fake.launched("git merge --ff-only"), 0);
+        assert!(events.contains(&DeployEvent::AppLeftDown));
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(
+                DeployOutcome::CancelledBeforeChanges
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_deploy_leaves_maintenance_mode_on() {
+        let fake = Arc::new(
+            preflight()
+                .on("php artisan down", &[], 0)
+                .on("git merge --ff-only", &[], 0)
+                .on("deploy command", &[], 1),
+        );
+        let events = deploy_target(&fake, maintenance_target(false, &["deploy command"])).await;
+
+        assert!(events.contains(&DeployEvent::AppLeftDown));
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                step: 1,
+                partial_update: false,
+            }))
+        );
+        assert_eq!(fake.launched("php artisan up"), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_maintenance_up_keeps_successful_deploy_outcome() {
+        let fake = Arc::new(
+            preflight()
+                .on("php artisan down", &[], 0)
+                .on("git merge --ff-only", &[], 0)
+                .on("deploy command", &[], 0)
+                .on("php artisan up", &[], 7),
+        );
+        let events = deploy_target(&fake, maintenance_target(false, &["deploy command"])).await;
+
+        assert!(events.contains(&DeployEvent::MaintenanceFinished {
+            phase: MaintenancePhase::Up,
+            status: StepStatus::Failed,
+            exit_code: Some(7),
+        }));
+        assert!(events.contains(&DeployEvent::AppLeftDown));
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+    }
+
+    #[tokio::test]
+    async fn maintenance_disabled_skips_artisan_commands() {
+        let fake = Arc::new(preflight().on("git merge --ff-only", &[], 0).on(
+            "deploy command",
+            &[],
+            0,
+        ));
+        let events = deploy_target(&fake, target(false, &["deploy command"])).await;
+
+        assert_eq!(fake.ran_matching("php artisan"), 0);
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            DeployEvent::MaintenanceStarted { .. }
+                | DeployEvent::MaintenanceOutput { .. }
+                | DeployEvent::MaintenanceFinished { .. }
+                | DeployEvent::AppLeftDown
+        )));
+    }
+
+    #[tokio::test]
+    async fn bring_app_up_runs_under_the_lock_and_releases_it() {
+        let fake = preflight().on("php artisan up", &["back up"], 0);
+        let target = target(false, &[]);
+        let output = bring_app_up(&target, &fake).await.unwrap();
+        assert_eq!(output, ["back up"]);
+        assert_eq!(fake.lock_owner(), None);
+        assert_eq!(fake.launched("php artisan up"), 1);
+    }
+
+    #[tokio::test]
+    async fn bring_app_up_refuses_to_run_while_a_deploy_holds_the_lock() {
+        let fake = preflight().locked_by_other(false);
+        let err = bring_app_up(&target(false, &[]), &fake).await.unwrap_err();
+        assert!(matches!(err, BringUpError::LockHeld(_)));
+        assert_eq!(fake.ran_matching("php artisan up"), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bring_app_up_keeps_the_lock_when_its_result_is_unknown() {
+        let fake = preflight()
+            .drops("php artisan up", &[], 0, 0)
+            .unreachable_after_drop();
+        let error = bring_app_up(&target(false, &[]), &fake).await.unwrap_err();
+
+        assert!(matches!(error, BringUpError::Interrupted(_)));
+        assert!(fake.lock_owner().is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interrupted_maintenance_up_does_not_claim_the_app_is_down() {
+        let fake = Arc::new(
+            preflight()
+                .on("php artisan down", &[], 0)
+                .on("git merge --ff-only", &[], 0)
+                .on("deploy command", &[], 0)
+                .drops("php artisan up", &[], 0, 0)
+                .unreachable_after_drop(),
+        );
+        let events = deploy_target(&fake, maintenance_target(false, &["deploy command"])).await;
+
+        assert!(events.contains(&DeployEvent::MaintenanceFinished {
+            phase: MaintenancePhase::Up,
+            status: StepStatus::Unknown,
+            exit_code: None,
+        }));
+        assert!(!events.contains(&DeployEvent::AppLeftDown));
+        assert!(matches!(
+            events.last(),
+            Some(DeployEvent::Interrupted { index: 2, .. })
+        ));
+        assert!(fake.lock_owner().is_some());
     }
 
     fn output(events: &[DeployEvent], step: usize) -> Vec<&str> {
