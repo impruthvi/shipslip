@@ -5,6 +5,7 @@ use std::error::Error as StdError;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use openssh::{Error, KnownHosts, Session, SessionBuilder, Stdio};
@@ -14,12 +15,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::{Transport, TransportError};
 
 /// A connection to one server. Dropping it closes the master connection.
-///
-/// Known gap: a script is not guaranteed to keep running once its `run`
-/// future is dropped (detach), until steps run detached on the server.
 #[derive(Debug)]
 pub struct SshTransport {
-    session: Session,
+    alias: String,
+    config_file: Option<PathBuf>,
+    session: Mutex<Arc<Session>>,
 }
 
 impl SshTransport {
@@ -37,23 +37,34 @@ impl SshTransport {
     }
 
     async fn open(alias: &str, config_file: Option<&Path>) -> Result<Self, TransportError> {
-        if alias.is_empty() || alias.starts_with('-') {
-            return Err(TransportError::Connect(format!(
-                "invalid ssh alias `{alias}`"
-            )));
-        }
-        let mut builder = SessionBuilder::default();
-        builder
-            .known_hosts_check(KnownHosts::Strict)
-            .connect_timeout(Duration::from_secs(15))
-            .server_alive_interval(Duration::from_secs(15))
-            .control_directory(control_dir().map_err(connect_error)?);
-        if let Some(path) = config_file {
-            builder.config_file(path);
-        }
-        let session = builder.connect_mux(alias).await.map_err(connect_error)?;
-        Ok(Self { session })
+        let session = connect_session(alias, config_file).await?;
+        Ok(Self {
+            alias: alias.to_string(),
+            config_file: config_file.map(Path::to_path_buf),
+            session: Mutex::new(Arc::new(session)),
+        })
     }
+}
+
+async fn connect_session(
+    alias: &str,
+    config_file: Option<&Path>,
+) -> Result<Session, TransportError> {
+    if alias.is_empty() || alias.starts_with('-') {
+        return Err(TransportError::Connect(format!(
+            "invalid ssh alias `{alias}`"
+        )));
+    }
+    let mut builder = SessionBuilder::default();
+    builder
+        .known_hosts_check(KnownHosts::Strict)
+        .connect_timeout(Duration::from_secs(15))
+        .server_alive_interval(Duration::from_secs(15))
+        .control_directory(control_dir().map_err(connect_error)?);
+    if let Some(path) = config_file {
+        builder.config_file(path);
+    }
+    builder.connect_mux(alias).await.map_err(connect_error)
 }
 
 impl Transport for SshTransport {
@@ -62,8 +73,8 @@ impl Transport for SshTransport {
         script: &str,
         output: UnboundedSender<String>,
     ) -> Result<i32, TransportError> {
-        let mut child = self
-            .session
+        let session = self.session.lock().unwrap().clone();
+        let mut child = session
             .command("bash")
             .args(["-l", "-s"])
             .stdin(Stdio::piped())
@@ -103,6 +114,12 @@ impl Transport for SshTransport {
             // tell that apart from a dropped connection.
             Err(e) => Err(lost(e)),
         }
+    }
+
+    async fn reconnect(&self) -> Result<(), TransportError> {
+        let session = connect_session(&self.alias, self.config_file.as_deref()).await?;
+        *self.session.lock().unwrap() = Arc::new(session);
+        Ok(())
     }
 }
 

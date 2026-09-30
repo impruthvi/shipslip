@@ -9,7 +9,10 @@ use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use shipslip::transport::{SshTransport, Transport, TransportError};
-use shipslip::{execute, prepare, Confirmation, DeployEvent, DeployOutcome, DeployTarget};
+use shipslip::{
+    execute, prepare, Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle,
+    StepStatus,
+};
 use tokio::sync::mpsc;
 
 const IMAGE: &str = "shipslip-test-sshd";
@@ -148,13 +151,17 @@ impl Server {
 
     /// Runs `script` as `deploy` inside the container, bypassing ssh.
     fn exec(&self, script: &str, stdin: &str) -> String {
+        self.exec_as("deploy", script, stdin)
+    }
+
+    fn exec_as(&self, user: &str, script: &str, stdin: &str) -> String {
         use std::io::Write;
         let mut child = Command::new("docker")
             .args([
                 "exec",
                 "-i",
                 "-u",
-                "deploy",
+                user,
                 &self.container,
                 "bash",
                 "-c",
@@ -216,6 +223,51 @@ async fn deploy(transport: Arc<SshTransport>, target: DeployTarget) -> Vec<Deplo
         events.push(event);
     }
     events
+}
+
+/// Starts a deploy and returns its events once `until` matches one.
+async fn deploy_until(
+    transport: Arc<SshTransport>,
+    target: DeployTarget,
+    until: impl Fn(&DeployEvent) -> bool,
+) -> (Vec<DeployEvent>, Running) {
+    let preview = prepare(target, &*transport).await.unwrap();
+    let run_id = preview.run_id().to_string();
+    let confirmation = Confirmation::from(&preview, None).unwrap();
+    let (mut rx, handle) = execute(preview, confirmation, transport).unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        let done = until(&event);
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    (events, Running { rx, handle, run_id })
+}
+
+struct Running {
+    rx: mpsc::UnboundedReceiver<DeployEvent>,
+    handle: ExecutionHandle,
+    run_id: String,
+}
+
+impl Running {
+    async fn rest(mut self, mut events: Vec<DeployEvent>) -> Vec<DeployEvent> {
+        let rx = &mut self.rx;
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while let Some(event) = rx.recv().await {
+                events.push(event);
+            }
+        })
+        .await
+        .expect("deploy did not finish");
+        events
+    }
+}
+
+fn is_output(line: &'static str) -> impl Fn(&DeployEvent) -> bool {
+    move |e| matches!(e, DeployEvent::Output { line: l, .. } if l == line)
 }
 
 fn step_output(events: &[DeployEvent], step: usize) -> Vec<&str> {
@@ -398,4 +450,134 @@ async fn missing_app_path_blocks_prepare() {
     let ssh = server.connect().await;
     let result = prepare(target("/home/deploy/missing", &[]), &ssh).await;
     assert!(result.is_err(), "{result:?}");
+}
+
+#[tokio::test]
+async fn step_survives_a_dropped_connection() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    let step = "echo before; sleep 2; echo after; exit 3";
+
+    let (events, running) = deploy_until(ssh, target(&path, &[step]), is_output("before")).await;
+    server.exec_as("root", "pkill -f 'sshd: deploy'", "");
+    let events = running.rest(events).await;
+
+    assert_eq!(step_output(&events, 1), ["before", "after"], "{events:#?}");
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::FailedAtStep(1)))
+    );
+    assert!(events.contains(&DeployEvent::StepFinished {
+        index: 1,
+        status: StepStatus::Failed,
+        exit_code: Some(3),
+    }));
+}
+
+#[tokio::test]
+async fn detached_step_keeps_running_on_the_server() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    let step = "echo started; sleep 1; echo ok > ~/marker";
+
+    let (events, running) = deploy_until(ssh, target(&path, &[step]), is_output("started")).await;
+    running.handle.detach();
+    let run_id = running.run_id.clone();
+    let events = running.rest(events).await;
+    assert_eq!(events.last(), Some(&DeployEvent::Detached { index: 1 }));
+
+    let exit_file = format!("~/.shipslip/runs/{run_id}/step-1/exit");
+    let result = server.exec(
+        &format!("for _ in $(seq 50); do [ -e {exit_file} ] && break; sleep 0.1; done; cat ~/marker {exit_file}"),
+        "",
+    );
+    assert_eq!(result, "ok\n0");
+}
+
+#[tokio::test]
+async fn killed_step_process_is_unknown() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+
+    let (events, running) = deploy_until(
+        ssh,
+        target(&path, &["echo started; sleep 30"]),
+        is_output("started"),
+    )
+    .await;
+    server.exec(
+        &format!(
+            "kill -9 -- -$(cat ~/.shipslip/runs/{}/step-1/pid)",
+            running.run_id
+        ),
+        "",
+    );
+    let events = running.rest(events).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(DeployEvent::Finished(DeployOutcome::Unknown {
+                step: 1,
+                ..
+            }))
+        ),
+        "{events:#?}"
+    );
+}
+
+#[tokio::test]
+async fn unreachable_server_mid_step_is_interrupted() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+
+    let (events, running) = deploy_until(
+        ssh,
+        target(&path, &["echo started; sleep 30"]),
+        is_output("started"),
+    )
+    .await;
+    docker(&["kill", &server.container]);
+    let events = running.rest(events).await;
+    assert!(
+        matches!(
+            events.last(),
+            Some(DeployEvent::Interrupted { index: 1, .. })
+        ),
+        "{events:#?}"
+    );
+    assert!(!events.iter().any(|e| matches!(e, DeployEvent::Finished(_))));
+}
+
+#[tokio::test]
+async fn run_files_are_private() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    let (events, running) = deploy_until(ssh, target(&path, &["true"]), |_| false).await;
+    let run_id = running.run_id.clone();
+    let events = running.rest(events).await;
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+
+    let modes = server.exec(
+        &format!(
+            "cd ~/.shipslip && stat -c '%a %F %n' . runs runs/{run_id} runs/{run_id}/step-1 runs/{run_id}/step-1/*"
+        ),
+        "",
+    );
+    assert_eq!(modes.lines().count(), 8, "{modes}");
+    for line in modes.lines() {
+        let expected = if line.contains(" directory ") {
+            "700"
+        } else {
+            "600"
+        };
+        assert!(line.starts_with(expected), "{line}");
+    }
 }

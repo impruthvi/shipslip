@@ -42,5 +42,11 @@ pub enum DeployEvent {
     Detached {
         index: usize,
     },
+    /// The server could not be reached again while step `index` was running.
+    /// No `Finished` event follows; the step may still be running there.
+    Interrupted {
+        index: usize,
+        reason: String,
+    },
     Finished(DeployOutcome),
 }
