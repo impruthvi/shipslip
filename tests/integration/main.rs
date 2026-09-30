@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{
-    break_lock, cancel, execute, prepare, AbortReason, BlockReason, BreakLockError, Confirmation,
-    DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle, PrepareError, StepStatus,
-    StopReason,
+    break_lock, bring_app_up, cancel, execute, prepare, AbortReason, BlockReason, BreakLockError,
+    BringUpError, Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle,
+    MaintenancePhase, PrepareError, StepStatus, StopReason,
 };
 use tokio::sync::mpsc;
 
@@ -230,6 +230,14 @@ fn target(path: &str, steps: &[&str]) -> DeployTarget {
         path: path.into(),
         branch: "main".into(),
         steps: steps.iter().map(|s| s.to_string()).collect(),
+        maintenance: false,
+    }
+}
+
+fn maintenance_target(path: &str, steps: &[&str]) -> DeployTarget {
+    DeployTarget {
+        maintenance: true,
+        ..target(path, steps)
     }
 }
 
@@ -835,4 +843,199 @@ async fn fast_forward_that_fails_partway_is_a_partial_update() {
         "{events:#?}"
     );
     assert!(!step_output(&events, 1).contains(&"never"));
+}
+
+#[tokio::test]
+async fn maintenance_mode_runs_around_a_successful_deploy() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+
+    let events = deploy(ssh, maintenance_target(&path, &["echo deployed"])).await;
+    let down = events
+        .iter()
+        .position(|event| {
+            *event
+                == DeployEvent::MaintenanceStarted {
+                    phase: MaintenancePhase::Down,
+                }
+        })
+        .unwrap();
+    let fast_forward = events
+        .iter()
+        .position(|event| matches!(event, DeployEvent::StepStarted { index: 0, .. }))
+        .unwrap();
+    let up = events
+        .iter()
+        .position(|event| {
+            *event
+                == DeployEvent::MaintenanceStarted {
+                    phase: MaintenancePhase::Up,
+                }
+        })
+        .unwrap();
+
+    assert!(down < fast_forward && fast_forward < up, "{events:#?}");
+    assert!(events.contains(&DeployEvent::MaintenanceOutput {
+        phase: MaintenancePhase::Down,
+        line: "down".into(),
+    }));
+    assert!(events.contains(&DeployEvent::MaintenanceOutput {
+        phase: MaintenancePhase::Up,
+        line: "up".into(),
+    }));
+    assert!(!events.contains(&DeployEvent::AppLeftDown));
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    assert_eq!(
+        server.exec(
+            &format!("test -e {path}/storage/framework/down && echo down || echo up"),
+            ""
+        ),
+        "up"
+    );
+}
+
+#[tokio::test]
+async fn failed_deploy_leaves_the_app_in_maintenance_mode() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+
+    let events = deploy(ssh, maintenance_target(&path, &["exit 8"])).await;
+    assert!(events.contains(&DeployEvent::AppLeftDown), "{events:#?}");
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::FailedAtStep {
+            step: 1,
+            partial_update: false,
+        }))
+    );
+    assert_eq!(
+        server.exec(
+            &format!("test -e {path}/storage/framework/down && echo down || echo up"),
+            ""
+        ),
+        "down"
+    );
+    assert!(!events.iter().any(|event| {
+        *event
+            == DeployEvent::MaintenanceStarted {
+                phase: MaintenancePhase::Up,
+            }
+    }));
+}
+
+#[tokio::test]
+async fn bring_app_up_restores_a_deploy_left_in_maintenance_mode() {
+    let server = Server::start().await;
+    let ssh = server.connect().await;
+    let path = server.app("app");
+    server.exec(&format!("cd {path} && php artisan down"), "");
+
+    let output = bring_app_up(&target(&path, &[]), &ssh).await.unwrap();
+    assert_eq!(output, ["up"]);
+    assert_eq!(
+        server.exec(
+            &format!("test -e {path}/storage/framework/down && echo down || echo up"),
+            ""
+        ),
+        "up"
+    );
+    assert!(!server.lock_exists(&path));
+}
+
+#[tokio::test]
+async fn bring_app_up_does_not_run_while_a_deploy_holds_the_lock() {
+    let server = Server::start().await;
+    let ssh = server.connect().await;
+    let path = server.app("app");
+    let preview = prepare(target(&path, &[]), &ssh).await.unwrap();
+
+    let error = bring_app_up(&target(&path, &[]), &ssh).await.unwrap_err();
+    assert!(matches!(error, BringUpError::LockHeld(_)));
+    assert_eq!(
+        server.exec(
+            "test -e ~/.shipslip-php-calls && cat ~/.shipslip-php-calls || true",
+            ""
+        ),
+        ""
+    );
+    cancel(preview, &ssh).await.unwrap();
+}
+
+#[tokio::test]
+async fn maintenance_down_failure_aborts_before_fast_forward() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    let from = server.exec(&format!("git -C {path} rev-parse HEAD"), "");
+    server.exec("touch ~/.shipslip-fail-down", "");
+
+    let events = deploy(ssh, maintenance_target(&path, &["echo never"])).await;
+    assert!(
+        events.contains(&DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
+            AbortReason::MaintenanceDownFailed(9)
+        )))
+    );
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, DeployEvent::StepStarted { index: 0, .. })));
+    assert_eq!(
+        server.exec(&format!("git -C {path} rev-parse HEAD"), ""),
+        from
+    );
+    assert!(!server.lock_exists(&path));
+}
+
+#[tokio::test]
+async fn maintenance_up_failure_keeps_deploy_success_and_reports_app_down() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    server.exec("touch ~/.shipslip-fail-up", "");
+
+    let events = deploy(ssh, maintenance_target(&path, &["echo deployed"])).await;
+    assert!(events.contains(&DeployEvent::MaintenanceFinished {
+        phase: MaintenancePhase::Up,
+        status: StepStatus::Failed,
+        exit_code: Some(7),
+    }));
+    assert!(events.contains(&DeployEvent::AppLeftDown));
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    assert_eq!(
+        server.exec(
+            &format!("test -e {path}/storage/framework/down && echo down || echo up"),
+            ""
+        ),
+        "down"
+    );
+}
+
+#[tokio::test]
+async fn maintenance_disabled_never_invokes_php() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+
+    let events = deploy(ssh, target(&path, &["echo deployed"])).await;
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        DeployEvent::MaintenanceStarted { .. }
+            | DeployEvent::MaintenanceOutput { .. }
+            | DeployEvent::MaintenanceFinished { .. }
+            | DeployEvent::AppLeftDown
+    )));
+    assert_eq!(
+        server.exec(
+            "test -e ~/.shipslip-php-calls && cat ~/.shipslip-php-calls || true",
+            ""
+        ),
+        ""
+    );
 }

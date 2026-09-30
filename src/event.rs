@@ -11,6 +11,13 @@ pub enum StepStatus {
     NotStarted,
 }
 
+/// `php artisan down` before step 0, or `php artisan up` after the last step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenancePhase {
+    Down,
+    Up,
+}
+
 /// Why a deploy stopped between steps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
@@ -72,6 +79,21 @@ pub enum DeployEvent {
         index: usize,
         reason: String,
     },
+    MaintenanceStarted {
+        phase: MaintenancePhase,
+    },
+    MaintenanceOutput {
+        phase: MaintenancePhase,
+        line: String,
+    },
+    MaintenanceFinished {
+        phase: MaintenancePhase,
+        status: StepStatus,
+        exit_code: Option<i32>,
+    },
+    /// Maintenance mode was switched on and is still on: the app is down
+    /// until someone brings it up. Sent before the final event.
+    AppLeftDown,
     /// The server's checkout after step 0 failed; `None` where it could not
     /// be read.
     ServerState {

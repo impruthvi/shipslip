@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$HOME/.shipslip-php-calls"
+[ "$1" = artisan ] || exit 2
+case "$2" in
+  down)
+    if [ -e "$HOME/.shipslip-fail-down" ]; then
+      echo 'down failed'
+      exit 9
+    fi
+    mkdir -p storage/framework
+    touch storage/framework/down
+    echo 'down'
+    ;;
+  up)
+    if [ -e "$HOME/.shipslip-fail-up" ]; then
+      echo 'up failed'
+      exit 7
+    fi
+    rm -f storage/framework/down
+    echo 'up'
+    ;;
+  *) exit 2 ;;
+esac

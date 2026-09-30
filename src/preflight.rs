@@ -73,6 +73,8 @@ pub enum AbortReason {
     },
     DirtyTree(Vec<String>),
     OperationInProgress(String),
+    /// `php artisan down` exited with this code.
+    MaintenanceDownFailed(i32),
     ConnectFailed(String),
     CheckFailed(String),
 }
@@ -86,6 +88,9 @@ impl fmt::Display for AbortReason {
             }
             Self::DirtyTree(files) => write!(f, "uncommitted changes: {}", files.join(", ")),
             Self::OperationInProgress(op) => write!(f, "git operation in progress ({op})"),
+            Self::MaintenanceDownFailed(code) => {
+                write!(f, "`php artisan down` exited with {code}")
+            }
             Self::ConnectFailed(reason) => write!(f, "could not reach the server: {reason}"),
             Self::CheckFailed(reason) => write!(f, "could not check the server: {reason}"),
         }
