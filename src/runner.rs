@@ -154,19 +154,59 @@ pub(crate) async fn run_step<T: Transport>(
         }
     }
 
+    follow_existing(transport, run_id, key, output, &mut reattaches).await
+}
+
+/// Observes a previously launched step without sending its command again.
+pub(crate) async fn attach_step<T: Transport>(
+    transport: &T,
+    run_id: &str,
+    key: &str,
+    output: &mpsc::UnboundedSender<String>,
+) -> StepResult {
+    let mut reattaches = 0;
+    loop {
+        let (result, lines) = run_collect(transport, &probe_script(run_id, key)).await;
+        if let Err(reason) = reconnect_if_lost(transport, &result, &mut reattaches).await {
+            return StepResult::Interrupted(reason);
+        }
+        if result.is_err() {
+            continue;
+        }
+        match parse_probe(&lines) {
+            Some(Probe::NotStarted) => {
+                return StepResult::NotStarted(
+                    "the step was not launched before Shipslip exited".into(),
+                )
+            }
+            Some(Probe::Gone) => return StepResult::Gone,
+            Some(Probe::Running | Probe::Exited(_)) => break,
+            None => return unexpected(&lines),
+        }
+    }
+    follow_existing(transport, run_id, key, output, &mut reattaches).await
+}
+
+async fn follow_existing<T: Transport>(
+    transport: &T,
+    run_id: &str,
+    key: &str,
+    output: &mpsc::UnboundedSender<String>,
+    reattaches: &mut usize,
+) -> StepResult {
     // After a reconnect, observe again before probing so output written
     // while disconnected is still shown.
     let mut seen = 0;
     loop {
         let observed = observe(transport, run_id, key, &mut seen, output).await;
-        if let Err(reason) = reconnect_if_lost(transport, &observed, &mut reattaches).await {
+        if let Err(reason) = reconnect_if_lost(transport, &observed, reattaches).await {
             return StepResult::Interrupted(reason);
         }
         if observed.is_err() {
             continue;
         }
         let (result, lines) = run_collect(transport, &probe_script(run_id, key)).await;
-        if let Err(reason) = reconnect_if_lost(transport, &result, &mut reattaches).await {
+        if let Err(reason) = reconnect_if_lost(transport, &result, reattaches).await {
             return StepResult::Interrupted(reason);
         }
         if result.is_err() {
@@ -177,8 +217,8 @@ pub(crate) async fn run_step<T: Transport>(
             Some(Probe::Gone) => return StepResult::Gone,
             // The observer returns only once the step's process has ended.
             Some(Probe::Running | Probe::NotStarted) => {
-                reattaches += 1;
-                if reattaches > MAX_REATTACHES {
+                *reattaches += 1;
+                if *reattaches > MAX_REATTACHES {
                     return StepResult::Interrupted("could not follow the step's output".into());
                 }
             }

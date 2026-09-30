@@ -4,18 +4,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
 use crate::event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason};
 use crate::lock::{self, Acquire, Break, LockInfo, LockOwner};
 use crate::preflight::{self, AbortReason, BlockReason, State};
+use crate::receipt::{Receipt, ReceiptJournal, ReceiptPhase, ReceiptStatus, ReceiptStepStatus};
 use crate::runner::{self, run_collect, StepResult};
 use crate::script::{is_full_sha, is_safe_branch, wrap_step};
 use crate::transport::{Transport, TransportError};
 
 /// One environment of one project, as resolved from config.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeployTarget {
     pub env: String,
     pub production: bool,
@@ -31,7 +33,7 @@ pub struct DeployTarget {
 
 /// Which part of the configured recipe to run after its commit is deployed.
 /// Recipe steps are numbered from 1; step 0 is the built-in Git fast-forward.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunPlan {
     Deploy,
     /// Run all recipe steps against the already-checked-out target commit.
@@ -156,6 +158,10 @@ impl Confirmation {
 pub enum ExecuteError {
     #[error("confirmation does not match this preview")]
     ConfirmationMismatch,
+    #[error("receipt does not match this preview")]
+    ReceiptMismatch,
+    #[error("could not save the receipt: {0}")]
+    Receipt(String),
 }
 
 /// Controls for a running deploy.
@@ -393,8 +399,46 @@ pub fn execute<T: Transport>(
     confirmation: Confirmation,
     transport: Arc<T>,
 ) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteError> {
+    execute_inner(preview, confirmation, transport, None)
+}
+
+/// Executes a confirmed run while journaling each mutation before it starts.
+pub fn execute_recorded<T: Transport>(
+    preview: Preview,
+    confirmation: Confirmation,
+    transport: Arc<T>,
+    journal: Arc<ReceiptJournal>,
+) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteError> {
+    execute_inner(preview, confirmation, transport, Some(journal))
+}
+
+fn execute_inner<T: Transport>(
+    preview: Preview,
+    confirmation: Confirmation,
+    transport: Arc<T>,
+    journal: Option<Arc<ReceiptJournal>>,
+) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteError> {
     if !confirmation.matches(&preview) {
         return Err(ExecuteError::ConfirmationMismatch);
+    }
+    if let Some(journal) = &journal {
+        let receipt = journal.snapshot();
+        if receipt.run_id != preview.run_id
+            || receipt.recipe_hash != preview.recipe_hash
+            || receipt.target != preview.target
+            || receipt.run_plan != preview.run_plan
+            || receipt.from_sha != preview.from_sha
+            || receipt.target_sha != preview.target_sha
+            || receipt.status != ReceiptStatus::InProgress
+            || receipt.phase != ReceiptPhase::Preview
+            || receipt.mutation_started
+            || receipt.outcome.is_some()
+        {
+            return Err(ExecuteError::ReceiptMismatch);
+        }
+        journal
+            .confirm()
+            .map_err(|error| ExecuteError::Receipt(error.to_string()))?;
     }
 
     let (events, rx) = mpsc::unbounded_channel();
@@ -405,8 +449,187 @@ pub fn execute<T: Transport>(
     };
     let stop = handle.stop.clone();
 
-    tokio::spawn(run_steps(preview, transport, events, stop, detach_rx));
+    tokio::spawn(run_steps(
+        preview, transport, events, stop, detach_rx, journal, None,
+    ));
     Ok((rx, handle))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AttachError {
+    #[error("the receipt is already final")]
+    Final,
+    #[error("the receipt is invalid: {0}")]
+    Invalid(String),
+    #[error("could not update the receipt: {0}")]
+    Receipt(String),
+}
+
+/// Resumes observation of an unfinished run; an active step is never launched again.
+pub fn attach<T: Transport>(
+    journal: Arc<ReceiptJournal>,
+    transport: Arc<T>,
+) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), AttachError> {
+    journal
+        .claim()
+        .map_err(|error| AttachError::Receipt(error.to_string()))?;
+    let receipt = journal.snapshot();
+    if receipt.status != ReceiptStatus::InProgress {
+        return Err(AttachError::Final);
+    }
+    if receipt.mutation_started && !receipt.confirmed {
+        return Err(AttachError::Invalid(
+            "mutation began without confirmation".into(),
+        ));
+    }
+    if !is_full_sha(&receipt.from_sha)
+        || !is_full_sha(&receipt.target_sha)
+        || recipe_hash(&receipt.target, receipt.run_plan) != receipt.recipe_hash
+    {
+        return Err(AttachError::Invalid(
+            "the saved deploy plan is inconsistent".into(),
+        ));
+    }
+    validate_receipt_plan(&receipt).map_err(AttachError::Invalid)?;
+    let preview = Preview {
+        target: receipt.target.clone(),
+        from_sha: receipt.from_sha.clone(),
+        target_sha: receipt.target_sha.clone(),
+        commits: receipt.commits.clone(),
+        recipe_hash: receipt.recipe_hash.clone(),
+        run_plan: receipt.run_plan,
+        run_id: receipt.run_id.clone(),
+    };
+    journal
+        .set_owner_pid(std::process::id())
+        .map_err(|error| AttachError::Receipt(error.to_string()))?;
+    let (events, rx) = mpsc::unbounded_channel();
+    let (detach_tx, detach_rx) = watch::channel(false);
+    let handle = ExecutionHandle {
+        stop: Arc::new(AtomicBool::new(false)),
+        detach: detach_tx,
+    };
+    let stop = handle.stop.clone();
+    tokio::spawn(run_steps(
+        preview,
+        transport,
+        events,
+        stop,
+        detach_rx,
+        Some(journal),
+        Some(receipt),
+    ));
+    Ok((rx, handle))
+}
+
+fn validate_receipt_plan(receipt: &Receipt) -> Result<(), String> {
+    let first = match receipt.run_plan {
+        RunPlan::Deploy | RunPlan::Rerun => 1,
+        RunPlan::FromStep(step) if step > 0 && step <= receipt.target.steps.len() => step,
+        RunPlan::FromStep(_) => return Err("invalid saved recipe step".into()),
+    };
+    if receipt.run_plan == RunPlan::Rerun && receipt.target.steps.is_empty() {
+        return Err("saved rerun has no recipe steps".into());
+    }
+    let expected_len =
+        receipt.target.steps.len() + usize::from(receipt.run_plan == RunPlan::Deploy);
+    if receipt.steps.len() != expected_len {
+        return Err("saved step list does not match the plan".into());
+    }
+    for (position, step) in receipt.steps.iter().enumerate() {
+        let expected_index = if receipt.run_plan == RunPlan::Deploy {
+            position
+        } else {
+            position + 1
+        };
+        let expected_command = if expected_index == 0 {
+            format!("git merge --ff-only {}", receipt.target_sha)
+        } else {
+            receipt.target.steps[expected_index - 1].clone()
+        };
+        if step.index != expected_index || step.command != expected_command {
+            return Err("saved step list does not match the plan".into());
+        }
+        if expected_index > 0 && expected_index < first && step.status != ReceiptStepStatus::Skipped
+        {
+            return Err("saved skipped steps are inconsistent".into());
+        }
+        if expected_index >= first && step.status == ReceiptStepStatus::Skipped {
+            return Err("saved step status is inconsistent".into());
+        }
+    }
+    let mut before_next = true;
+    for step in receipt
+        .steps
+        .iter()
+        .filter(|step| step.status != ReceiptStepStatus::Skipped)
+    {
+        match step.status {
+            ReceiptStepStatus::Ok if before_next => {}
+            ReceiptStepStatus::Ok => return Err("saved completed steps are out of order".into()),
+            ReceiptStepStatus::Pending => before_next = false,
+            ReceiptStepStatus::Running
+            | ReceiptStepStatus::Failed
+            | ReceiptStepStatus::Unknown
+            | ReceiptStepStatus::NotStarted => {
+                if !before_next {
+                    return Err("saved step statuses are out of order".into());
+                }
+                before_next = false;
+            }
+            ReceiptStepStatus::Skipped => unreachable!(),
+        }
+    }
+    let running = receipt
+        .steps
+        .iter()
+        .filter(|step| step.status == ReceiptStepStatus::Running)
+        .count();
+    match receipt.phase {
+        ReceiptPhase::Preview
+            if !receipt.mutation_started
+                && running == 0
+                && receipt.steps.iter().all(|step| {
+                    matches!(
+                        step.status,
+                        ReceiptStepStatus::Pending | ReceiptStepStatus::Skipped
+                    )
+                }) => {}
+        ReceiptPhase::MaintenanceDown
+            if receipt.target.maintenance
+                && receipt.mutation_started
+                && running == 0
+                && receipt.maintenance_down_status.is_none()
+                && receipt.steps.iter().all(|step| {
+                    matches!(
+                        step.status,
+                        ReceiptStepStatus::Pending | ReceiptStepStatus::Skipped
+                    )
+                }) => {}
+        ReceiptPhase::Step(index)
+            if receipt.mutation_started
+                && running == 1
+                && (!receipt.target.maintenance
+                    || receipt.maintenance_down_status == Some(StepStatus::Ok))
+                && receipt.steps.iter().any(|step| {
+                    step.index == index && step.status == ReceiptStepStatus::Running
+                }) => {}
+        ReceiptPhase::MaintenanceUp
+            if receipt.target.maintenance
+                && receipt.mutation_started
+                && receipt.app_left_down
+                && running == 0
+                && receipt.maintenance_up_status.is_none()
+                && receipt.steps.iter().all(|step| {
+                    matches!(
+                        step.status,
+                        ReceiptStepStatus::Ok | ReceiptStepStatus::Skipped
+                    )
+                }) => {}
+        ReceiptPhase::BetweenSteps if receipt.mutation_started && running == 0 => {}
+        _ => return Err("saved phase does not match step status".into()),
+    }
+    Ok(())
 }
 
 /// How a run ends: with an outcome, or leaving a command on the server.
@@ -422,6 +645,8 @@ async fn run_steps<T: Transport>(
     events: mpsc::UnboundedSender<DeployEvent>,
     stop: Arc<AtomicBool>,
     detach: watch::Receiver<bool>,
+    journal: Option<Arc<ReceiptJournal>>,
+    resume: Option<Receipt>,
 ) {
     let (path, run_id) = (&preview.target.path, &preview.run_id);
     let heartbeat = async {
@@ -430,9 +655,9 @@ async fn run_steps<T: Transport>(
             lock::heartbeat(&*transport, path, run_id).await;
         }
     };
-    let mut app_down = false;
+    let mut app_down = resume.as_ref().is_some_and(|receipt| receipt.app_left_down);
     let end = tokio::select! {
-        end = run_steps_locked(&preview, &*transport, &events, &stop, detach, &mut app_down) => end,
+        end = run_steps_locked(&preview, &*transport, &events, &stop, detach, &mut app_down, journal.as_deref(), resume.as_ref()) => end,
         () = heartbeat => unreachable!("heartbeat never ends"),
     };
     if app_down {
@@ -440,21 +665,61 @@ async fn run_steps<T: Transport>(
     }
     let event = match end {
         End::Finished(outcome) => {
+            if let Some(journal) = &journal {
+                if let Err(error) = journal.record_outcome(outcome.clone()) {
+                    let _ = events.send(DeployEvent::Interrupted {
+                        index: preview.target.steps.len() + 1,
+                        reason: format!("could not save the outcome: {error}"),
+                    });
+                    return;
+                }
+            }
             // After an unknown outcome the server's state needs checking
             // first, so the lock is kept and goes stale.
             if !matches!(outcome, DeployOutcome::Unknown { .. }) {
-                let _ = lock::release(&*transport, path, run_id).await;
+                if let Err(error) = lock::release(&*transport, path, run_id).await {
+                    if journal.is_some() {
+                        let _ = events.send(DeployEvent::Interrupted {
+                            index: preview.target.steps.len() + 1,
+                            reason: format!("could not release deploy lock: {error}"),
+                        });
+                        return;
+                    }
+                }
+            }
+            if let Some(journal) = &journal {
+                if let Err(error) = journal.finish(outcome.clone()) {
+                    let _ = events.send(DeployEvent::Interrupted {
+                        index: preview.target.steps.len() + 1,
+                        reason: format!("could not finalize the receipt: {error}"),
+                    });
+                    return;
+                }
             }
             DeployEvent::Finished(outcome)
         }
-        End::Detached(index) => DeployEvent::Detached { index },
-        End::Interrupted { index, reason } => DeployEvent::Interrupted { index, reason },
+        End::Detached(index) => {
+            if let Some(journal) = &journal {
+                let _ = journal.message(format!("detached while observing step {index}"));
+            }
+            DeployEvent::Detached { index }
+        }
+        End::Interrupted { index, reason } => {
+            if let Some(journal) = &journal {
+                let _ = journal.message(reason.clone());
+            }
+            DeployEvent::Interrupted { index, reason }
+        }
     };
+    // A caller may attach as soon as it receives Detached or Interrupted.
+    // Release the local claim before reporting that the observer has stopped.
+    drop(journal);
     let _ = events.send(event);
 }
 
 /// Runs maintenance down, the steps, and maintenance up. `app_down` is left
 /// set if maintenance mode may still be on.
+#[allow(clippy::too_many_arguments)]
 async fn run_steps_locked<T: Transport>(
     preview: &Preview,
     transport: &T,
@@ -462,6 +727,8 @@ async fn run_steps_locked<T: Transport>(
     stop: &AtomicBool,
     mut detach: watch::Receiver<bool>,
     app_down: &mut bool,
+    journal: Option<&ReceiptJournal>,
+    resume: Option<&Receipt>,
 ) -> End {
     let path = &preview.target.path;
     let first_recipe_step = preview.run_plan.first_recipe_step();
@@ -486,7 +753,89 @@ async fn run_steps_locked<T: Transport>(
     );
     let first_index = steps.first().map(|(index, _, _)| *index).unwrap_or(0);
 
+    if let Some(receipt) = resume {
+        if let Some(outcome) = &receipt.outcome {
+            return End::Finished(outcome.clone());
+        }
+        if !receipt.mutation_started {
+            return End::Finished(DeployOutcome::CancelledBeforeChanges);
+        }
+        if let Some(status) = &receipt.maintenance_down_status {
+            match status {
+                StepStatus::Failed => {
+                    return End::Finished(DeployOutcome::AbortedBeforeChanges(
+                        AbortReason::MaintenanceDownFailed(
+                            receipt.maintenance_down_exit_code.unwrap_or(-1),
+                        ),
+                    ));
+                }
+                StepStatus::Unknown => {
+                    return End::Finished(DeployOutcome::Unknown {
+                        step: 0,
+                        reason: "maintenance down ended without a known result".into(),
+                    });
+                }
+                StepStatus::NotStarted => {
+                    return End::Finished(DeployOutcome::AbortedBeforeChanges(
+                        AbortReason::ConnectFailed("maintenance down was not started".into()),
+                    ));
+                }
+                StepStatus::Ok => {}
+            }
+        }
+        if let Some(step) = receipt.steps.iter().find(|step| {
+            matches!(
+                step.status,
+                ReceiptStepStatus::Failed
+                    | ReceiptStepStatus::Unknown
+                    | ReceiptStepStatus::NotStarted
+            )
+        }) {
+            return End::Finished(match step.status {
+                ReceiptStepStatus::Failed => DeployOutcome::FailedAtStep {
+                    step: step.index,
+                    partial_update: step.index == 0
+                        && (receipt.server_head_at_end.as_deref() != Some(&receipt.from_sha)
+                            || receipt.tree_dirty != Some(false)),
+                },
+                ReceiptStepStatus::Unknown => DeployOutcome::Unknown {
+                    step: step.index,
+                    reason: "the step ended without a known result".into(),
+                },
+                ReceiptStepStatus::NotStarted => stopped_before_plan(
+                    step.index,
+                    first_index,
+                    preview.run_plan,
+                    StopReason::ConnectFailed("the step was not started".into()),
+                ),
+                _ => unreachable!(),
+            });
+        }
+        if let Some(status) = &receipt.maintenance_up_status {
+            return End::Finished(match status {
+                StepStatus::Unknown => DeployOutcome::Unknown {
+                    step: preview.target.steps.len() + 1,
+                    reason: "maintenance up ended without a known result".into(),
+                },
+                StepStatus::Ok | StepStatus::Failed | StepStatus::NotStarted => {
+                    DeployOutcome::Succeeded
+                }
+            });
+        }
+    }
+
     for (index, name, body) in steps {
+        if resume.is_some_and(|receipt| {
+            receipt
+                .steps
+                .iter()
+                .any(|step| step.index == index && step.status == ReceiptStepStatus::Ok)
+        }) {
+            continue;
+        }
+        let active_step = resume.is_some_and(|receipt| receipt.phase == ReceiptPhase::Step(index));
+        let active_down = index == first_index
+            && resume.is_some_and(|receipt| receipt.phase == ReceiptPhase::MaintenanceDown);
         // Detaching between steps leaves nothing running, so it is a stop.
         if stop.load(Ordering::SeqCst) || *detach.borrow() {
             return End::Finished(stopped_before_plan(
@@ -496,7 +845,11 @@ async fn run_steps_locked<T: Transport>(
                 StopReason::Requested,
             ));
         }
-        match lock_owned(transport, path, &preview.run_id).await {
+        match if active_step || active_down {
+            Ok(true)
+        } else {
+            lock_owned(transport, path, &preview.run_id).await
+        } {
             Ok(true) => {}
             Ok(false) => {
                 return End::Finished(stopped_before_plan(
@@ -515,15 +868,54 @@ async fn run_steps_locked<T: Transport>(
                 ))
             }
         }
-        if index == first_index {
-            let changed = match read_state(transport, path).await {
-                Ok(state) => preflight::recheck(&state, &preview.from_sha),
-                Err(reason) => Some(reason),
-            };
-            if let Some(reason) = changed {
-                return End::Finished(DeployOutcome::AbortedBeforeChanges(reason));
+        if !active_step
+            && resume.is_some_and(|receipt| {
+                preview.run_plan == RunPlan::Deploy
+                    && index == 1
+                    && receipt
+                        .steps
+                        .iter()
+                        .any(|step| step.index == 0 && step.status == ReceiptStepStatus::Ok)
+            })
+        {
+            match read_state(transport, path).await {
+                Ok(state) if state.head == preview.target_sha && state.dirty.is_empty() => {}
+                Ok(_) => {
+                    return End::Finished(DeployOutcome::Unknown {
+                        step: 0,
+                        reason: "checkout changed after the recorded fast-forward".into(),
+                    });
+                }
+                Err(reason) => {
+                    return End::Interrupted {
+                        index,
+                        reason: format!("could not verify checkout after fast-forward: {reason:?}"),
+                    }
+                }
             }
-            if preview.target.maintenance {
+        }
+        if index == first_index && !active_step {
+            if !active_down {
+                let changed = match read_state(transport, path).await {
+                    Ok(state) => preflight::recheck(&state, &preview.from_sha),
+                    Err(reason) => Some(reason),
+                };
+                if let Some(reason) = changed {
+                    return End::Finished(DeployOutcome::AbortedBeforeChanges(reason));
+                }
+            }
+            if preview.target.maintenance
+                && !resume.is_some_and(|receipt| receipt.maintenance_down_done)
+            {
+                if !active_down {
+                    if let Some(journal) = journal {
+                        if let Err(error) = journal.begin_maintenance(MaintenancePhase::Down) {
+                            return End::Finished(DeployOutcome::AbortedBeforeChanges(
+                                AbortReason::JournalFailed(error.to_string()),
+                            ));
+                        }
+                    }
+                }
                 let down = maintenance(
                     transport,
                     preview,
@@ -531,8 +923,28 @@ async fn run_steps_locked<T: Transport>(
                     events,
                     &mut detach,
                     true,
-                );
-                match down.await {
+                    if active_down {
+                        FollowMode::Attach
+                    } else {
+                        FollowMode::Launch
+                    },
+                    journal,
+                )
+                .await;
+                if let (Some(journal), Some(result)) = (journal, down.as_ref()) {
+                    if !matches!(result, StepResult::Interrupted(_)) {
+                        let (status, code) = result_status(result);
+                        if let Err(error) =
+                            journal.finish_maintenance(MaintenancePhase::Down, status, code)
+                        {
+                            return End::Interrupted {
+                                index: 0,
+                                reason: error.to_string(),
+                            };
+                        }
+                    }
+                }
+                match down {
                     None => return End::Detached(0),
                     Some(StepResult::Exited(0)) => *app_down = true,
                     Some(StepResult::Exited(code)) => {
@@ -556,6 +968,15 @@ async fn run_steps_locked<T: Transport>(
                         return End::Interrupted { index: 0, reason }
                     }
                 }
+                match lock_owned(transport, path, &preview.run_id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return End::Finished(DeployOutcome::AbortedBeforeChanges(
+                            AbortReason::LockLost,
+                        ))
+                    }
+                    Err(reason) => return End::Interrupted { index: 0, reason },
+                }
                 if stop.load(Ordering::SeqCst) || *detach.borrow() {
                     return End::Finished(stopped_before_plan(
                         index,
@@ -567,6 +988,18 @@ async fn run_steps_locked<T: Transport>(
             }
         }
 
+        if !active_step {
+            if let Some(journal) = journal {
+                if let Err(error) = journal.begin_step(index) {
+                    return End::Finished(stopped_before_plan(
+                        index,
+                        first_index,
+                        preview.run_plan,
+                        StopReason::JournalFailed(error.to_string()),
+                    ));
+                }
+            }
+        }
         let _ = events.send(DeployEvent::StepStarted { index, name });
         let key = format!("step-{index}");
         let output = |line| DeployEvent::Output { index, line };
@@ -578,6 +1011,12 @@ async fn run_steps_locked<T: Transport>(
             events,
             Some(&mut detach),
             output,
+            if active_step {
+                FollowMode::Attach
+            } else {
+                FollowMode::Launch
+            },
+            journal,
         )
         .await
         else {
@@ -610,7 +1049,12 @@ async fn run_steps_locked<T: Transport>(
             StepResult::NotStarted(reason) => (
                 StepStatus::NotStarted,
                 None,
-                Some(stopped_before(index, StopReason::ConnectFailed(reason))),
+                Some(stopped_before_plan(
+                    index,
+                    first_index,
+                    preview.run_plan,
+                    StopReason::ConnectFailed(reason),
+                )),
             ),
             StepResult::Gone => (
                 StepStatus::Unknown,
@@ -622,6 +1066,22 @@ async fn run_steps_locked<T: Transport>(
             ),
             StepResult::Interrupted(reason) => return End::Interrupted { index, reason },
         };
+        if let Some(journal) = journal {
+            if let Some(DeployEvent::ServerState { head, tree_dirty }) = &server_state {
+                if let Err(error) = journal.server_state(head.clone(), *tree_dirty) {
+                    return End::Interrupted {
+                        index,
+                        reason: error.to_string(),
+                    };
+                }
+            }
+            if let Err(error) = journal.finish_step(index, status.clone(), exit_code) {
+                return End::Interrupted {
+                    index,
+                    reason: error.to_string(),
+                };
+            }
+        }
         let _ = events.send(DeployEvent::StepFinished {
             index,
             status,
@@ -636,6 +1096,32 @@ async fn run_steps_locked<T: Transport>(
     }
 
     if *app_down {
+        let active_up = resume.is_some_and(|receipt| receipt.phase == ReceiptPhase::MaintenanceUp);
+        if !active_up {
+            match lock_owned(transport, path, &preview.run_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return End::Finished(DeployOutcome::Unknown {
+                        step: preview.target.steps.len() + 1,
+                        reason: "deploy lock was lost before maintenance up".into(),
+                    });
+                }
+                Err(reason) => {
+                    return End::Interrupted {
+                        index: preview.target.steps.len() + 1,
+                        reason,
+                    };
+                }
+            }
+            if let Some(journal) = journal {
+                if let Err(error) = journal.begin_maintenance(MaintenancePhase::Up) {
+                    return End::Interrupted {
+                        index: preview.target.steps.len() + 1,
+                        reason: error.to_string(),
+                    };
+                }
+            }
+        }
         let up = maintenance(
             transport,
             preview,
@@ -643,18 +1129,40 @@ async fn run_steps_locked<T: Transport>(
             events,
             &mut detach,
             false,
-        );
-        match up.await {
+            if active_up {
+                FollowMode::Attach
+            } else {
+                FollowMode::Launch
+            },
+            journal,
+        )
+        .await;
+        if let (Some(journal), Some(result)) = (journal, up.as_ref()) {
+            if !matches!(result, StepResult::Interrupted(_)) {
+                let (status, code) = result_status(result);
+                if let Err(error) = journal.finish_maintenance(MaintenancePhase::Up, status, code) {
+                    return End::Interrupted {
+                        index: preview.target.steps.len() + 1,
+                        reason: error.to_string(),
+                    };
+                }
+            }
+        }
+        match up {
             Some(StepResult::Exited(0)) => *app_down = false,
-            Some(StepResult::Gone) => *app_down = false,
+            Some(StepResult::Gone) => {
+                return End::Finished(DeployOutcome::Unknown {
+                    step: preview.target.steps.len() + 1,
+                    reason: "maintenance up ended without recording an exit code".into(),
+                });
+            }
             Some(StepResult::Interrupted(reason)) => {
-                *app_down = false;
                 return End::Interrupted {
                     index: preview.target.steps.len() + 1,
                     reason,
                 };
             }
-            None => *app_down = false,
+            None => return End::Detached(preview.target.steps.len() + 1),
             Some(StepResult::Exited(_) | StepResult::NotStarted(_)) => {}
         }
     }
@@ -663,6 +1171,13 @@ async fn run_steps_locked<T: Transport>(
 
 /// Runs `body` detached on the server as `key`, turning its output lines
 /// into events. `None` if the front-end detached meanwhile.
+#[derive(Clone, Copy)]
+enum FollowMode {
+    Launch,
+    Attach,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn follow<T: Transport>(
     transport: &T,
     preview: &Preview,
@@ -671,16 +1186,26 @@ async fn follow<T: Transport>(
     events: &mpsc::UnboundedSender<DeployEvent>,
     detach: Option<&mut watch::Receiver<bool>>,
     to_event: impl Fn(String) -> DeployEvent,
+    mode: FollowMode,
+    journal: Option<&ReceiptJournal>,
 ) -> Option<StepResult> {
     let (line_tx, mut line_rx) = mpsc::unbounded_channel();
     let step = async {
         let tx = line_tx;
-        let script = wrap_step(&preview.target.path, body);
-        runner::run_step(transport, &preview.run_id, key, &script, &tx).await
+        match mode {
+            FollowMode::Launch => {
+                let script = wrap_step(&preview.target.path, body);
+                runner::run_step(transport, &preview.run_id, key, &script, &tx).await
+            }
+            FollowMode::Attach => runner::attach_step(transport, &preview.run_id, key, &tx).await,
+        }
     };
     // All output is delivered before the caller reports the result.
     let forward = async {
         while let Some(line) = line_rx.recv().await {
+            if let Some(journal) = journal {
+                journal.output_line(key, &line);
+            }
             let _ = events.send(to_event(line));
         }
     };
@@ -696,6 +1221,7 @@ async fn follow<T: Transport>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn maintenance<T: Transport>(
     transport: &T,
     preview: &Preview,
@@ -703,6 +1229,8 @@ async fn maintenance<T: Transport>(
     events: &mpsc::UnboundedSender<DeployEvent>,
     detach: &mut watch::Receiver<bool>,
     detachable: bool,
+    mode: FollowMode,
+    journal: Option<&ReceiptJournal>,
 ) -> Option<StepResult> {
     let (key, command) = match phase {
         MaintenancePhase::Down => ("maintenance-down", "php artisan down"),
@@ -718,6 +1246,8 @@ async fn maintenance<T: Transport>(
         events,
         if detachable { Some(detach) } else { None },
         output,
+        mode,
+        journal,
     )
     .await
     else {
@@ -728,19 +1258,22 @@ async fn maintenance<T: Transport>(
         });
         return None;
     };
-    let (status, exit_code) = match &result {
-        StepResult::Exited(0) => (StepStatus::Ok, Some(0)),
-        StepResult::Exited(code) => (StepStatus::Failed, Some(*code)),
-        StepResult::NotStarted(_) => (StepStatus::NotStarted, None),
-        StepResult::Gone => (StepStatus::Unknown, None),
-        StepResult::Interrupted(_) => (StepStatus::Unknown, None),
-    };
+    let (status, exit_code) = result_status(&result);
     let _ = events.send(DeployEvent::MaintenanceFinished {
         phase,
         status,
         exit_code,
     });
     Some(result)
+}
+
+fn result_status(result: &StepResult) -> (StepStatus, Option<i32>) {
+    match result {
+        StepResult::Exited(0) => (StepStatus::Ok, Some(0)),
+        StepResult::Exited(code) => (StepStatus::Failed, Some(*code)),
+        StepResult::NotStarted(_) => (StepStatus::NotStarted, None),
+        StepResult::Gone | StepResult::Interrupted(_) => (StepStatus::Unknown, None),
+    }
 }
 
 /// The outcome of stopping before step `index` starts.
@@ -750,6 +1283,9 @@ fn stopped_before(index: usize, reason: StopReason) -> DeployOutcome {
         (0, StopReason::LockLost) => DeployOutcome::AbortedBeforeChanges(AbortReason::LockLost),
         (0, StopReason::ConnectFailed(reason)) => {
             DeployOutcome::AbortedBeforeChanges(AbortReason::ConnectFailed(reason))
+        }
+        (0, StopReason::JournalFailed(reason)) => {
+            DeployOutcome::AbortedBeforeChanges(AbortReason::JournalFailed(reason))
         }
         (n, reason) => DeployOutcome::StoppedAfterStep {
             step: n - 1,
@@ -851,6 +1387,7 @@ fn new_run_id() -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
@@ -861,6 +1398,27 @@ mod tests {
 
     const FROM: &str = "1111111111111111111111111111111111111111";
     const TO: &str = "2222222222222222222222222222222222222222";
+
+    struct TempReceipts(PathBuf);
+
+    impl TempReceipts {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "shipslip-receipt-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempReceipts {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 
     /// Scripted transport. Preflight commands and steps are matched by the
     /// first rule whose needle appears in the script. Steps are simulated as
@@ -1773,7 +2331,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn interrupted_maintenance_up_does_not_claim_the_app_is_down() {
+    async fn interrupted_maintenance_up_warns_the_app_may_be_down() {
         let fake = Arc::new(
             preflight()
                 .on("php artisan down", &[], 0)
@@ -1789,7 +2347,7 @@ mod tests {
             status: StepStatus::Unknown,
             exit_code: None,
         }));
-        assert!(!events.contains(&DeployEvent::AppLeftDown));
+        assert!(events.contains(&DeployEvent::AppLeftDown));
         assert!(matches!(
             events.last(),
             Some(DeployEvent::Interrupted { index: 2, .. })
@@ -2438,5 +2996,146 @@ mod tests {
             recipe_hash(&base, RunPlan::FromStep(1)),
             recipe_hash(&base, RunPlan::FromStep(2))
         );
+    }
+
+    #[tokio::test]
+    async fn recorded_run_persists_result_and_releases_lock() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &["Fast-forward"], 0)
+                .on("deploy command", &["done"], 0),
+        );
+        let preview = prepared(&fake, false, &["deploy command"]).await;
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let path = journal.path().to_path_buf();
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (events, _handle) =
+            execute_recorded(preview, confirmation, fake.clone(), journal).unwrap();
+        assert_eq!(
+            collect(events).await.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+        let saved = ReceiptJournal::load(&path).unwrap().snapshot();
+        assert_eq!(saved.status, ReceiptStatus::Final);
+        assert_eq!(saved.outcome, Some(DeployOutcome::Succeeded));
+        assert_eq!(saved.steps[0].status, ReceiptStepStatus::Ok);
+        assert_eq!(saved.steps[1].output, ["done"]);
+        assert_eq!(fake.lock_owner(), None);
+    }
+
+    #[tokio::test]
+    async fn attach_recovers_active_step_without_relaunching_it() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(preflight().gated("git merge --ff-only", gate.clone()).on(
+            "deploy command",
+            &["next step"],
+            0,
+        ));
+        let preview = prepared(&fake, false, &["deploy command"]).await;
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let path = journal.path().to_path_buf();
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (mut events, handle) =
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
+        assert!(matches!(
+            events.recv().await,
+            Some(DeployEvent::StepStarted { index: 0, .. })
+        ));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fake.launched("git merge --ff-only") == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        handle.detach();
+        assert_eq!(
+            collect(events).await.last(),
+            Some(&DeployEvent::Detached { index: 0 })
+        );
+        assert_eq!(journal.snapshot().phase, ReceiptPhase::Step(0));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&journal) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached observer kept the receipt claim");
+        drop(journal);
+
+        let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (events, _handle) = attach(resumed.clone(), fake.clone()).unwrap();
+        gate.notify_one();
+        assert_eq!(
+            collect(events).await.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+        assert_eq!(fake.launched("git merge --ff-only"), 1);
+        assert_eq!(fake.launched("deploy command"), 1);
+        assert_eq!(resumed.snapshot().status, ReceiptStatus::Final);
+        assert_eq!(fake.lock_owner(), None);
+    }
+
+    #[tokio::test]
+    async fn attach_observes_journaled_but_unlaunched_step() {
+        let fake = Arc::new(preflight().on("git merge --ff-only", &[], 0));
+        let preview = prepared(&fake, false, &[]).await;
+        let dir = TempReceipts::new();
+        let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        journal.confirm().unwrap();
+        journal.begin_step(0).unwrap();
+        let path = journal.path().to_path_buf();
+        drop(journal);
+
+        let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (events, _handle) = attach(resumed.clone(), fake.clone()).unwrap();
+        assert_eq!(
+            collect(events).await.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
+                AbortReason::ConnectFailed(
+                    "the step was not launched before Shipslip exited".into()
+                )
+            )))
+        );
+        assert_eq!(fake.launched("git merge --ff-only"), 0);
+        assert_eq!(
+            resumed.snapshot().steps[0].status,
+            ReceiptStepStatus::NotStarted
+        );
+    }
+
+    #[tokio::test]
+    async fn receipt_write_failure_prevents_step_launch() {
+        let fake = Arc::new(preflight().on("git merge --ff-only", &[], 0));
+        let preview = prepared(&fake, false, &[]).await;
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        std::fs::remove_dir_all(&dir.0).unwrap();
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        assert!(matches!(
+            execute_recorded(preview, confirmation, fake.clone(), journal),
+            Err(ExecuteError::Receipt(_))
+        ));
+        assert_eq!(fake.launched("git merge --ff-only"), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_claim_allows_only_one_local_owner() {
+        let fake = preflight();
+        let preview = prepared(&fake, false, &[]).await;
+        let dir = TempReceipts::new();
+        let owner = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        let next = ReceiptJournal::load(owner.path()).unwrap();
+        assert!(matches!(
+            next.claim(),
+            Err(crate::receipt::ReceiptError::Claimed(_))
+        ));
+        drop(owner);
+        next.claim().unwrap();
     }
 }

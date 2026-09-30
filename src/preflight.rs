@@ -3,6 +3,7 @@
 //! Scripts report facts as `@key value` lines, so output from login shell
 //! startup files is ignored, and the decisions are made here.
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use crate::script::{shell_quote, wrap_step};
@@ -72,7 +73,7 @@ impl fmt::Display for BlockReason {
 }
 
 /// Why a deploy stopped at the recheck, before changing anything.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AbortReason {
     LockLost,
     /// HEAD is no longer the commit the preview was built from.
@@ -86,6 +87,7 @@ pub enum AbortReason {
     MaintenanceDownFailed(i32),
     ConnectFailed(String),
     CheckFailed(String),
+    JournalFailed(String),
 }
 
 impl fmt::Display for AbortReason {
@@ -102,6 +104,7 @@ impl fmt::Display for AbortReason {
             }
             Self::ConnectFailed(reason) => write!(f, "could not reach the server: {reason}"),
             Self::CheckFailed(reason) => write!(f, "could not check the server: {reason}"),
+            Self::JournalFailed(reason) => write!(f, "could not save the receipt: {reason}"),
         }
     }
 }

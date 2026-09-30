@@ -8,11 +8,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
+use shipslip::receipt::{ReceiptJournal, ReceiptStatus};
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{
-    break_lock, bring_app_up, cancel, execute, prepare, prepare_with_plan, AbortReason,
-    BlockReason, BreakLockError, BringUpError, Confirmation, DeployEvent, DeployOutcome,
-    DeployTarget, ExecutionHandle, MaintenancePhase, PrepareError, RunPlan, StepStatus, StopReason,
+    attach, break_lock, bring_app_up, cancel, execute, execute_recorded, prepare,
+    prepare_with_plan, AbortReason, BlockReason, BreakLockError, BringUpError, Confirmation,
+    DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle, MaintenancePhase, PrepareError,
+    RunPlan, StepStatus, StopReason,
 };
 use tokio::sync::mpsc;
 
@@ -542,6 +544,64 @@ async fn detached_step_keeps_running_on_the_server() {
         "",
     );
     assert_eq!(result, "ok\n0");
+}
+
+#[tokio::test]
+async fn attach_recovers_a_detached_run_without_relaunching_the_step() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    let preview = prepare(
+        target(
+            &path,
+            &[
+                "echo first >> ~/receipt-counter; echo started; sleep 2; echo done",
+                "echo second >> ~/receipt-counter",
+            ],
+        ),
+        &*ssh,
+    )
+    .await
+    .unwrap();
+    let journal = Arc::new(
+        ReceiptJournal::create(&server.dir.join("receipts"), "app", &server.dir, &preview).unwrap(),
+    );
+    let receipt_path = journal.path().to_path_buf();
+    let confirmation = Confirmation::from(&preview, None).unwrap();
+    let (mut events, handle) =
+        execute_recorded(preview, confirmation, ssh.clone(), journal.clone()).unwrap();
+    while let Some(event) = events.recv().await {
+        if matches!(event, DeployEvent::Output { index: 1, line } if line == "started") {
+            break;
+        }
+    }
+    handle.detach();
+    assert_eq!(
+        events.recv().await,
+        Some(DeployEvent::Detached { index: 1 })
+    );
+    drop(events);
+    drop(handle);
+    drop(journal);
+    drop(ssh);
+
+    let resumed = Arc::new(ReceiptJournal::load(&receipt_path).unwrap());
+    let ssh = Arc::new(server.connect().await);
+    let (mut events, _handle) = attach(resumed.clone(), ssh).unwrap();
+    let mut final_event = None;
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while let Some(event) = events.recv().await {
+            final_event = Some(event);
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        final_event,
+        Some(DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    assert_eq!(resumed.snapshot().status, ReceiptStatus::Final);
+    assert_eq!(server.exec("cat ~/receipt-counter", ""), "first\nsecond");
 }
 
 #[tokio::test]

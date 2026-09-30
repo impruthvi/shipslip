@@ -1,7 +1,8 @@
 use crate::preflight::AbortReason;
+use serde::{Deserialize, Serialize};
 
 /// Result of a single step.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepStatus {
     Ok,
     Failed,
@@ -12,14 +13,14 @@ pub enum StepStatus {
 }
 
 /// `php artisan down` before step 0, or `php artisan up` after the last step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MaintenancePhase {
     Down,
     Up,
 }
 
 /// Why a deploy stopped between steps.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StopReason {
     /// Stop-after-step, or a detach between steps.
     Requested,
@@ -27,11 +28,13 @@ pub enum StopReason {
     LockLost,
     /// The server could not be reached to start or check the next step.
     ConnectFailed(String),
+    /// The local receipt could not be saved before another step.
+    JournalFailed(String),
 }
 
 /// Final result of a deploy run. Step indexes: 0 is the git fast-forward,
 /// 1..=N are recipe steps.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeployOutcome {
     Succeeded,
     /// A step exited non-zero. `partial_update` is set when step 0 (the

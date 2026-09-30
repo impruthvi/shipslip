@@ -67,6 +67,27 @@ slip from-step staging 2     # run recipe steps 2 through the end
 server to already be on the clean target commit. Recipe steps are numbered
 starting at 1; the built-in Git fast-forward is step 0 and is not selectable.
 
+## Receipts and recovery
+
+Each CLI run saves a local receipt before it starts a remote command. On macOS,
+receipts live under `~/Library/Application Support/Shipslip/receipts/` in a
+directory for the project and environment. The receipt records the approved
+plan, exact commits, step results, recent step output, and final outcome.
+Treat receipts as private: command output can contain secrets.
+
+If `slip` exits while a command is running, that command continues on the
+server. Resume the unfinished run from the same project with:
+
+```sh
+slip attach staging
+```
+
+`attach` checks the saved config and asks for confirmation. It observes the
+active remote command without launching it again, then continues the remaining
+steps if the run still owns the deploy lock. It requires the same local receipt
+and project checkout. Only one process can use a receipt at a time. If the
+server cannot be reached, the receipt stays unfinished so you can try again.
+
 ## Config trust
 
 The first use of an environment, or a change to its SSH alias, path, branch,
