@@ -9,8 +9,9 @@ use tokio::sync::{mpsc, watch};
 
 use crate::event::{DeployEvent, DeployOutcome, StepStatus, StopReason};
 use crate::lock::{self, Acquire, Break, LockInfo, LockOwner};
-use crate::runner::{self, StepResult};
-use crate::script::{is_full_sha, is_safe_branch, shell_quote, wrap_step};
+use crate::preflight::{self, AbortReason, BlockReason, State};
+use crate::runner::{self, run_collect, StepResult};
+use crate::script::{is_full_sha, is_safe_branch, wrap_step};
 use crate::transport::{Transport, TransportError};
 
 /// One environment of one project, as resolved from config.
@@ -31,7 +32,7 @@ pub enum PrepareError {
     InvalidTarget(String),
     /// Preflight refused to continue; nothing on the server was changed.
     #[error("blocked: {0}")]
-    Blocked(String),
+    Blocked(BlockReason),
     #[error("unexpected output from `{command}`: {output}")]
     UnexpectedOutput { command: String, output: String },
     #[error("deploy lock is {0}")]
@@ -164,26 +165,30 @@ pub async fn prepare<T: Transport>(
         )));
     }
 
-    let from_sha = capture_sha(transport, &target.path, "git rev-parse HEAD").await?;
-
-    let b = &target.branch;
-    let fetch = format!(
-        "git fetch origin {refspec} && git rev-parse {remote}",
-        refspec = shell_quote(&format!("+refs/heads/{b}:refs/remotes/origin/{b}")),
-        remote = shell_quote(&format!("origin/{b}")),
-    );
-    let target_sha = capture_sha(transport, &target.path, &fetch).await?;
-
-    if target_sha == from_sha {
-        return Err(PrepareError::Blocked("up_to_date".into()));
+    let script = preflight::preflight_script(&target.path, &target.branch, &target.steps);
+    let (result, lines) = run_collect(transport, &script).await;
+    let code = result?;
+    if code != 0 {
+        return Err(PrepareError::Blocked(BlockReason::CommandFailed {
+            code,
+            output: lines.join("\n"),
+        }));
     }
-
-    let commits = capture(
-        transport,
-        &target.path,
-        &format!("git log --oneline {from_sha}..{target_sha}"),
-    )
-    .await?;
+    let checks = preflight::parse_preflight(&lines);
+    let unexpected = || PrepareError::UnexpectedOutput {
+        command: "preflight".into(),
+        output: lines.join("\n"),
+    };
+    if !is_full_sha(&checks.state.head) {
+        return Err(unexpected());
+    }
+    if let Some(reason) = preflight::block_reason(&checks, &target.branch) {
+        return Err(PrepareError::Blocked(reason));
+    }
+    if !is_full_sha(&checks.target) {
+        return Err(unexpected());
+    }
+    let (from_sha, target_sha, commits) = (checks.state.head, checks.target, checks.commits);
 
     let run_id = new_run_id();
     let owner = LockOwner::current(&run_id, &target_sha);
@@ -323,6 +328,15 @@ async fn run_steps_locked<T: Transport>(
             Ok(false) => return Some(stopped_before(index, StopReason::LockLost)),
             Err(reason) => return Some(stopped_before(index, StopReason::ConnectFailed(reason))),
         }
+        if index == 0 {
+            let changed = match read_state(transport, path).await {
+                Ok(state) => preflight::recheck(&state, &preview.from_sha),
+                Err(reason) => Some(reason),
+            };
+            if let Some(reason) = changed {
+                return Some(DeployOutcome::AbortedBeforeChanges(reason));
+            }
+        }
 
         let _ = events.send(DeployEvent::StepStarted { index, name });
 
@@ -347,13 +361,29 @@ async fn run_steps_locked<T: Transport>(
             (r, ()) = async { tokio::join!(step, forward) } => r,
         };
 
+        let mut server_state = None;
         let (status, exit_code, outcome) = match result {
             StepResult::Exited(0) => (StepStatus::Ok, Some(0), None),
-            StepResult::Exited(code) => (
-                StepStatus::Failed,
-                Some(code),
-                Some(DeployOutcome::FailedAtStep(index)),
-            ),
+            StepResult::Exited(code) => {
+                // A failed fast-forward can still leave some files updated.
+                let partial_update = index == 0 && {
+                    let state = read_state(transport, path).await.ok();
+                    let head = state.as_ref().map(|s| s.head.clone());
+                    let tree_dirty = state.as_ref().map(|s| !s.dirty.is_empty());
+                    let unchanged = head.as_deref() == Some(preview.from_sha.as_str())
+                        && tree_dirty == Some(false);
+                    server_state = Some(DeployEvent::ServerState { head, tree_dirty });
+                    !unchanged
+                };
+                (
+                    StepStatus::Failed,
+                    Some(code),
+                    Some(DeployOutcome::FailedAtStep {
+                        step: index,
+                        partial_update,
+                    }),
+                )
+            }
             StepResult::NotStarted(reason) => (
                 StepStatus::NotStarted,
                 None,
@@ -377,6 +407,9 @@ async fn run_steps_locked<T: Transport>(
             status,
             exit_code,
         });
+        if let Some(event) = server_state {
+            let _ = events.send(event);
+        }
         if outcome.is_some() {
             return outcome;
         }
@@ -388,12 +421,39 @@ async fn run_steps_locked<T: Transport>(
 fn stopped_before(index: usize, reason: StopReason) -> DeployOutcome {
     match (index, reason) {
         (0, StopReason::Requested) => DeployOutcome::CancelledBeforeChanges,
-        (0, StopReason::LockLost) => DeployOutcome::AbortedBeforeChanges("lock_lost".into()),
-        (0, StopReason::ConnectFailed(reason)) => DeployOutcome::AbortedBeforeChanges(reason),
+        (0, StopReason::LockLost) => DeployOutcome::AbortedBeforeChanges(AbortReason::LockLost),
+        (0, StopReason::ConnectFailed(reason)) => {
+            DeployOutcome::AbortedBeforeChanges(AbortReason::ConnectFailed(reason))
+        }
         (n, reason) => DeployOutcome::StoppedAfterStep {
             step: n - 1,
             reason,
         },
+    }
+}
+
+/// Reads the checkout's state, reconnecting once if the server did not answer.
+async fn read_state<T: Transport>(transport: &T, path: &str) -> Result<State, AbortReason> {
+    let script = preflight::state_script(path);
+    let mut run = run_collect(transport, &script).await;
+    if run.0.is_err() {
+        let _ = transport.reconnect().await;
+        run = run_collect(transport, &script).await;
+    }
+    match run {
+        (Ok(0), lines) => {
+            let state = preflight::parse_state(&lines);
+            if is_full_sha(&state.head) {
+                Ok(state)
+            } else {
+                Err(AbortReason::CheckFailed(lines.join("\n")))
+            }
+        }
+        (Ok(code), lines) => Err(AbortReason::CheckFailed(format!(
+            "exited with {code}: {}",
+            lines.join("\n")
+        ))),
+        (Err(e), _) => Err(AbortReason::ConnectFailed(e.to_string())),
     }
 }
 
@@ -412,41 +472,6 @@ async fn wait_for_detach(detach: &mut watch::Receiver<bool>) {
     if detach.wait_for(|d| *d).await.is_err() {
         // Handle dropped without detaching: never resolve.
         std::future::pending::<()>().await;
-    }
-}
-
-async fn capture<T: Transport>(
-    transport: &T,
-    path: &str,
-    command: &str,
-) -> Result<Vec<String>, PrepareError> {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let code = transport.run(&wrap_step(path, command), tx).await?;
-    let mut lines = Vec::new();
-    while let Some(line) = rx.recv().await {
-        lines.push(line);
-    }
-    if code != 0 {
-        return Err(PrepareError::Blocked(format!(
-            "`{command}` exited with {code}: {}",
-            lines.join("\n")
-        )));
-    }
-    Ok(lines)
-}
-
-async fn capture_sha<T: Transport>(
-    transport: &T,
-    path: &str,
-    command: &str,
-) -> Result<String, PrepareError> {
-    let lines = capture(transport, path, command).await?;
-    match lines.last().map(|l| l.trim()) {
-        Some(sha) if is_full_sha(sha) => Ok(sha.to_string()),
-        _ => Err(PrepareError::UnexpectedOutput {
-            command: command.to_string(),
-            output: lines.join("\n"),
-        }),
     }
 }
 
@@ -501,6 +526,73 @@ mod tests {
         reconnect_fails: bool,
         reconnects: AtomicUsize,
         lock: Mutex<LockSim>,
+        server: Mutex<ServerSim>,
+    }
+
+    /// The app's checkout as preflight and the recheck see it.
+    struct ServerSim {
+        head: String,
+        branch: String,
+        operation: Option<String>,
+        dirty: Vec<String>,
+        target: String,
+        ancestor: bool,
+        fetch_failed: Option<String>,
+        invalid_step: Option<(usize, String)>,
+        /// A failing step 0 leaves the tree dirty.
+        ff_fails_partially: bool,
+        /// Reading the state after step 0 fails.
+        inspect_fails: bool,
+    }
+
+    impl Default for ServerSim {
+        fn default() -> Self {
+            Self {
+                head: FROM.into(),
+                branch: "main".into(),
+                operation: None,
+                dirty: vec![],
+                target: TO.into(),
+                ancestor: true,
+                fetch_failed: None,
+                invalid_step: None,
+                ff_fails_partially: false,
+                inspect_fails: false,
+            }
+        }
+    }
+
+    impl ServerSim {
+        fn state_lines(&self) -> Vec<String> {
+            let mut out = vec![
+                format!("@head {}", self.head),
+                format!("@branch {}", self.branch),
+            ];
+            out.extend(self.operation.iter().map(|op| format!("@operation {op}")));
+            out.extend(self.dirty.iter().map(|f| format!("@dirty {f}")));
+            out
+        }
+
+        fn preflight_lines(&self) -> Vec<String> {
+            let mut out = self.state_lines();
+            if let Some(message) = &self.fetch_failed {
+                out.push("@fetch_failed".into());
+                out.push(format!("@message {message}"));
+                return out;
+            }
+            out.push(format!("@target {}", self.target));
+            out.push(format!("@fetch_head {}", self.target));
+            if self.ancestor {
+                out.push("@ancestor".into());
+            }
+            out.push("@commit 2222222 Fix checkout".into());
+            out.push("@commit 1a2b3c4 Add invoices".into());
+            if let Some((step, message)) = &self.invalid_step {
+                out.push(format!("@invalid {step}"));
+                out.push(format!("@message {message}"));
+            }
+            out
+        }
     }
 
     #[derive(Default)]
@@ -678,6 +770,21 @@ mod tests {
             self
         }
 
+        fn server(self, change: impl FnOnce(&mut ServerSim)) -> Self {
+            change(&mut self.server.lock().unwrap());
+            self
+        }
+
+        /// Step launches whose script contains `needle`.
+        fn launched(&self, needle: &str) -> usize {
+            self.ran
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|s| s.contains("setsid") && s.contains(needle))
+                .count()
+        }
+
         fn ran_matching(&self, needle: &str) -> usize {
             self.ran
                 .lock()
@@ -707,6 +814,12 @@ mod tests {
                 Launch::Ok | Launch::LostAfterStart => {}
             }
             launched.insert(index, rule);
+            let mut server = self.server.lock().unwrap();
+            match (index, self.rules[rule].code) {
+                (0, 0) => server.head = server.target.clone(),
+                (0, _) if server.ff_fails_partially => server.dirty = vec![" M file".into()],
+                _ => {}
+            }
             match self.rules[rule].launch {
                 Launch::LostAfterStart => Err(lost()),
                 _ => Ok(0),
@@ -771,6 +884,20 @@ mod tests {
             } else if script.contains("not-started") {
                 let _ = output.send(self.probe(script));
                 Ok(0)
+            } else if script.contains("@fetch_head") {
+                for line in self.server.lock().unwrap().preflight_lines() {
+                    let _ = output.send(line);
+                }
+                Ok(0)
+            } else if script.contains("@head") {
+                let server = self.server.lock().unwrap();
+                if server.inspect_fails && self.launched.lock().unwrap().contains_key(&0) {
+                    return Err(lost());
+                }
+                for line in server.state_lines() {
+                    let _ = output.send(line);
+                }
+                Ok(0)
             } else {
                 let rule = &self.rules[self.matching(script)];
                 for line in &rule.lines {
@@ -802,13 +929,6 @@ mod tests {
 
     fn preflight() -> Fake {
         Fake::default()
-            .on("git rev-parse HEAD", &[FROM], 0)
-            .on("git fetch origin", &[TO], 0)
-            .on(
-                "git log --oneline",
-                &["2222222 Fix checkout", "1a2b3c4 Add invoices"],
-                0,
-            )
     }
 
     async fn prepared(fake: &Fake, production: bool, steps: &[&str]) -> Preview {
@@ -839,17 +959,14 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_blocks_when_up_to_date() {
-        let fake =
-            Fake::default()
-                .on("git rev-parse HEAD", &[FROM], 0)
-                .on("git fetch origin", &[FROM], 0);
+        let fake = preflight().server(|s| s.target = FROM.into());
         let err = prepare(target(false, &[]), &fake).await.unwrap_err();
-        assert!(matches!(err, PrepareError::Blocked(r) if r == "up_to_date"));
+        assert!(matches!(err, PrepareError::Blocked(BlockReason::UpToDate)));
     }
 
     #[tokio::test]
     async fn prepare_rejects_garbage_sha() {
-        let fake = Fake::default().on("git rev-parse HEAD", &["not a sha"], 0);
+        let fake = preflight().server(|s| s.head = "not a sha".into());
         let err = prepare(target(false, &[]), &fake).await.unwrap_err();
         assert!(matches!(err, PrepareError::UnexpectedOutput { .. }));
     }
@@ -933,7 +1050,7 @@ mod tests {
                 DeployEvent::Finished(DeployOutcome::Succeeded),
             ]
         );
-        assert_eq!(fake.ran_matching(&format!("git merge --ff-only {TO}")), 1);
+        assert_eq!(fake.launched(&format!("git merge --ff-only {TO}")), 1);
     }
 
     #[tokio::test]
@@ -956,9 +1073,12 @@ mod tests {
         let events = collect(rx).await;
         assert_eq!(
             events.last(),
-            Some(&DeployEvent::Finished(DeployOutcome::FailedAtStep(1)))
+            Some(&DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                step: 1,
+                partial_update: false
+            }))
         );
-        assert_eq!(fake.ran_matching("optimize"), 0);
+        assert_eq!(fake.launched("optimize"), 0);
     }
 
     #[tokio::test]
@@ -980,7 +1100,10 @@ mod tests {
         }));
         assert_eq!(
             events.last(),
-            Some(&DeployEvent::Finished(DeployOutcome::FailedAtStep(1)))
+            Some(&DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                step: 1,
+                partial_update: false
+            }))
         );
     }
 
@@ -1018,7 +1141,7 @@ mod tests {
             exit_code: Some(3),
         }));
         assert_eq!(fake.reconnects.load(Ordering::SeqCst), 1);
-        assert_eq!(fake.ran_matching("migrate"), 1);
+        assert_eq!(fake.launched("migrate"), 1);
     }
 
     #[tokio::test]
@@ -1060,7 +1183,7 @@ mod tests {
             DeployEvent::Finished(_) | DeployEvent::StepFinished { index: 1, .. }
         )));
         assert_eq!(fake.reconnects.load(Ordering::SeqCst), 4);
-        assert_eq!(fake.ran_matching("migrate"), 1);
+        assert_eq!(fake.launched("migrate"), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1077,7 +1200,7 @@ mod tests {
             events.last(),
             Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
         );
-        assert_eq!(fake.ran_matching("migrate"), 1);
+        assert_eq!(fake.launched("migrate"), 1);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1101,7 +1224,7 @@ mod tests {
                 reason: StopReason::ConnectFailed("connection lost: reset".into())
             }))
         );
-        assert_eq!(fake.ran_matching("migrate"), 1);
+        assert_eq!(fake.launched("migrate"), 1);
     }
 
     #[tokio::test]
@@ -1139,7 +1262,7 @@ mod tests {
                 reason: StopReason::Requested
             }))
         );
-        assert_eq!(fake.ran_matching("migrate"), 0);
+        assert_eq!(fake.launched("migrate"), 0);
     }
 
     #[tokio::test]
@@ -1181,7 +1304,7 @@ mod tests {
             events,
             vec![DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges)]
         );
-        assert_eq!(fake.ran_matching("git merge --ff-only"), 0);
+        assert_eq!(fake.launched("git merge --ff-only"), 0);
     }
 
     #[tokio::test]
@@ -1197,7 +1320,7 @@ mod tests {
             events,
             vec![DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges)]
         );
-        assert_eq!(fake.ran_matching("git merge --ff-only"), 0);
+        assert_eq!(fake.launched("git merge --ff-only"), 0);
     }
 
     #[tokio::test]
@@ -1233,7 +1356,7 @@ mod tests {
                 reason: StopReason::Requested
             }))
         );
-        assert_eq!(fake.ran_matching("migrate"), 0);
+        assert_eq!(fake.launched("migrate"), 0);
     }
 
     #[tokio::test]
@@ -1253,7 +1376,7 @@ mod tests {
                     exit_code: None,
                 },
                 DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
-                    "could not connect: refused".into()
+                    AbortReason::ConnectFailed("could not connect: refused".into())
                 )),
             ]
         );
@@ -1318,10 +1441,10 @@ mod tests {
         assert_eq!(
             events,
             [DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
-                "lock_lost".into()
+                AbortReason::LockLost
             ))]
         );
-        assert_eq!(fake.ran_matching("git merge --ff-only"), 0);
+        assert_eq!(fake.launched("git merge --ff-only"), 0);
     }
 
     #[tokio::test]
@@ -1341,7 +1464,7 @@ mod tests {
                 reason: StopReason::LockLost
             }))
         );
-        assert_eq!(fake.ran_matching("migrate"), 0);
+        assert_eq!(fake.launched("migrate"), 0);
         assert_eq!(fake.lock_owner().as_deref(), Some("other"));
     }
 
@@ -1451,6 +1574,156 @@ mod tests {
         let stale = preflight().locked_by_other(true);
         assert_eq!(break_lock(&t, &stale, "staging").await, Ok(()));
         assert_eq!(stale.lock_owner(), None);
+    }
+
+    #[tokio::test]
+    async fn blocked_preflight_takes_no_lock() {
+        type Case = (fn(&mut ServerSim), BlockReason);
+        let cases: [Case; 6] = [
+            (
+                |s| s.dirty = vec![" M .env".into()],
+                BlockReason::DirtyTree(vec![" M .env".into()]),
+            ),
+            (
+                |s| s.operation = Some("MERGE_HEAD".into()),
+                BlockReason::OperationInProgress("MERGE_HEAD".into()),
+            ),
+            (
+                |s| s.branch = String::new(),
+                BlockReason::WrongBranch {
+                    expected: "main".into(),
+                    actual: String::new(),
+                },
+            ),
+            (
+                |s| s.fetch_failed = Some("Permission denied (publickey).".into()),
+                BlockReason::FetchFailed("Permission denied (publickey).".into()),
+            ),
+            (|s| s.ancestor = false, BlockReason::NotFastForward),
+            (
+                |s| s.invalid_step = Some((1, "unexpected EOF".into())),
+                BlockReason::InvalidStep {
+                    step: 1,
+                    message: "unexpected EOF".into(),
+                },
+            ),
+        ];
+        for (change, expected) in cases {
+            let fake = preflight().server(change);
+            let err = prepare(target(false, &["echo 'x"]), &fake)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, PrepareError::Blocked(r) if *r == expected),
+                "{err:?}"
+            );
+            assert_eq!(fake.lock_owner(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn changes_after_the_preview_abort_before_step_0() {
+        type Case = (fn(&mut ServerSim), fn(&AbortReason) -> bool);
+        let cases: [Case; 3] = [
+            (
+                |s| s.head = "3".repeat(40),
+                |r| matches!(r, AbortReason::HeadMoved { .. }),
+            ),
+            (
+                |s| s.dirty = vec![" M file".into()],
+                |r| matches!(r, AbortReason::DirtyTree(_)),
+            ),
+            (
+                |s| s.operation = Some("rebase-merge".into()),
+                |r| matches!(r, AbortReason::OperationInProgress(_)),
+            ),
+        ];
+        for (change, expected) in cases {
+            let fake = Arc::new(preflight().on("git merge --ff-only", &[], 0));
+            let p = prepared(&fake, false, &[]).await;
+            change(&mut fake.server.lock().unwrap());
+            let c = Confirmation::from(&p, None).unwrap();
+            let (rx, _h) = execute(p, c, fake.clone()).unwrap();
+            let events = collect(rx).await;
+
+            let [DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(reason))] = &events[..]
+            else {
+                panic!("{events:?}");
+            };
+            assert!(expected(reason), "{reason:?}");
+            assert_eq!(fake.launched("git merge --ff-only"), 0);
+            assert_eq!(fake.lock_owner(), None);
+        }
+    }
+
+    fn step_0_failure(events: &[DeployEvent]) -> (&DeployEvent, &DeployEvent) {
+        let n = events.len();
+        (&events[n - 2], &events[n - 1])
+    }
+
+    #[tokio::test]
+    async fn failed_fast_forward_that_changed_nothing_is_not_partial() {
+        let fake = Arc::new(preflight().on("git merge --ff-only", &[], 128));
+        let events = deploy(&fake, &[]).await;
+        assert_eq!(
+            step_0_failure(&events),
+            (
+                &DeployEvent::ServerState {
+                    head: Some(FROM.into()),
+                    tree_dirty: Some(false)
+                },
+                &DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                    step: 0,
+                    partial_update: false
+                })
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_fast_forward_that_left_changes_is_partial() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 128)
+                .server(|s| s.ff_fails_partially = true),
+        );
+        let events = deploy(&fake, &[]).await;
+        assert_eq!(
+            step_0_failure(&events),
+            (
+                &DeployEvent::ServerState {
+                    head: Some(FROM.into()),
+                    tree_dirty: Some(true)
+                },
+                &DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                    step: 0,
+                    partial_update: true
+                })
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_fast_forward_that_cannot_be_inspected_counts_as_partial() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 128)
+                .server(|s| s.inspect_fails = true),
+        );
+        let events = deploy(&fake, &[]).await;
+        assert_eq!(
+            step_0_failure(&events),
+            (
+                &DeployEvent::ServerState {
+                    head: None,
+                    tree_dirty: None
+                },
+                &DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                    step: 0,
+                    partial_update: true
+                })
+            )
+        );
     }
 
     #[test]

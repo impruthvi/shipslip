@@ -13,6 +13,7 @@
 mod engine;
 mod event;
 mod lock;
+mod preflight;
 mod runner;
 mod script;
 pub mod transport;
@@ -23,3 +24,4 @@ pub use engine::{
 };
 pub use event::{DeployEvent, DeployOutcome, StepStatus, StopReason};
 pub use lock::{LockInfo, LockOwner, STALE_AFTER};
+pub use preflight::{AbortReason, BlockReason};
