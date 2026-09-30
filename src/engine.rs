@@ -10,6 +10,7 @@ use tokio::sync::{mpsc, watch};
 
 use crate::event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason};
 use crate::lock::{self, Acquire, Break, LockInfo, LockOwner};
+use crate::observation::{self, LogObserver, SmokeResult, WatchResult, WatchStatus};
 use crate::preflight::{self, AbortReason, BlockReason, State};
 use crate::receipt::{Receipt, ReceiptJournal, ReceiptPhase, ReceiptStatus, ReceiptStepStatus};
 use crate::runner::{self, run_collect, StepResult};
@@ -29,6 +30,16 @@ pub struct DeployTarget {
     /// Run `php artisan down` before step 0 and `php artisan up` after the
     /// last step succeeds. On any failure the app stays down.
     pub maintenance: bool,
+    /// Watch the configured Laravel log during and after the deploy.
+    #[serde(default)]
+    pub watch_log: bool,
+    /// A fixed log path, or the directory and prefix when `log_daily` is set.
+    #[serde(default)]
+    pub log: Option<String>,
+    #[serde(default)]
+    pub log_daily: bool,
+    #[serde(default)]
+    pub smoke_url: Option<String>,
 }
 
 /// Which part of the configured recipe to run after its commit is deployed.
@@ -169,6 +180,7 @@ pub enum ExecuteError {
 pub struct ExecutionHandle {
     stop: Arc<AtomicBool>,
     detach: watch::Sender<bool>,
+    watch_cancel: Arc<AtomicBool>,
 }
 
 impl ExecutionHandle {
@@ -183,8 +195,9 @@ impl ExecutionHandle {
     }
 
     /// Stop watching the Laravel log; the deploy outcome is unchanged.
-    /// No-op until log watching exists.
-    pub fn cancel_watch(&self) {}
+    pub fn cancel_watch(&self) {
+        self.watch_cancel.store(true, Ordering::SeqCst);
+    }
 }
 
 /// Preflight: resolves the current and target commits, takes the deploy
@@ -446,11 +459,20 @@ fn execute_inner<T: Transport>(
     let handle = ExecutionHandle {
         stop: Arc::new(AtomicBool::new(false)),
         detach: detach_tx,
+        watch_cancel: Arc::new(AtomicBool::new(false)),
     };
     let stop = handle.stop.clone();
+    let watch_cancel = handle.watch_cancel.clone();
 
     tokio::spawn(run_steps(
-        preview, transport, events, stop, detach_rx, journal, None,
+        preview,
+        transport,
+        events,
+        stop,
+        detach_rx,
+        journal,
+        None,
+        watch_cancel,
     ));
     Ok((rx, handle))
 }
@@ -508,8 +530,10 @@ pub fn attach<T: Transport>(
     let handle = ExecutionHandle {
         stop: Arc::new(AtomicBool::new(false)),
         detach: detach_tx,
+        watch_cancel: Arc::new(AtomicBool::new(false)),
     };
     let stop = handle.stop.clone();
+    let watch_cancel = handle.watch_cancel.clone();
     tokio::spawn(run_steps(
         preview,
         transport,
@@ -518,6 +542,7 @@ pub fn attach<T: Transport>(
         detach_rx,
         Some(journal),
         Some(receipt),
+        watch_cancel,
     ));
     Ok((rx, handle))
 }
@@ -639,6 +664,7 @@ enum End {
     Interrupted { index: usize, reason: String },
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_steps<T: Transport>(
     preview: Preview,
     transport: Arc<T>,
@@ -647,8 +673,28 @@ async fn run_steps<T: Transport>(
     detach: watch::Receiver<bool>,
     journal: Option<Arc<ReceiptJournal>>,
     resume: Option<Receipt>,
+    watch_cancel: Arc<AtomicBool>,
 ) {
     let (path, run_id) = (&preview.target.path, &preview.run_id);
+    let saved_checks = resume.as_ref().and_then(|receipt| {
+        receipt.outcome.as_ref()?;
+        Some((receipt.watch.clone()?, receipt.smoke.clone()?))
+    });
+    let using_saved_checks = saved_checks.is_some();
+    let observer = if preview.target.watch_log && saved_checks.is_none() {
+        Some(
+            LogObserver::start(
+                transport.clone(),
+                &preview.target,
+                events.clone(),
+                journal.as_ref().map(|receipt| receipt.history_path()),
+                watch_cancel,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
     let heartbeat = async {
         loop {
             tokio::time::sleep(lock::HEARTBEAT_EVERY).await;
@@ -657,11 +703,93 @@ async fn run_steps<T: Transport>(
     };
     let mut app_down = resume.as_ref().is_some_and(|receipt| receipt.app_left_down);
     let end = tokio::select! {
-        end = run_steps_locked(&preview, &*transport, &events, &stop, detach, &mut app_down, journal.as_deref(), resume.as_ref()) => end,
+        end = run_steps_locked(&preview, &*transport, &events, &stop, detach, &mut app_down, journal.as_deref(), resume.as_ref(), observer.as_ref()) => end,
         () = heartbeat => unreachable!("heartbeat never ends"),
     };
     if app_down {
         let _ = events.send(DeployEvent::AppLeftDown);
+    }
+    let post_checks = matches!(&end, End::Finished(outcome) if should_run_post_checks(outcome));
+    let watch_status = if post_checks {
+        WatchStatus::Complete
+    } else if matches!(
+        &end,
+        End::Finished(
+            DeployOutcome::CancelledBeforeChanges | DeployOutcome::AbortedBeforeChanges(_)
+        )
+    ) {
+        WatchStatus::NotRun
+    } else {
+        WatchStatus::Partial
+    };
+    let checks = async {
+        let watch = async {
+            match observer {
+                Some(observer) => observer.finish(watch_status, post_window()).await,
+                None => WatchResult::not_run(),
+            }
+        };
+        let smoke = async {
+            let result = if post_checks {
+                observation::smoke_check(preview.target.smoke_url.as_deref()).await
+            } else if preview.target.smoke_url.is_some() {
+                SmokeResult::Skipped
+            } else {
+                SmokeResult::NotConfigured
+            };
+            if preview.target.smoke_url.is_some() {
+                let _ = events.send(DeployEvent::SmokeFinished(result.clone()));
+            }
+            result
+        };
+        tokio::join!(watch, smoke)
+    };
+    let (mut watch_result, smoke_result) = if let Some(saved) = saved_checks {
+        saved
+    } else {
+        tokio::select! {
+            results = checks => results,
+            () = async {
+                loop {
+                    tokio::time::sleep(lock::HEARTBEAT_EVERY).await;
+                    lock::heartbeat(&*transport, path, run_id).await;
+                }
+            } => unreachable!("heartbeat never ends"),
+        }
+    };
+    if resume.is_some() && !using_saved_checks && watch_result.status == WatchStatus::Complete {
+        watch_result.status = WatchStatus::Partial;
+        watch_result.warnings.push(
+            "Log watch restarted after attach; entries during the interruption may be missing"
+                .into(),
+        );
+    }
+    if let Some(previous) = resume.as_ref().and_then(|receipt| receipt.watch.as_ref()) {
+        if resume
+            .as_ref()
+            .is_some_and(|receipt| receipt.outcome.is_none())
+        {
+            merge_previous_watch(&mut watch_result, previous);
+            watch_result.status = WatchStatus::Partial;
+            watch_result
+                .warnings
+                .push("Previous observation was interrupted".into());
+        }
+    }
+    if let Some(journal) = &journal {
+        if let Err(error) = journal.observation(watch_result.clone(), smoke_result.clone()) {
+            let _ = events.send(DeployEvent::Interrupted {
+                index: preview.target.steps.len() + 1,
+                reason: format!("could not save post-deploy checks: {error}"),
+            });
+            return;
+        }
+    }
+    if preview.target.watch_log {
+        let _ = events.send(DeployEvent::WatchFinished(watch_result));
+    }
+    if using_saved_checks && preview.target.smoke_url.is_some() {
+        let _ = events.send(DeployEvent::SmokeFinished(smoke_result));
     }
     let event = match end {
         End::Finished(outcome) => {
@@ -717,6 +845,85 @@ async fn run_steps<T: Transport>(
     let _ = events.send(event);
 }
 
+fn should_run_post_checks(outcome: &DeployOutcome) -> bool {
+    match outcome {
+        DeployOutcome::Succeeded | DeployOutcome::StoppedAfterStep { .. } => true,
+        DeployOutcome::FailedAtStep {
+            step,
+            partial_update,
+        } => *step > 0 || *partial_update,
+        _ => false,
+    }
+}
+
+fn merge_previous_watch(current: &mut WatchResult, previous: &WatchResult) {
+    current.duration_ms = current.duration_ms.saturating_add(previous.duration_ms);
+    current.observed_lines = current
+        .observed_lines
+        .saturating_add(previous.observed_lines);
+    current.parsed_lines = current.parsed_lines.saturating_add(previous.parsed_lines);
+    current.dropped_view_lines = current
+        .dropped_view_lines
+        .saturating_add(previous.dropped_view_lines);
+    current.truncated_entries = current
+        .truncated_entries
+        .saturating_add(previous.truncated_entries);
+    current.overflow_groups = current
+        .overflow_groups
+        .saturating_add(previous.overflow_groups);
+    current.overflow_signatures = current
+        .overflow_signatures
+        .saturating_add(previous.overflow_signatures);
+    for group in &previous.new_errors {
+        if let Some(existing) = current
+            .new_errors
+            .iter_mut()
+            .find(|item| item.exception == group.exception && item.file == group.file)
+        {
+            existing.count = existing.count.saturating_add(group.count);
+            existing.overflow_variants = existing
+                .overflow_variants
+                .saturating_add(group.overflow_variants);
+            for variant in &group.variants {
+                if let Some(saved) = existing
+                    .variants
+                    .iter_mut()
+                    .find(|item| item.signature == variant.signature && item.phase == variant.phase)
+                {
+                    saved.count = saved.count.saturating_add(variant.count);
+                } else if existing.variants.len() < 50 {
+                    existing.variants.push(variant.clone());
+                } else {
+                    existing.overflow_variants += 1;
+                }
+            }
+        } else if current.new_errors.len() < 500 {
+            current.new_errors.push(group.clone());
+        } else {
+            current.overflow_groups += 1;
+        }
+    }
+    for warning in &previous.warnings {
+        if current.warnings.len() >= 20 {
+            break;
+        }
+        if !current.warnings.contains(warning) {
+            current.warnings.push(warning.clone());
+        }
+    }
+}
+
+fn post_window() -> std::time::Duration {
+    #[cfg(test)]
+    {
+        std::time::Duration::from_millis(100)
+    }
+    #[cfg(not(test))]
+    {
+        std::time::Duration::from_secs(120)
+    }
+}
+
 /// Runs maintenance down, the steps, and maintenance up. `app_down` is left
 /// set if maintenance mode may still be on.
 #[allow(clippy::too_many_arguments)]
@@ -729,6 +936,7 @@ async fn run_steps_locked<T: Transport>(
     app_down: &mut bool,
     journal: Option<&ReceiptJournal>,
     resume: Option<&Receipt>,
+    observer: Option<&LogObserver>,
 ) -> End {
     let path = &preview.target.path;
     let first_recipe_step = preview.run_plan.first_recipe_step();
@@ -752,6 +960,7 @@ async fn run_steps_locked<T: Transport>(
             }),
     );
     let first_index = steps.first().map(|(index, _, _)| *index).unwrap_or(0);
+    let mut watching = false;
 
     if let Some(receipt) = resume {
         if let Some(outcome) = &receipt.outcome {
@@ -904,6 +1113,10 @@ async fn run_steps_locked<T: Transport>(
                     return End::Finished(DeployOutcome::AbortedBeforeChanges(reason));
                 }
             }
+            if let Some(observer) = observer {
+                observer.begin();
+                watching = true;
+            }
             if preview.target.maintenance
                 && !resume.is_some_and(|receipt| receipt.maintenance_down_done)
             {
@@ -988,6 +1201,12 @@ async fn run_steps_locked<T: Transport>(
             }
         }
 
+        if !watching {
+            if let Some(observer) = observer {
+                observer.begin();
+                watching = true;
+            }
+        }
         if !active_step {
             if let Some(journal) = journal {
                 if let Err(error) = journal.begin_step(index) {
@@ -1096,6 +1315,11 @@ async fn run_steps_locked<T: Transport>(
     }
 
     if *app_down {
+        if !watching {
+            if let Some(observer) = observer {
+                observer.begin();
+            }
+        }
         let active_up = resume.is_some_and(|receipt| receipt.phase == ReceiptPhase::MaintenanceUp);
         if !active_up {
             match lock_owned(transport, path, &preview.run_id).await {
@@ -1360,6 +1584,13 @@ fn recipe_hash(target: &DeployTarget, run_plan: RunPlan) -> String {
         field(part.as_bytes());
     }
     field(&[target.production as u8, target.maintenance as u8]);
+    // Receipts written before observation settings were added keep their
+    // original hash, so an interrupted deploy remains attachable on upgrade.
+    if target.watch_log || target.log.is_some() || target.log_daily || target.smoke_url.is_some() {
+        field(&[target.watch_log as u8, target.log_daily as u8]);
+        field(target.log.as_deref().unwrap_or("").as_bytes());
+        field(target.smoke_url.as_deref().unwrap_or("").as_bytes());
+    }
     match run_plan {
         RunPlan::Deploy => field(b"deploy"),
         RunPlan::Rerun => field(b"rerun"),
@@ -1845,6 +2076,10 @@ mod tests {
             branch: "main".into(),
             steps: steps.iter().map(|s| s.to_string()).collect(),
             maintenance: false,
+            watch_log: false,
+            log: None,
+            log_daily: false,
+            smoke_url: None,
         }
     }
 

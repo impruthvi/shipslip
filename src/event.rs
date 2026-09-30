@@ -1,3 +1,4 @@
+use crate::observation::{LogPhase, SmokeResult, WatchResult};
 use crate::preflight::AbortReason;
 use serde::{Deserialize, Serialize};
 
@@ -103,5 +104,12 @@ pub enum DeployEvent {
         head: Option<String>,
         tree_dirty: Option<bool>,
     },
+    NewLogError {
+        phase: LogPhase,
+        message: String,
+        file_line: Option<String>,
+    },
+    WatchFinished(WatchResult),
+    SmokeFinished(SmokeResult),
     Finished(DeployOutcome),
 }

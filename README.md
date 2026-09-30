@@ -19,6 +19,7 @@ path = "/srv/my-app"
 branch = "main"
 production = false
 maintenance = true
+smoke_url = "https://staging.example.com/health"
 
 [env.production]
 ssh = "my-app-production"
@@ -26,6 +27,8 @@ path = "/srv/my-app"
 branch = "main"
 production = true
 maintenance = true
+log_daily = true
+smoke_url = "https://example.com/health"
 
 [recipe.deploy]
 steps = [
@@ -41,6 +44,11 @@ environment. `steps` are shell commands run in order; if `[recipe.deploy]` is
 omitted, Shipslip announces and uses its Laravel default recipe. When
 `maintenance = true`, Shipslip runs `php artisan down` before the run and
 `php artisan up` after all steps succeed.
+
+Shipslip watches `storage/logs/laravel.log` by default. Set `log` to another
+path. With `log_daily = true`, `log` is a directory and prefix (default
+`storage/logs/laravel`), and Shipslip follows the newest `laravel-*.log`.
+An optional `smoke_url` is requested from your Mac after the deploy steps.
 
 From anywhere in the project repository, review and approve the config before
 the first run:
@@ -72,7 +80,8 @@ starting at 1; the built-in Git fast-forward is step 0 and is not selectable.
 Each CLI run saves a local receipt before it starts a remote command. On macOS,
 receipts live under `~/Library/Application Support/Shipslip/receipts/` in a
 directory for the project and environment. The receipt records the approved
-plan, exact commits, step results, recent step output, and final outcome.
+plan, exact commits, step results, recent step output, log watch, smoke result,
+and final outcome.
 Treat receipts as private: command output can contain secrets.
 
 If `slip` exits while a command is running, that command continues on the
@@ -88,6 +97,23 @@ steps if the run still owns the deploy lock. It requires the same local receipt
 and project checkout. Only one process can use a receipt at a time. If the
 server cannot be reached, the receipt stays unfinished so you can try again.
 
+## Post-deploy checks
+
+Shipslip compares log entries against the last 2 MiB of the log and previously
+observed error signatures. It watches during the deploy and for 120 seconds
+after the steps finish. The receipt groups new errors by exception class and
+app file; the displayed line number does not affect the signature. Numbers,
+UUIDs, and long or spaced quoted values are normalized, so some distinct
+errors may be grouped together. Short quoted identifiers remain distinct, so
+request-specific short values may appear as separate variants. "New" means
+first observed after this deploy, not caused by it.
+
+When a log cannot be observed, the receipt records `Partial`, `Unavailable`, or
+`NoLogSeen` rather than reporting zero new errors. The optional smoke check
+follows at most three redirects, verifies TLS, and times out after 10 seconds.
+Its HTTP status and latency are saved separately from the deploy outcome. A
+failed smoke check does not undo a deploy.
+
 ## Config trust
 
 The first use of an environment, or a change to its SSH alias, path, branch,
@@ -101,6 +127,3 @@ Shipslip rejects unknown config keys and checks the syntax of each generated
 step with local `bash -n` when it loads the config. The server repeats the
 syntax check during preflight, before taking the deploy lock. A declined
 deploy confirmation releases its lock without running recipe steps.
-
-The config schema also accepts `log`, `log_daily`, and `smoke_url` for future
-log watching and smoke checks. Those checks are not active in this CLI yet.

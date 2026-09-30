@@ -209,6 +209,10 @@ impl LoadedConfig {
             branch: env.branch.clone(),
             steps: self.steps.clone(),
             maintenance: env.maintenance,
+            watch_log: true,
+            log: env.log.clone(),
+            log_daily: env.log_daily,
+            smoke_url: env.smoke_url.clone(),
         })
     }
 
@@ -273,6 +277,22 @@ fn validate_environment(name: &str, env: &Environment) -> Result<(), ConfigError
     if !is_safe_branch(&env.branch) {
         return Err(ConfigError::Invalid(format!(
             "env.{name}.branch is not a supported branch name"
+        )));
+    }
+    if env.log.as_ref().is_some_and(|log| log.trim().is_empty()) {
+        return Err(ConfigError::Invalid(format!(
+            "env.{name}.log must not be empty"
+        )));
+    }
+    if env.smoke_url.as_ref().is_some_and(|url| {
+        let host = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .and_then(|rest| rest.split(['/', '?', '#']).next());
+        host.is_none_or(str::is_empty) || url.chars().any(char::is_whitespace)
+    }) {
+        return Err(ConfigError::Invalid(format!(
+            "env.{name}.smoke_url must be an HTTP or HTTPS URL without whitespace"
         )));
     }
     Ok(())
