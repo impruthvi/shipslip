@@ -2,9 +2,13 @@
 name = "shipslip"
 version = "0.0.1"
 edition = "2021"
+rust-version = "1.85"
 description = "Deploy with a receipt. Early development."
 license = "MIT"
 repository = "https://github.com/impruthvi/shipslip"
 readme = "README.md"
 
 [dependencies]
+sha2 = "0.11.0"
+thiserror = "2.0.21"
+tokio = { version = "1.53.1", features = ["macros", "rt", "sync"] }
