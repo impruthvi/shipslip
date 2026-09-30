@@ -29,6 +29,30 @@ pub struct DeployTarget {
     pub maintenance: bool,
 }
 
+/// Which part of the configured recipe to run after its commit is deployed.
+/// Recipe steps are numbered from 1; step 0 is the built-in Git fast-forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunPlan {
+    Deploy,
+    /// Run all recipe steps against the already-checked-out target commit.
+    Rerun,
+    /// Run recipe step `step` and the remaining recipe steps.
+    FromStep(usize),
+}
+
+impl RunPlan {
+    fn is_rerun(self) -> bool {
+        !matches!(self, Self::Deploy)
+    }
+
+    fn first_recipe_step(self) -> usize {
+        match self {
+            Self::Deploy | Self::Rerun => 1,
+            Self::FromStep(step) => step,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareError {
     #[error("invalid target: {0}")]
@@ -55,6 +79,7 @@ pub struct Preview {
     target_sha: String,
     commits: Vec<String>,
     recipe_hash: String,
+    run_plan: RunPlan,
     run_id: String,
 }
 
@@ -74,6 +99,9 @@ impl Preview {
     }
     pub fn recipe_hash(&self) -> &str {
         &self.recipe_hash
+    }
+    pub fn run_plan(&self) -> RunPlan {
+        self.run_plan
     }
     pub fn run_id(&self) -> &str {
         &self.run_id
@@ -161,6 +189,31 @@ pub async fn prepare<T: Transport>(
     target: DeployTarget,
     transport: &T,
 ) -> Result<Preview, PrepareError> {
+    prepare_with_plan(target, RunPlan::Deploy, transport).await
+}
+
+/// Prepares a deploy, recipe rerun, or recipe restart from a selected step.
+/// Reruns require `origin/<branch>` to match the server's current clean HEAD.
+pub async fn prepare_with_plan<T: Transport>(
+    target: DeployTarget,
+    run_plan: RunPlan,
+    transport: &T,
+) -> Result<Preview, PrepareError> {
+    match run_plan {
+        RunPlan::Deploy => {}
+        RunPlan::Rerun if target.steps.is_empty() => {
+            return Err(PrepareError::InvalidTarget(
+                "rerun requires at least one recipe step".into(),
+            ));
+        }
+        RunPlan::FromStep(step) if step == 0 || step > target.steps.len() => {
+            return Err(PrepareError::InvalidTarget(format!(
+                "from-step must be between 1 and {}",
+                target.steps.len()
+            )));
+        }
+        _ => {}
+    }
     if !is_safe_branch(&target.branch) {
         return Err(PrepareError::InvalidTarget(format!(
             "branch name `{}` is not supported",
@@ -185,7 +238,7 @@ pub async fn prepare<T: Transport>(
     if !is_full_sha(&checks.state.head) {
         return Err(unexpected());
     }
-    if let Some(reason) = preflight::block_reason(&checks, &target.branch) {
+    if let Some(reason) = preflight::block_reason(&checks, &target.branch, run_plan.is_rerun()) {
         return Err(PrepareError::Blocked(reason));
     }
     if !is_full_sha(&checks.target) {
@@ -203,13 +256,14 @@ pub async fn prepare<T: Transport>(
         Acquire::Held(info) => return Err(PrepareError::LockHeld(info)),
     }
 
-    let recipe_hash = recipe_hash(&target);
+    let recipe_hash = recipe_hash(&target, run_plan);
     Ok(Preview {
         target,
         from_sha,
         target_sha,
         commits,
         recipe_hash,
+        run_plan,
         run_id,
     })
 }
@@ -410,25 +464,58 @@ async fn run_steps_locked<T: Transport>(
     app_down: &mut bool,
 ) -> End {
     let path = &preview.target.path;
-    let mut steps = vec![(
-        "git fast-forward".to_string(),
-        format!("git merge --ff-only {}", preview.target_sha),
-    )];
-    steps.extend(preview.target.steps.iter().map(|s| (s.clone(), s.clone())));
+    let first_recipe_step = preview.run_plan.first_recipe_step();
+    let mut steps = Vec::new();
+    if preview.run_plan == RunPlan::Deploy {
+        steps.push((
+            0,
+            "git fast-forward".to_string(),
+            format!("git merge --ff-only {}", preview.target_sha),
+        ));
+    }
+    steps.extend(
+        preview
+            .target
+            .steps
+            .iter()
+            .enumerate()
+            .filter_map(|(step, body)| {
+                let index = step + 1;
+                (index >= first_recipe_step).then(|| (index, body.clone(), body.clone()))
+            }),
+    );
+    let first_index = steps.first().map(|(index, _, _)| *index).unwrap_or(0);
 
-    for (index, (name, body)) in steps.into_iter().enumerate() {
+    for (index, name, body) in steps {
         // Detaching between steps leaves nothing running, so it is a stop.
         if stop.load(Ordering::SeqCst) || *detach.borrow() {
-            return End::Finished(stopped_before(index, StopReason::Requested));
+            return End::Finished(stopped_before_plan(
+                index,
+                first_index,
+                preview.run_plan,
+                StopReason::Requested,
+            ));
         }
         match lock_owned(transport, path, &preview.run_id).await {
             Ok(true) => {}
-            Ok(false) => return End::Finished(stopped_before(index, StopReason::LockLost)),
+            Ok(false) => {
+                return End::Finished(stopped_before_plan(
+                    index,
+                    first_index,
+                    preview.run_plan,
+                    StopReason::LockLost,
+                ))
+            }
             Err(reason) => {
-                return End::Finished(stopped_before(index, StopReason::ConnectFailed(reason)))
+                return End::Finished(stopped_before_plan(
+                    index,
+                    first_index,
+                    preview.run_plan,
+                    StopReason::ConnectFailed(reason),
+                ))
             }
         }
-        if index == 0 {
+        if index == first_index {
             let changed = match read_state(transport, path).await {
                 Ok(state) => preflight::recheck(&state, &preview.from_sha),
                 Err(reason) => Some(reason),
@@ -470,7 +557,12 @@ async fn run_steps_locked<T: Transport>(
                     }
                 }
                 if stop.load(Ordering::SeqCst) || *detach.borrow() {
-                    return End::Finished(stopped_before(0, StopReason::Requested));
+                    return End::Finished(stopped_before_plan(
+                        index,
+                        first_index,
+                        preview.run_plan,
+                        StopReason::Requested,
+                    ));
                 }
             }
         }
@@ -666,6 +758,19 @@ fn stopped_before(index: usize, reason: StopReason) -> DeployOutcome {
     }
 }
 
+fn stopped_before_plan(
+    index: usize,
+    first_index: usize,
+    run_plan: RunPlan,
+    reason: StopReason,
+) -> DeployOutcome {
+    if run_plan.is_rerun() && index == first_index {
+        stopped_before(0, reason)
+    } else {
+        stopped_before(index, reason)
+    }
+}
+
 /// Reads the checkout's state, reconnecting once if the server did not answer.
 async fn read_state<T: Transport>(transport: &T, path: &str) -> Result<State, AbortReason> {
     let script = preflight::state_script(path);
@@ -709,7 +814,7 @@ async fn wait_for_detach(detach: &mut watch::Receiver<bool>) {
     }
 }
 
-fn recipe_hash(target: &DeployTarget) -> String {
+fn recipe_hash(target: &DeployTarget, run_plan: RunPlan) -> String {
     let mut h = Sha256::new();
     let mut field = |bytes: &[u8]| {
         h.update((bytes.len() as u64).to_le_bytes());
@@ -719,6 +824,14 @@ fn recipe_hash(target: &DeployTarget) -> String {
         field(part.as_bytes());
     }
     field(&[target.production as u8, target.maintenance as u8]);
+    match run_plan {
+        RunPlan::Deploy => field(b"deploy"),
+        RunPlan::Rerun => field(b"rerun"),
+        RunPlan::FromStep(step) => {
+            field(b"from-step");
+            field(&step.to_be_bytes());
+        }
+    }
     for step in &target.steps {
         field(step.as_bytes());
     }
@@ -819,8 +932,10 @@ mod tests {
             if self.ancestor {
                 out.push("@ancestor".into());
             }
-            out.push("@commit 2222222 Fix checkout".into());
-            out.push("@commit 1a2b3c4 Add invoices".into());
+            if self.target != self.head {
+                out.push("@commit 2222222 Fix checkout".into());
+                out.push("@commit 1a2b3c4 Add invoices".into());
+            }
             if let Some((step, message)) = &self.invalid_step {
                 out.push(format!("@invalid {step}"));
                 out.push(format!("@message {message}"));
@@ -1190,6 +1305,17 @@ mod tests {
         prepare(target(production, steps), fake).await.unwrap()
     }
 
+    async fn prepared_with_plan(
+        fake: &Fake,
+        production: bool,
+        steps: &[&str],
+        run_plan: RunPlan,
+    ) -> Preview {
+        prepare_with_plan(target(production, steps), run_plan, fake)
+            .await
+            .unwrap()
+    }
+
     async fn collect(mut rx: mpsc::UnboundedReceiver<DeployEvent>) -> Vec<DeployEvent> {
         let mut out = Vec::new();
         while let Some(e) = rx.recv().await {
@@ -1217,6 +1343,53 @@ mod tests {
         let fake = preflight().server(|s| s.target = FROM.into());
         let err = prepare(target(false, &[]), &fake).await.unwrap_err();
         assert!(matches!(err, PrepareError::Blocked(BlockReason::UpToDate)));
+    }
+
+    #[tokio::test]
+    async fn rerun_preview_allows_only_the_clean_checked_out_target() {
+        let fake = preflight().server(|s| {
+            s.head = TO.into();
+            s.target = TO.into();
+        });
+        let p = prepared_with_plan(&fake, false, &["php artisan migrate"], RunPlan::Rerun).await;
+        assert_eq!(p.from_sha(), TO);
+        assert_eq!(p.target_sha(), TO);
+        assert!(p.commits().is_empty());
+        assert_eq!(p.run_plan(), RunPlan::Rerun);
+    }
+
+    #[tokio::test]
+    async fn rerun_preview_blocks_when_target_is_not_already_checked_out() {
+        let fake = preflight();
+        let err = prepare_with_plan(
+            target(false, &["php artisan migrate"]),
+            RunPlan::Rerun,
+            &fake,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            PrepareError::Blocked(BlockReason::RerunTargetMismatch { .. })
+        ));
+        assert_eq!(fake.lock_owner(), None);
+    }
+
+    #[tokio::test]
+    async fn from_step_rejects_zero_and_out_of_range_steps_before_remote_work() {
+        for step in [0, 2] {
+            let fake = preflight();
+            assert!(matches!(
+                prepare_with_plan(
+                    target(false, &["only step"]),
+                    RunPlan::FromStep(step),
+                    &fake
+                )
+                .await,
+                Err(PrepareError::InvalidTarget(_))
+            ));
+            assert!(fake.ran.lock().unwrap().is_empty());
+        }
     }
 
     #[tokio::test]
@@ -1536,6 +1709,38 @@ mod tests {
                 | DeployEvent::MaintenanceFinished { .. }
                 | DeployEvent::AppLeftDown
         )));
+    }
+
+    #[tokio::test]
+    async fn from_step_skips_the_fast_forward_and_earlier_recipe_steps() {
+        let fake = Arc::new(preflight().on("second command", &[], 0).server(|s| {
+            s.head = TO.into();
+            s.target = TO.into();
+        }));
+        let p = prepare_with_plan(
+            target(false, &["first command", "second command"]),
+            RunPlan::FromStep(2),
+            &*fake,
+        )
+        .await
+        .unwrap();
+        let c = Confirmation::from(&p, None).unwrap();
+        let (rx, _handle) = execute(p, c, fake.clone()).unwrap();
+        let events = collect(rx).await;
+
+        assert!(events.contains(&DeployEvent::StepStarted {
+            index: 2,
+            name: "second command".into(),
+        }));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, DeployEvent::StepStarted { index: 0 | 1, .. })));
+        assert_eq!(fake.launched("first command"), 0);
+        assert_eq!(fake.launched("git merge --ff-only"), 0);
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
     }
 
     #[tokio::test]
@@ -2219,7 +2424,19 @@ mod tests {
         for change in changes {
             let mut t = base.clone();
             change(&mut t);
-            assert_ne!(recipe_hash(&t), recipe_hash(&base), "{t:?}");
+            assert_ne!(
+                recipe_hash(&t, RunPlan::Deploy),
+                recipe_hash(&base, RunPlan::Deploy),
+                "{t:?}"
+            );
         }
+        assert_ne!(
+            recipe_hash(&base, RunPlan::Deploy),
+            recipe_hash(&base, RunPlan::Rerun)
+        );
+        assert_ne!(
+            recipe_hash(&base, RunPlan::FromStep(1)),
+            recipe_hash(&base, RunPlan::FromStep(2))
+        );
     }
 }

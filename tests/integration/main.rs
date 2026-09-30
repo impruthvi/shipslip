@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{
-    break_lock, bring_app_up, cancel, execute, prepare, AbortReason, BlockReason, BreakLockError,
-    BringUpError, Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle,
-    MaintenancePhase, PrepareError, StepStatus, StopReason,
+    break_lock, bring_app_up, cancel, execute, prepare, prepare_with_plan, AbortReason,
+    BlockReason, BreakLockError, BringUpError, Confirmation, DeployEvent, DeployOutcome,
+    DeployTarget, ExecutionHandle, MaintenancePhase, PrepareError, RunPlan, StepStatus, StopReason,
 };
 use tokio::sync::mpsc;
 
@@ -242,7 +242,17 @@ fn maintenance_target(path: &str, steps: &[&str]) -> DeployTarget {
 }
 
 async fn deploy(transport: Arc<SshTransport>, target: DeployTarget) -> Vec<DeployEvent> {
-    let preview = prepare(target, &*transport).await.unwrap();
+    deploy_with_plan(transport, target, RunPlan::Deploy).await
+}
+
+async fn deploy_with_plan(
+    transport: Arc<SshTransport>,
+    target: DeployTarget,
+    run_plan: RunPlan,
+) -> Vec<DeployEvent> {
+    let preview = prepare_with_plan(target, run_plan, &*transport)
+        .await
+        .unwrap();
     let confirmation = Confirmation::from(&preview, None).unwrap();
     let (mut rx, _handle) = execute(preview, confirmation, transport).unwrap();
     let mut events = Vec::new();
@@ -1037,5 +1047,71 @@ async fn maintenance_disabled_never_invokes_php() {
             ""
         ),
         ""
+    );
+}
+
+#[tokio::test]
+async fn rerun_executes_recipe_again_without_a_git_fast_forward() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    server.exec(&format!("git -C {path} merge --ff-only origin/main"), "");
+
+    let events = deploy_with_plan(
+        ssh,
+        target(&path, &["echo rerun > rerun-marker"]),
+        RunPlan::Rerun,
+    )
+    .await;
+    assert!(events.contains(&DeployEvent::StepStarted {
+        index: 1,
+        name: "echo rerun > rerun-marker".into(),
+    }));
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, DeployEvent::StepStarted { index: 0, .. })));
+    assert_eq!(
+        server.exec(&format!("cat {path}/rerun-marker"), ""),
+        "rerun"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+}
+
+#[tokio::test]
+async fn from_step_starts_at_the_selected_recipe_step() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    server.exec(&format!("git -C {path} merge --ff-only origin/main"), "");
+
+    let events = deploy_with_plan(
+        ssh,
+        target(
+            &path,
+            &[
+                "echo first > selected-marker",
+                "echo second > selected-marker",
+            ],
+        ),
+        RunPlan::FromStep(2),
+    )
+    .await;
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, DeployEvent::StepStarted { index: 0 | 1, .. })));
+    assert!(events.contains(&DeployEvent::StepStarted {
+        index: 2,
+        name: "echo second > selected-marker".into(),
+    }));
+    assert_eq!(
+        server.exec(&format!("cat {path}/selected-marker"), ""),
+        "second"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
     );
 }

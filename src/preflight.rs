@@ -24,6 +24,11 @@ pub enum BlockReason {
     FetchFailed(String),
     /// `origin/<branch>` does not match what was just fetched.
     FetchMismatch,
+    /// A rerun requires the requested release to be checked out already.
+    RerunTargetMismatch {
+        head: String,
+        target: String,
+    },
     /// The checked-out commit is not an ancestor of `origin/<branch>`.
     NotFastForward,
     /// `bash -n` rejected a step script.
@@ -53,6 +58,10 @@ impl fmt::Display for BlockReason {
                 write!(f, "the server couldn't fetch from origin: {output}")
             }
             Self::FetchMismatch => write!(f, "fetched commit does not match origin"),
+            Self::RerunTargetMismatch { head, target } => write!(
+                f,
+                "cannot rerun: checkout is {head}, but origin points to {target}"
+            ),
             Self::NotFastForward => write!(f, "origin is not a fast-forward of the server's HEAD"),
             Self::InvalidStep { step, message } => write!(f, "step {step} is invalid: {message}"),
             Self::CommandFailed { code, output } => {
@@ -221,7 +230,11 @@ pub(crate) fn parse_preflight(lines: &[String]) -> Preflight {
 }
 
 /// The first reason to refuse, in the order a person would fix them.
-pub(crate) fn block_reason(p: &Preflight, branch: &str) -> Option<BlockReason> {
+pub(crate) fn block_reason(
+    p: &Preflight,
+    branch: &str,
+    allow_up_to_date: bool,
+) -> Option<BlockReason> {
     let s = &p.state;
     if let Some(op) = &s.operation {
         return Some(BlockReason::OperationInProgress(op.clone()));
@@ -241,11 +254,17 @@ pub(crate) fn block_reason(p: &Preflight, branch: &str) -> Option<BlockReason> {
     if p.target != p.fetch_head {
         return Some(BlockReason::FetchMismatch);
     }
-    if p.target == s.head {
+    if p.target == s.head && !allow_up_to_date {
         return Some(BlockReason::UpToDate);
     }
     if !p.ancestor {
         return Some(BlockReason::NotFastForward);
+    }
+    if allow_up_to_date && p.target != s.head {
+        return Some(BlockReason::RerunTargetMismatch {
+            head: s.head.clone(),
+            target: p.target.clone(),
+        });
     }
     p.invalid_step
         .as_ref()
@@ -336,48 +355,70 @@ mod tests {
 
     #[test]
     fn block_reasons_in_order() {
-        assert_eq!(block_reason(&clean(), "main"), None);
+        assert_eq!(block_reason(&clean(), "main", false), None);
 
         let mut p = clean();
         p.state.operation = Some("MERGE_HEAD".into());
         p.state.dirty = vec![" M f".into()];
         assert_eq!(
-            block_reason(&p, "main"),
+            block_reason(&p, "main", false),
             Some(BlockReason::OperationInProgress("MERGE_HEAD".into()))
         );
         p.state.operation = None;
         assert!(matches!(
-            block_reason(&p, "main"),
+            block_reason(&p, "main", false),
             Some(BlockReason::DirtyTree(_))
         ));
 
         let mut p = clean();
         assert_eq!(
-            block_reason(&p, "release"),
+            block_reason(&p, "release", false),
             Some(BlockReason::WrongBranch {
                 expected: "release".into(),
                 actual: "main".into()
             })
         );
         p.fetch_head = "c".into();
-        assert_eq!(block_reason(&p, "main"), Some(BlockReason::FetchMismatch));
+        assert_eq!(
+            block_reason(&p, "main", false),
+            Some(BlockReason::FetchMismatch)
+        );
 
         let mut p = clean();
         p.target = "a".into();
         p.fetch_head = "a".into();
-        assert_eq!(block_reason(&p, "main"), Some(BlockReason::UpToDate));
+        assert_eq!(block_reason(&p, "main", false), Some(BlockReason::UpToDate));
+        assert_eq!(block_reason(&p, "main", true), None);
 
         let mut p = clean();
         p.ancestor = false;
-        assert_eq!(block_reason(&p, "main"), Some(BlockReason::NotFastForward));
+        assert_eq!(
+            block_reason(&p, "main", false),
+            Some(BlockReason::NotFastForward)
+        );
 
         let mut p = clean();
         p.invalid_step = Some((2, "oops".into()));
         assert_eq!(
-            block_reason(&p, "main"),
+            block_reason(&p, "main", false),
             Some(BlockReason::InvalidStep {
                 step: 2,
                 message: "oops".into()
+            })
+        );
+    }
+
+    #[test]
+    fn rerun_requires_the_fetched_target_to_be_checked_out() {
+        let mut p = clean();
+        p.state.head = "a".into();
+        p.target = "b".into();
+        p.fetch_head = "b".into();
+        assert_eq!(
+            block_reason(&p, "main", true),
+            Some(BlockReason::RerunTargetMismatch {
+                head: "a".into(),
+                target: "b".into(),
             })
         );
     }
