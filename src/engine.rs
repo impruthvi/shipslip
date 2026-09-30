@@ -711,6 +711,9 @@ async fn run_steps<T: Transport>(
             DeployEvent::Interrupted { index, reason }
         }
     };
+    // A caller may attach as soon as it receives Detached or Interrupted.
+    // Release the local claim before reporting that the observer has stopped.
+    drop(journal);
     let _ = events.send(event);
 }
 
