@@ -15,14 +15,15 @@ mod engine;
 mod event;
 mod lock;
 mod preflight;
+pub mod receipt;
 mod runner;
 mod script;
 pub mod transport;
 
 pub use engine::{
-    break_lock, bring_app_up, cancel, execute, prepare, prepare_with_plan, BreakLockError,
-    BringUpError, ConfirmError, Confirmation, DeployTarget, ExecuteError, ExecutionHandle,
-    PrepareError, Preview, RunPlan,
+    attach, break_lock, bring_app_up, cancel, execute, execute_recorded, prepare,
+    prepare_with_plan, AttachError, BreakLockError, BringUpError, ConfirmError, Confirmation,
+    DeployTarget, ExecuteError, ExecutionHandle, PrepareError, Preview, RunPlan,
 };
 pub use event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason};
 pub use lock::{LockInfo, LockOwner, STALE_AFTER};

@@ -7,10 +7,11 @@ use std::sync::Arc;
 use shipslip::config::{
     approve_trust, default_trust_path, trust_status, LoadedConfig, TrustSnapshot, TrustStatus,
 };
+use shipslip::receipt::{default_receipts_root, find_open, ReceiptJournal};
 use shipslip::transport::SshTransport;
 use shipslip::{
-    cancel, execute, prepare_with_plan, Confirmation, DeployEvent, DeployOutcome, DeployTarget,
-    MaintenancePhase, RunPlan, StepStatus,
+    attach, cancel, execute_recorded, prepare_with_plan, Confirmation, DeployEvent, DeployOutcome,
+    DeployTarget, MaintenancePhase, RunPlan, StepStatus,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -33,9 +34,13 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         eprintln!("Using the default Laravel deploy recipe; add [recipe.deploy] to customize it.");
     }
     let trust_path = default_trust_path()?;
+    let receipts_root = default_receipts_root()?;
     let (environment, plan) = match command.action {
         Action::Trust { environment } => {
             return trust_command(&config, &trust_path, environment.as_deref());
+        }
+        Action::Attach { environment } => {
+            return attach_command(&config, &trust_path, &receipts_root, &environment).await;
         }
         Action::Run { environment, plan } => (environment, plan),
     };
@@ -57,13 +62,40 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
 
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
     let preview = prepare_with_plan(target.clone(), plan, transport.as_ref()).await?;
+    let journal = match ReceiptJournal::create(
+        &receipts_root,
+        config.project_name(),
+        config.repo_root(),
+        &preview,
+    ) {
+        Ok(journal) => Arc::new(journal),
+        Err(error) => {
+            cancel(preview, transport.as_ref()).await?;
+            return Err(error.into());
+        }
+    };
     show_preview(&preview);
 
-    let Some((preview, confirmation)) = confirm(preview, &target, transport.as_ref()).await? else {
+    let Some((preview, confirmation)) =
+        confirm(preview, &target, transport.as_ref(), &journal).await?
+    else {
         return Ok(ExitCode::SUCCESS);
     };
+    let cancel_preview = preview.clone();
+    let (events, _handle) =
+        match execute_recorded(preview, confirmation, transport.clone(), journal.clone()) {
+            Ok(run) => run,
+            Err(error) => {
+                cancel_prepared(cancel_preview, transport.as_ref(), &journal).await?;
+                return Err(error.into());
+            }
+        };
+    follow_events(events).await
+}
 
-    let (mut events, _handle) = execute(preview, confirmation, transport)?;
+async fn follow_events(
+    mut events: tokio::sync::mpsc::UnboundedReceiver<DeployEvent>,
+) -> Result<ExitCode, Box<dyn Error>> {
     let mut succeeded = false;
     while let Some(event) = events.recv().await {
         match event {
@@ -163,6 +195,19 @@ fn parse_args() -> Result<Option<Command>, Box<dyn Error>> {
             action: Action::Trust { environment },
         }));
     }
+    if action == "attach" {
+        let environment = args
+            .get(index)
+            .ok_or_else(|| invalid_input("attach requires an environment name"))?
+            .clone();
+        if index + 1 != args.len() {
+            return Err(invalid_input("attach accepts one environment name").into());
+        }
+        return Ok(Some(Command {
+            config,
+            action: Action::Attach { environment },
+        }));
+    }
     let environment = args
         .get(index)
         .ok_or_else(|| invalid_input("missing environment name"))?
@@ -208,11 +253,13 @@ fn print_help() {
          Usage:\n\
          \x20 slip [--config FILE] <deploy|rerun|from-step> <ENV> [STEP]\n\
          \x20 slip [--config FILE] trust [ENV]\n\n\
+         \x20 slip [--config FILE] attach ENV\n\n\
          Commands:\n\
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\
          \x20 rerun ENV          Run all recipe steps on the already-deployed commit\n\
          \x20 from-step ENV STEP Run recipe steps starting at STEP (steps start at 1)\n\n\
          \x20 trust [ENV]         Review and approve config changes\n\n\
+         \x20 attach ENV         Resume an unfinished run without relaunching its active step\n\n\
          Config is discovered from the current directory up to the git root.\n\
          SHIPSLIP_CONFIG can select a different file."
     );
@@ -302,6 +349,72 @@ fn trust_command(
     Ok(ExitCode::SUCCESS)
 }
 
+async fn attach_command(
+    config: &LoadedConfig,
+    trust_path: &Path,
+    receipts_root: &Path,
+    environment: &str,
+) -> Result<ExitCode, Box<dyn Error>> {
+    let target = config.target(environment).ok_or_else(|| {
+        invalid_input(format!("environment `{environment}` is not in the config"))
+    })?;
+    let snapshot = config
+        .trust_snapshot(environment)
+        .expect("target has an environment");
+    if !matches!(
+        trust_status(trust_path, config.repo_root(), environment, &snapshot)?,
+        TrustStatus::Trusted
+    ) {
+        return Err(invalid_input(format!(
+            "config for `{environment}` is untrusted; run `slip trust {environment}` first"
+        ))
+        .into());
+    }
+    let path = find_open(
+        receipts_root,
+        config.project_name(),
+        environment,
+        config.repo_root(),
+    )?
+    .ok_or_else(|| invalid_input(format!("no unfinished run for `{environment}`")))?;
+    let journal = Arc::new(ReceiptJournal::load(&path)?);
+    journal.claim()?;
+    let receipt = journal.snapshot();
+    if receipt.project != config.project_name()
+        || receipt.repo_root != config.repo_root().to_string_lossy()
+        || receipt.target != target
+    {
+        return Err(invalid_input(
+            "the unfinished run uses different deploy settings; inspect the receipt before recovery",
+        )
+        .into());
+    }
+    println!("Run:        {}", receipt.run_id);
+    println!("Environment: {}", receipt.target.env);
+    println!("Target SHA:  {}", receipt.target_sha);
+    println!("Last phase:  {:?}", receipt.phase);
+    println!("Receipt:     {}", path.display());
+    if target.production {
+        print!("Type `{environment}` to resume this production run: ");
+    } else {
+        print!("Resume this run? [y/N] ");
+    }
+    io::stdout().flush()?;
+    let answer = read_answer()?;
+    let approved = if target.production {
+        answer == environment
+    } else {
+        matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes")
+    };
+    if !approved {
+        println!("Run remains unfinished.");
+        return Ok(ExitCode::SUCCESS);
+    }
+    let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
+    let (events, _handle) = attach(journal, transport)?;
+    follow_events(events).await
+}
+
 fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) {
     show_change(
         "ssh",
@@ -371,6 +484,7 @@ async fn confirm(
     preview: shipslip::Preview,
     target: &DeployTarget,
     transport: &SshTransport,
+    journal: &ReceiptJournal,
 ) -> Result<Option<(shipslip::Preview, Confirmation)>, Box<dyn Error>> {
     let answer = (|| {
         if target.production {
@@ -384,7 +498,7 @@ async fn confirm(
     let answer = match answer {
         Ok(answer) => answer,
         Err(error) => {
-            cancel(preview, transport).await?;
+            cancel_prepared(preview, transport, journal).await?;
             return Err(error.into());
         }
     };
@@ -395,7 +509,7 @@ async fn confirm(
         matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes")
     };
     if !approved {
-        cancel(preview, transport).await?;
+        cancel_prepared(preview, transport, journal).await?;
         if target.production {
             println!("Environment name did not match; no deploy steps were run.");
         } else {
@@ -408,11 +522,24 @@ async fn confirm(
     let confirmation = match Confirmation::from(&preview, typed_env) {
         Ok(confirmation) => confirmation,
         Err(error) => {
-            cancel(preview, transport).await?;
+            cancel_prepared(preview, transport, journal).await?;
             return Err(error.into());
         }
     };
     Ok(Some((preview, confirmation)))
+}
+
+async fn cancel_prepared(
+    preview: shipslip::Preview,
+    transport: &SshTransport,
+    journal: &ReceiptJournal,
+) -> Result<(), Box<dyn Error>> {
+    let save = journal.record_outcome(DeployOutcome::CancelledBeforeChanges);
+    let release = cancel(preview, transport).await;
+    save?;
+    release?;
+    journal.finish(DeployOutcome::CancelledBeforeChanges)?;
+    Ok(())
 }
 
 fn show_step_result(index: usize, status: StepStatus, exit_code: Option<i32>) {
@@ -486,4 +613,5 @@ struct Command {
 enum Action {
     Run { environment: String, plan: RunPlan },
     Trust { environment: Option<String> },
+    Attach { environment: String },
 }
