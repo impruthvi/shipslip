@@ -10,7 +10,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-use crate::{DeployOutcome, DeployTarget, MaintenancePhase, Preview, RunPlan, StepStatus};
+use crate::{
+    DeployOutcome, DeployTarget, MaintenancePhase, Preview, RunPlan, SmokeResult, StepStatus,
+    WatchResult,
+};
 
 const VERSION: u32 = 1;
 const OUTPUT_LINES: usize = 200;
@@ -116,6 +119,10 @@ pub struct Receipt {
     pub server_head_at_end: Option<String>,
     pub tree_dirty: Option<bool>,
     pub last_message: Option<String>,
+    #[serde(default)]
+    pub watch: Option<WatchResult>,
+    #[serde(default)]
+    pub smoke: Option<SmokeResult>,
 }
 
 impl Receipt {
@@ -179,6 +186,8 @@ impl Receipt {
             server_head_at_end: None,
             tree_dirty: None,
             last_message: None,
+            watch: None,
+            smoke: None,
         }
     }
 
@@ -386,6 +395,26 @@ impl ReceiptJournal {
 
     pub fn record_outcome(&self, outcome: DeployOutcome) -> Result<(), ReceiptError> {
         self.update(|receipt| receipt.outcome = Some(outcome))
+    }
+
+    pub fn observation(&self, watch: WatchResult, smoke: SmokeResult) -> Result<(), ReceiptError> {
+        self.update(|receipt| {
+            receipt.watch = Some(watch);
+            receipt.smoke = Some(smoke);
+        })
+    }
+
+    pub fn history_path(&self) -> PathBuf {
+        let env_dir = self
+            .path
+            .parent()
+            .expect("receipt has environment directory");
+        let project_dir = env_dir.parent().expect("receipt has project directory");
+        let root = project_dir.parent().expect("receipt has root directory");
+        root.join("signatures")
+            .join(project_dir.file_name().expect("project directory has name"))
+            .join(env_dir.file_name().expect("environment directory has name"))
+            .join("history.json")
     }
 
     pub fn finish(&self, outcome: DeployOutcome) -> Result<(), ReceiptError> {

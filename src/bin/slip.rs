@@ -11,7 +11,7 @@ use shipslip::receipt::{default_receipts_root, find_open, ReceiptJournal};
 use shipslip::transport::SshTransport;
 use shipslip::{
     attach, cancel, execute_recorded, prepare_with_plan, Confirmation, DeployEvent, DeployOutcome,
-    DeployTarget, MaintenancePhase, RunPlan, StepStatus,
+    DeployTarget, MaintenancePhase, RunPlan, SmokeResult, StepStatus, WatchStatus,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -138,6 +138,42 @@ async fn follow_events(
                     }
                 );
             }
+            DeployEvent::NewLogError {
+                phase,
+                message,
+                file_line,
+            } => {
+                println!("New log error ({phase:?}): {message}");
+                if let Some(file_line) = file_line {
+                    println!("  at {file_line}");
+                }
+            }
+            DeployEvent::WatchFinished(result) => {
+                println!(
+                    "Log watch: {:?} ({} new groups)",
+                    result.status,
+                    result.new_errors.len()
+                );
+                if result.status == WatchStatus::NoLogSeen {
+                    eprintln!("No log file appeared; check LOG_CHANNEL.");
+                }
+                for warning in result.warnings {
+                    eprintln!("  {warning}");
+                }
+            }
+            DeployEvent::SmokeFinished(result) => match result {
+                SmokeResult::Passed { status, latency_ms } => {
+                    println!("Smoke check: HTTP {status} in {latency_ms} ms")
+                }
+                SmokeResult::Failed { status, reason } => eprintln!(
+                    "Smoke check failed{}: {reason}",
+                    status
+                        .map(|code| format!(" (HTTP {code})"))
+                        .unwrap_or_default()
+                ),
+                SmokeResult::Skipped => println!("Smoke check: skipped"),
+                SmokeResult::NotConfigured => {}
+            },
             DeployEvent::Detached { index } => {
                 println!("Stopped observing step {index}; it continues on the server.");
             }
@@ -299,6 +335,25 @@ fn show_preview(preview: &shipslip::Preview) {
     if preview.target().maintenance {
         println!("Maintenance: enabled");
     }
+    if preview.target().watch_log {
+        let default = if preview.target().log_daily {
+            "storage/logs/laravel"
+        } else {
+            "storage/logs/laravel.log"
+        };
+        println!(
+            "Log watch:   {}{} (120 s after steps)",
+            preview.target().log.as_deref().unwrap_or(default),
+            if preview.target().log_daily {
+                "-*.log"
+            } else {
+                ""
+            }
+        );
+    }
+    if let Some(url) = &preview.target().smoke_url {
+        println!("Smoke URL:   {url}");
+    }
     if preview.target().production {
         println!("This is a production environment.");
     }
@@ -382,7 +437,7 @@ async fn attach_command(
     let receipt = journal.snapshot();
     if receipt.project != config.project_name()
         || receipt.repo_root != config.repo_root().to_string_lossy()
-        || receipt.target != target
+        || !saved_target_matches_current(&receipt.target, &target)
     {
         return Err(invalid_input(
             "the unfinished run uses different deploy settings; inspect the receipt before recovery",
@@ -413,6 +468,25 @@ async fn attach_command(
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
     let (events, _handle) = attach(journal, transport)?;
     follow_events(events).await
+}
+
+fn saved_target_matches_current(saved: &DeployTarget, current: &DeployTarget) -> bool {
+    if saved == current {
+        return true;
+    }
+    // Receipts from before log observation was added have no observation
+    // fields. Keep their exact approved deploy commands attachable.
+    !saved.watch_log
+        && saved.log.is_none()
+        && !saved.log_daily
+        && saved.smoke_url.is_none()
+        && saved.env == current.env
+        && saved.production == current.production
+        && saved.ssh_alias == current.ssh_alias
+        && saved.path == current.path
+        && saved.branch == current.branch
+        && saved.steps == current.steps
+        && saved.maintenance == current.maintenance
 }
 
 fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) {

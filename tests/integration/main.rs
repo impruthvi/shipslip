@@ -233,6 +233,10 @@ fn target(path: &str, steps: &[&str]) -> DeployTarget {
         branch: "main".into(),
         steps: steps.iter().map(|s| s.to_string()).collect(),
         maintenance: false,
+        watch_log: false,
+        log: None,
+        log_daily: false,
+        smoke_url: None,
     }
 }
 

@@ -14,6 +14,7 @@ pub mod config;
 mod engine;
 mod event;
 mod lock;
+pub mod observation;
 mod preflight;
 pub mod receipt;
 mod runner;
@@ -27,4 +28,5 @@ pub use engine::{
 };
 pub use event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason};
 pub use lock::{LockInfo, LockOwner, STALE_AFTER};
+pub use observation::{ErrorGroup, ErrorVariant, LogPhase, SmokeResult, WatchResult, WatchStatus};
 pub use preflight::{AbortReason, BlockReason};

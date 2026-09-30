@@ -9,12 +9,14 @@ repository = "https://github.com/impruthvi/shipslip"
 readme = "README.md"
 
 [dependencies]
+base64 = "0.22"
 fs2 = "0.4"
+regex = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 thiserror = "2.0.21"
-tokio = { version = "1.53.1", features = ["io-util", "macros", "rt", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 toml = "1.1"
 
 [target.'cfg(unix)'.dependencies]
