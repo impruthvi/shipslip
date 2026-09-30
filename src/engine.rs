@@ -3058,6 +3058,13 @@ mod tests {
             Some(&DeployEvent::Detached { index: 0 })
         );
         assert_eq!(journal.snapshot().phase, ReceiptPhase::Step(0));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&journal) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached observer kept the receipt claim");
         drop(journal);
 
         let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
