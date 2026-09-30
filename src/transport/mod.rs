@@ -31,3 +31,8 @@ pub trait Transport: Send + Sync + 'static {
         output: UnboundedSender<String>,
     ) -> impl Future<Output = Result<i32, TransportError>> + Send;
 }
+
+#[cfg(unix)]
+mod ssh;
+#[cfg(unix)]
+pub use ssh::SshTransport;
