@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-server bash git ca-certificates \
+    && apt-get install -y --no-install-recommends openssh-server bash git procps ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /run/sshd \
     && useradd --create-home --shell /bin/bash deploy \

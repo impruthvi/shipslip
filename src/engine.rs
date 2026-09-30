@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
 use crate::event::{DeployEvent, DeployOutcome, StepStatus};
+use crate::runner::{self, StepResult};
 use crate::script::{is_full_sha, is_safe_branch, shell_quote, wrap_step};
 use crate::transport::{Transport, TransportError};
 
@@ -189,7 +190,7 @@ pub async fn prepare<T: Transport>(
 }
 
 /// Runs the confirmed deploy in the background. Events arrive on the
-/// returned receiver; the last one is `Finished` (or `Detached`).
+/// returned receiver; the last one is `Finished`, `Detached` or `Interrupted`.
 ///
 /// Must be called within a Tokio runtime.
 pub fn execute<T: Transport>(
@@ -240,69 +241,63 @@ async fn run_steps<T: Transport>(
 
         let _ = events.send(DeployEvent::StepStarted { index, name });
 
-        let (line_tx, mut line_rx) = mpsc::unbounded_channel::<String>();
-        let forward_events = events.clone();
-        let forwarder = tokio::spawn(async move {
+        let (line_tx, mut line_rx) = mpsc::unbounded_channel();
+        let step = async {
+            let tx = line_tx;
+            let script = wrap_step(path, &body);
+            runner::run_step(&*transport, &preview.run_id, index, &script, &tx).await
+        };
+        // All output for this step is delivered before its StepFinished.
+        let forward = async {
             while let Some(line) = line_rx.recv().await {
-                let _ = forward_events.send(DeployEvent::Output { index, line });
+                let _ = events.send(DeployEvent::Output { index, line });
             }
-        });
-
-        let script = wrap_step(path, &body);
+        };
         let result = tokio::select! {
             biased;
             _ = wait_for_detach(&mut detach) => {
-                forwarder.abort();
                 let _ = events.send(DeployEvent::Detached { index });
                 return;
             }
-            r = transport.run(&script, line_tx) => r,
+            (r, ()) = async { tokio::join!(step, forward) } => r,
         };
-        // All output for this step is delivered before its StepFinished.
-        let _ = forwarder.await;
 
-        match result {
-            Ok(0) => {
-                let _ = events.send(DeployEvent::StepFinished {
-                    index,
-                    status: StepStatus::Ok,
-                    exit_code: Some(0),
-                });
-            }
-            Ok(code) => {
-                let _ = events.send(DeployEvent::StepFinished {
-                    index,
-                    status: StepStatus::Failed,
-                    exit_code: Some(code),
-                });
-                let _ = events.send(DeployEvent::Finished(DeployOutcome::FailedAtStep(index)));
-                return;
-            }
-            Err(err @ TransportError::Connect(_)) => {
-                let _ = events.send(DeployEvent::StepFinished {
-                    index,
-                    status: StepStatus::NotStarted,
-                    exit_code: None,
-                });
-                let outcome = match index {
-                    0 => DeployOutcome::AbortedBeforeChanges(err.to_string()),
+        let (status, exit_code, outcome) = match result {
+            StepResult::Exited(0) => (StepStatus::Ok, Some(0), None),
+            StepResult::Exited(code) => (
+                StepStatus::Failed,
+                Some(code),
+                Some(DeployOutcome::FailedAtStep(index)),
+            ),
+            StepResult::NotStarted(reason) => (
+                StepStatus::NotStarted,
+                None,
+                Some(match index {
+                    0 => DeployOutcome::AbortedBeforeChanges(reason),
                     n => DeployOutcome::StoppedAfterStep(n - 1),
-                };
-                let _ = events.send(DeployEvent::Finished(outcome));
-                return;
-            }
-            Err(err @ TransportError::ConnectionLost(_)) => {
-                let _ = events.send(DeployEvent::StepFinished {
-                    index,
-                    status: StepStatus::Unknown,
-                    exit_code: None,
-                });
-                let _ = events.send(DeployEvent::Finished(DeployOutcome::Unknown {
+                }),
+            ),
+            StepResult::Gone => (
+                StepStatus::Unknown,
+                None,
+                Some(DeployOutcome::Unknown {
                     step: index,
-                    reason: err.to_string(),
-                }));
+                    reason: "the step's process ended without recording an exit code".into(),
+                }),
+            ),
+            StepResult::Interrupted(reason) => {
+                let _ = events.send(DeployEvent::Interrupted { index, reason });
                 return;
             }
+        };
+        let _ = events.send(DeployEvent::StepFinished {
+            index,
+            status,
+            exit_code,
+        });
+        if let Some(outcome) = outcome {
+            let _ = events.send(DeployEvent::Finished(outcome));
+            return;
         }
     }
 
@@ -379,6 +374,8 @@ fn new_run_id() -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{Mutex, OnceLock};
 
     use tokio::sync::Notify;
@@ -388,58 +385,110 @@ mod tests {
     const FROM: &str = "1111111111111111111111111111111111111111";
     const TO: &str = "2222222222222222222222222222222222222222";
 
-    /// Scripted transport: the first rule whose needle appears in the script
-    /// decides the result. Records every script it ran.
+    /// Scripted transport. Preflight commands and steps are matched by the
+    /// first rule whose needle appears in the script. Steps are simulated as
+    /// the detached runner would behave on a server. Records every script.
     #[derive(Default)]
     struct Fake {
         rules: Vec<Rule>,
         ran: Mutex<Vec<String>>,
+        launched: Mutex<HashMap<usize, usize>>,
+        reconnect_fails: bool,
+        reconnects: AtomicUsize,
     }
 
+    #[derive(Default)]
     struct Rule {
         needle: &'static str,
         lines: Vec<&'static str>,
-        result: Result<i32, TransportError>,
+        code: i32,
+        launch: Launch,
+        /// The next observe drops the connection after this many lines.
+        drop_after: Mutex<Option<usize>>,
+        vanishes: bool,
         gate: Option<Arc<Notify>>,
         on_run: Option<Box<dyn Fn() + Send + Sync>>,
     }
 
+    #[derive(Default, PartialEq)]
+    enum Launch {
+        #[default]
+        Ok,
+        Unreachable,
+        LostAfterStart,
+        LostBeforeStart,
+    }
+
+    fn lost() -> TransportError {
+        TransportError::ConnectionLost("reset".into())
+    }
+
+    fn number_after(script: &str, prefix: &str) -> usize {
+        let rest = &script[script.find(prefix).unwrap() + prefix.len()..];
+        let end = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
+        rest[..end].parse().unwrap()
+    }
+
     impl Fake {
-        fn rule(mut self, needle: &'static str, result: Result<i32, TransportError>) -> Self {
+        fn rule(mut self, needle: &'static str, lines: &[&'static str], code: i32) -> Self {
             self.rules.push(Rule {
                 needle,
-                lines: vec![],
-                result,
-                gate: None,
-                on_run: None,
+                lines: lines.to_vec(),
+                code,
+                ..Rule::default()
             });
             self
         }
 
-        fn on(mut self, needle: &'static str, lines: &[&'static str], code: i32) -> Self {
-            self = self.rule(needle, Ok(code));
-            self.rules.last_mut().unwrap().lines = lines.to_vec();
+        fn last(&mut self) -> &mut Rule {
+            self.rules.last_mut().unwrap()
+        }
+
+        fn on(self, needle: &'static str, lines: &[&'static str], code: i32) -> Self {
+            self.rule(needle, lines, code)
+        }
+
+        fn launch(mut self, needle: &'static str, launch: Launch) -> Self {
+            self = self.rule(needle, &["step output"], 0);
+            self.last().launch = launch;
             self
         }
 
-        fn lost(self, needle: &'static str) -> Self {
-            self.rule(needle, Err(TransportError::ConnectionLost("reset".into())))
+        fn drops(
+            mut self,
+            needle: &'static str,
+            lines: &[&'static str],
+            code: i32,
+            after: usize,
+        ) -> Self {
+            self = self.rule(needle, lines, code);
+            *self.last().drop_after.get_mut().unwrap() = Some(after);
+            self
         }
 
-        fn unreachable(self, needle: &'static str) -> Self {
-            self.rule(needle, Err(TransportError::Connect("refused".into())))
+        fn vanishes(mut self, needle: &'static str) -> Self {
+            self = self.rule(needle, &[], 0);
+            self.last().vanishes = true;
+            self
         }
 
         fn gated(mut self, needle: &'static str, gate: Arc<Notify>) -> Self {
-            self = self.rule(needle, Ok(0));
-            self.rules.last_mut().unwrap().gate = Some(gate);
+            self = self.rule(needle, &[], 0);
+            self.last().gate = Some(gate);
             self
         }
 
         /// Succeeds, calling `f` while the step is still running.
         fn calls(mut self, needle: &'static str, f: impl Fn() + Send + Sync + 'static) -> Self {
-            self = self.rule(needle, Ok(0));
-            self.rules.last_mut().unwrap().on_run = Some(Box::new(f));
+            self = self.rule(needle, &[], 0);
+            self.last().on_run = Some(Box::new(f));
+            self
+        }
+
+        fn unreachable_after_drop(mut self) -> Self {
+            self.reconnect_fails = true;
             self
         }
 
@@ -451,6 +500,72 @@ mod tests {
                 .filter(|s| s.contains(needle))
                 .count()
         }
+
+        fn matching(&self, script: &str) -> usize {
+            self.rules
+                .iter()
+                .position(|r| script.contains(r.needle))
+                .unwrap_or_else(|| panic!("no fake rule for script:\n{script}"))
+        }
+
+        fn launch_step(&self, script: &str) -> Result<i32, TransportError> {
+            let index = number_after(script, "step-");
+            let rule = self.matching(script);
+            let mut launched = self.launched.lock().unwrap();
+            if launched.contains_key(&index) {
+                return Ok(1);
+            }
+            match self.rules[rule].launch {
+                Launch::Unreachable => return Err(TransportError::Connect("refused".into())),
+                Launch::LostBeforeStart => return Err(lost()),
+                Launch::Ok | Launch::LostAfterStart => {}
+            }
+            launched.insert(index, rule);
+            match self.rules[rule].launch {
+                Launch::LostAfterStart => Err(lost()),
+                _ => Ok(0),
+            }
+        }
+
+        async fn observe(
+            &self,
+            script: &str,
+            output: &mpsc::UnboundedSender<String>,
+        ) -> Result<i32, TransportError> {
+            let index = number_after(script, "step-");
+            let skip = number_after(script, "tail -n +") - 1;
+            let Some(&rule) = self.launched.lock().unwrap().get(&index) else {
+                return Ok(1);
+            };
+            let rule = &self.rules[rule];
+            if skip == 0 {
+                if let Some(gate) = &rule.gate {
+                    gate.notified().await;
+                }
+                if let Some(f) = &rule.on_run {
+                    f();
+                }
+            }
+            let _ = output.send(runner::LOG_START.to_string());
+            let drop_after = rule.drop_after.lock().unwrap().take();
+            let end = drop_after.map_or(rule.lines.len(), |n| skip + n);
+            for line in &rule.lines[skip..end] {
+                let _ = output.send(line.to_string());
+            }
+            match drop_after {
+                Some(_) => Err(lost()),
+                None => Ok(0),
+            }
+        }
+
+        fn probe(&self, script: &str) -> String {
+            let index = number_after(script, "step-");
+            match self.launched.lock().unwrap().get(&index) {
+                None => "not-started".into(),
+                Some(&rule) if self.rules[rule].vanishes => "gone".into(),
+                Some(&rule) => format!("exited {}", self.rules[rule].code),
+            }
+        }
     }
 
     impl Transport for Fake {
@@ -460,21 +575,28 @@ mod tests {
             output: mpsc::UnboundedSender<String>,
         ) -> Result<i32, TransportError> {
             self.ran.lock().unwrap().push(script.to_string());
-            let rule = self
-                .rules
-                .iter()
-                .find(|r| script.contains(r.needle))
-                .unwrap_or_else(|| panic!("no fake rule for script:\n{script}"));
-            if let Some(gate) = &rule.gate {
-                gate.notified().await;
+            if script.contains("setsid") {
+                self.launch_step(script)
+            } else if script.contains(runner::LOG_START) {
+                self.observe(script, &output).await
+            } else if script.contains("not-started") {
+                let _ = output.send(self.probe(script));
+                Ok(0)
+            } else {
+                let rule = &self.rules[self.matching(script)];
+                for line in &rule.lines {
+                    let _ = output.send(line.to_string());
+                }
+                Ok(rule.code)
             }
-            if let Some(f) = &rule.on_run {
-                f();
+        }
+
+        async fn reconnect(&self) -> Result<(), TransportError> {
+            self.reconnects.fetch_add(1, Ordering::SeqCst);
+            match self.reconnect_fails {
+                true => Err(TransportError::Connect("refused".into())),
+                false => Ok(()),
             }
-            for line in &rule.lines {
-                let _ = output.send(line.to_string());
-            }
-            rule.result.clone()
         }
     }
 
@@ -674,18 +796,51 @@ mod tests {
         );
     }
 
+    async fn deploy(fake: &Arc<Fake>, steps: &[&str]) -> Vec<DeployEvent> {
+        let p = prepared(fake, false, steps).await;
+        let c = Confirmation::from(&p, None).unwrap();
+        let (rx, _h) = execute(p, c, fake.clone()).unwrap();
+        collect(rx).await
+    }
+
+    fn output(events: &[DeployEvent], step: usize) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                DeployEvent::Output { index, line } if *index == step => Some(line.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dropped_connection_reattaches_without_losing_or_repeating_output() {
+        let fake = Arc::new(preflight().on("git merge --ff-only", &[], 0).drops(
+            "migrate",
+            &["a", "b", "c"],
+            3,
+            1,
+        ));
+        let events = deploy(&fake, &["php artisan migrate --force"]).await;
+
+        assert_eq!(output(&events, 1), ["a", "b", "c"]);
+        assert!(events.contains(&DeployEvent::StepFinished {
+            index: 1,
+            status: StepStatus::Failed,
+            exit_code: Some(3),
+        }));
+        assert_eq!(fake.reconnects.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.ran_matching("migrate"), 1);
+    }
+
     #[tokio::test]
-    async fn lost_connection_is_unknown() {
+    async fn step_that_vanished_without_exit_code_is_unknown() {
         let fake = Arc::new(
             preflight()
                 .on("git merge --ff-only", &[], 0)
-                .lost("migrate"),
+                .vanishes("migrate"),
         );
-        let p = prepared(&fake, false, &["php artisan migrate --force"]).await;
-        let c = Confirmation::from(&p, None).unwrap();
-        let (rx, _h) = execute(p, c, fake).unwrap();
-
-        let events = collect(rx).await;
+        let events = deploy(&fake, &["php artisan migrate --force"]).await;
         assert!(matches!(
             events.last(),
             Some(DeployEvent::Finished(DeployOutcome::Unknown {
@@ -693,6 +848,69 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn server_unreachable_after_drop_is_interrupted() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .drops("migrate", &["a"], 0, 0)
+                .unreachable_after_drop(),
+        );
+        let events = deploy(&fake, &["php artisan migrate --force"]).await;
+
+        assert!(
+            matches!(
+                events.last(),
+                Some(DeployEvent::Interrupted { index: 1, .. })
+            ),
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|e| matches!(
+            e,
+            DeployEvent::Finished(_) | DeployEvent::StepFinished { index: 1, .. }
+        )));
+        assert_eq!(fake.reconnects.load(Ordering::SeqCst), 4);
+        assert_eq!(fake.ran_matching("migrate"), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lost_launch_that_started_is_followed_not_relaunched() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .launch("migrate", Launch::LostAfterStart),
+        );
+        let events = deploy(&fake, &["php artisan migrate --force"]).await;
+
+        assert_eq!(output(&events, 1), ["step output"]);
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+        assert_eq!(fake.ran_matching("migrate"), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lost_launch_that_never_started_is_not_started() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .launch("migrate", Launch::LostBeforeStart),
+        );
+        let events = deploy(&fake, &["php artisan migrate --force"]).await;
+
+        assert!(events.contains(&DeployEvent::StepFinished {
+            index: 1,
+            status: StepStatus::NotStarted,
+            exit_code: None,
+        }));
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep(0)))
+        );
+        assert_eq!(fake.ran_matching("migrate"), 1);
     }
 
     #[tokio::test]
@@ -823,7 +1041,7 @@ mod tests {
 
     #[tokio::test]
     async fn connect_failure_at_step_0_aborts_before_changes() {
-        let fake = Arc::new(preflight().unreachable("git merge --ff-only"));
+        let fake = Arc::new(preflight().launch("git merge --ff-only", Launch::Unreachable));
         let p = prepared(&fake, false, &["php artisan migrate --force"]).await;
         let c = Confirmation::from(&p, None).unwrap();
         let (rx, _h) = execute(p, c, fake).unwrap();
@@ -849,7 +1067,7 @@ mod tests {
         let fake = Arc::new(
             preflight()
                 .on("git merge --ff-only", &[], 0)
-                .unreachable("migrate"),
+                .launch("migrate", Launch::Unreachable),
         );
         let p = prepared(&fake, false, &["php artisan migrate --force"]).await;
         let c = Confirmation::from(&p, None).unwrap();
