@@ -180,6 +180,7 @@ async fn follow_events(
             DeployEvent::Interrupted { index, reason } => {
                 eprintln!("Lost contact while observing step {index}: {reason}");
             }
+            DeployEvent::RunError { reason } => eprintln!("Deploy could not finish: {reason}"),
             DeployEvent::Finished(outcome) => {
                 succeeded = matches!(&outcome, DeployOutcome::Succeeded);
                 show_outcome(&outcome);

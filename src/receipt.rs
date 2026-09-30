@@ -208,14 +208,7 @@ pub struct ReceiptJournal {
 
 impl Drop for ReceiptJournal {
     fn drop(&mut self) {
-        if let Some(file) = self
-            .claim
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
-        {
-            let _ = FileExt::unlock(&file);
-        }
+        self.release_claim();
     }
 }
 
@@ -278,6 +271,17 @@ impl ReceiptJournal {
         *self.state.lock().unwrap() = read_receipt(&self.path)?;
         *claim = Some(file);
         Ok(())
+    }
+
+    pub(crate) fn release_claim(&self) {
+        if let Some(file) = self
+            .claim
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = FileExt::unlock(&file);
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -347,7 +351,7 @@ impl ReceiptJournal {
                     receipt.maintenance_down_status = Some(status.clone());
                     receipt.maintenance_down_exit_code = exit_code;
                     receipt.maintenance_down_done = status == StepStatus::Ok;
-                    receipt.app_left_down = status != StepStatus::NotStarted;
+                    receipt.app_left_down = crate::event::down_may_have_started(&status);
                 }
                 MaintenancePhase::Up => {
                     receipt.maintenance_up_status = Some(status.clone());

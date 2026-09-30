@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
-use crate::event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason};
+use crate::event::{
+    down_may_have_started, DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason,
+};
 use crate::lock::{self, Acquire, Break, LockInfo, LockOwner};
 use crate::observation::{self, LogObserver, SmokeResult, WatchResult, WatchStatus};
 use crate::preflight::{self, AbortReason, BlockReason, State};
@@ -404,7 +406,8 @@ pub async fn break_lock<T: Transport>(
 }
 
 /// Runs the confirmed deploy in the background. Events arrive on the
-/// returned receiver; the last one is `Finished`, `Detached` or `Interrupted`.
+/// returned receiver; the last one is `Finished`, `Detached`, `Interrupted`,
+/// or `RunError`.
 ///
 /// Must be called within a Tokio runtime.
 pub fn execute<T: Transport>(
@@ -662,6 +665,7 @@ enum End {
     Finished(DeployOutcome),
     Detached(usize),
     Interrupted { index: usize, reason: String },
+    RunError(String),
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -708,6 +712,26 @@ async fn run_steps<T: Transport>(
     };
     if app_down {
         let _ = events.send(DeployEvent::AppLeftDown);
+    }
+    if let End::RunError(reason) = &end {
+        if let Some(observer) = observer {
+            observer.abort();
+        }
+        send_run_error(&events, journal, reason.clone());
+        return;
+    }
+    if let End::Finished(outcome) = &end {
+        let saved = journal
+            .as_ref()
+            .map(|journal| journal.record_outcome(outcome.clone()));
+        if let Some(Err(error)) = saved {
+            send_run_error(
+                &events,
+                journal,
+                format!("could not save the outcome: {error}"),
+            );
+            return;
+        }
     }
     let post_checks = matches!(&end, End::Finished(outcome) if should_run_post_checks(outcome));
     let watch_status = if post_checks {
@@ -776,14 +800,16 @@ async fn run_steps<T: Transport>(
                 .push("Previous observation was interrupted".into());
         }
     }
-    if let Some(journal) = &journal {
-        if let Err(error) = journal.observation(watch_result.clone(), smoke_result.clone()) {
-            let _ = events.send(DeployEvent::Interrupted {
-                index: preview.target.steps.len() + 1,
-                reason: format!("could not save post-deploy checks: {error}"),
-            });
-            return;
-        }
+    let saved = journal
+        .as_ref()
+        .map(|journal| journal.observation(watch_result.clone(), smoke_result.clone()));
+    if let Some(Err(error)) = saved {
+        send_run_error(
+            &events,
+            journal,
+            format!("could not save post-deploy checks: {error}"),
+        );
+        return;
     }
     if preview.target.watch_log {
         let _ = events.send(DeployEvent::WatchFinished(watch_result));
@@ -793,36 +819,30 @@ async fn run_steps<T: Transport>(
     }
     let event = match end {
         End::Finished(outcome) => {
-            if let Some(journal) = &journal {
-                if let Err(error) = journal.record_outcome(outcome.clone()) {
-                    let _ = events.send(DeployEvent::Interrupted {
-                        index: preview.target.steps.len() + 1,
-                        reason: format!("could not save the outcome: {error}"),
-                    });
-                    return;
-                }
-            }
             // After an unknown outcome the server's state needs checking
             // first, so the lock is kept and goes stale.
             if !matches!(outcome, DeployOutcome::Unknown { .. }) {
                 if let Err(error) = lock::release(&*transport, path, run_id).await {
                     if journal.is_some() {
-                        let _ = events.send(DeployEvent::Interrupted {
-                            index: preview.target.steps.len() + 1,
-                            reason: format!("could not release deploy lock: {error}"),
-                        });
+                        send_run_error(
+                            &events,
+                            journal,
+                            format!("could not release deploy lock: {error}"),
+                        );
                         return;
                     }
                 }
             }
-            if let Some(journal) = &journal {
-                if let Err(error) = journal.finish(outcome.clone()) {
-                    let _ = events.send(DeployEvent::Interrupted {
-                        index: preview.target.steps.len() + 1,
-                        reason: format!("could not finalize the receipt: {error}"),
-                    });
-                    return;
-                }
+            let finished = journal
+                .as_ref()
+                .map(|journal| journal.finish(outcome.clone()));
+            if let Some(Err(error)) = finished {
+                send_run_error(
+                    &events,
+                    journal,
+                    format!("could not finalize the receipt: {error}"),
+                );
+                return;
             }
             DeployEvent::Finished(outcome)
         }
@@ -838,11 +858,28 @@ async fn run_steps<T: Transport>(
             }
             DeployEvent::Interrupted { index, reason }
         }
+        End::RunError(_) => unreachable!("local errors end before post-deploy checks"),
     };
-    // A caller may attach as soon as it receives Detached or Interrupted.
+    // A caller may attach as soon as it receives a terminal event.
     // Release the local claim before reporting that the observer has stopped.
+    if let Some(journal) = &journal {
+        journal.release_claim();
+    }
     drop(journal);
     let _ = events.send(event);
+}
+
+fn send_run_error(
+    events: &mpsc::UnboundedSender<DeployEvent>,
+    journal: Option<Arc<ReceiptJournal>>,
+    reason: String,
+) {
+    if let Some(journal) = &journal {
+        let _ = journal.message(reason.clone());
+        journal.release_claim();
+    }
+    drop(journal);
+    let _ = events.send(DeployEvent::RunError { reason });
 }
 
 fn should_run_post_checks(outcome: &DeployOutcome) -> bool {
@@ -1121,6 +1158,14 @@ async fn run_steps_locked<T: Transport>(
                 && !resume.is_some_and(|receipt| receipt.maintenance_down_done)
             {
                 if !active_down {
+                    if stop.load(Ordering::SeqCst) || *detach.borrow() {
+                        return End::Finished(stopped_before_plan(
+                            index,
+                            first_index,
+                            preview.run_plan,
+                            StopReason::Requested,
+                        ));
+                    }
                     if let Some(journal) = journal {
                         if let Err(error) = journal.begin_maintenance(MaintenancePhase::Down) {
                             return End::Finished(DeployOutcome::AbortedBeforeChanges(
@@ -1129,6 +1174,7 @@ async fn run_steps_locked<T: Transport>(
                         }
                     }
                 }
+                *app_down = true;
                 let down = maintenance(
                     transport,
                     preview,
@@ -1144,29 +1190,29 @@ async fn run_steps_locked<T: Transport>(
                     journal,
                 )
                 .await;
+                if let Some(result) = down.as_ref() {
+                    *app_down = down_may_have_started(&result_status(result).0);
+                }
                 if let (Some(journal), Some(result)) = (journal, down.as_ref()) {
                     if !matches!(result, StepResult::Interrupted(_)) {
                         let (status, code) = result_status(result);
                         if let Err(error) =
                             journal.finish_maintenance(MaintenancePhase::Down, status, code)
                         {
-                            return End::Interrupted {
-                                index: 0,
-                                reason: error.to_string(),
-                            };
+                            return End::RunError(format!(
+                                "could not save maintenance down result: {error}"
+                            ));
                         }
                     }
                 }
                 match down {
                     None => return End::Detached(0),
-                    Some(StepResult::Exited(0)) => *app_down = true,
+                    Some(StepResult::Exited(0)) => {}
                     Some(StepResult::Exited(code)) => {
-                        *app_down = false;
                         let reason = AbortReason::MaintenanceDownFailed(code);
                         return End::Finished(DeployOutcome::AbortedBeforeChanges(reason));
                     }
                     Some(StepResult::NotStarted(reason)) => {
-                        *app_down = false;
                         let reason = AbortReason::ConnectFailed(reason);
                         return End::Finished(DeployOutcome::AbortedBeforeChanges(reason));
                     }
@@ -1208,6 +1254,14 @@ async fn run_steps_locked<T: Transport>(
             }
         }
         if !active_step {
+            if stop.load(Ordering::SeqCst) || *detach.borrow() {
+                return End::Finished(stopped_before_plan(
+                    index,
+                    first_index,
+                    preview.run_plan,
+                    StopReason::Requested,
+                ));
+            }
             if let Some(journal) = journal {
                 if let Err(error) = journal.begin_step(index) {
                     return End::Finished(stopped_before_plan(
@@ -1288,17 +1342,11 @@ async fn run_steps_locked<T: Transport>(
         if let Some(journal) = journal {
             if let Some(DeployEvent::ServerState { head, tree_dirty }) = &server_state {
                 if let Err(error) = journal.server_state(head.clone(), *tree_dirty) {
-                    return End::Interrupted {
-                        index,
-                        reason: error.to_string(),
-                    };
+                    return End::RunError(format!("could not save server state: {error}"));
                 }
             }
             if let Err(error) = journal.finish_step(index, status.clone(), exit_code) {
-                return End::Interrupted {
-                    index,
-                    reason: error.to_string(),
-                };
+                return End::RunError(format!("could not save step result: {error}"));
             }
         }
         let _ = events.send(DeployEvent::StepFinished {
@@ -1339,10 +1387,7 @@ async fn run_steps_locked<T: Transport>(
             }
             if let Some(journal) = journal {
                 if let Err(error) = journal.begin_maintenance(MaintenancePhase::Up) {
-                    return End::Interrupted {
-                        index: preview.target.steps.len() + 1,
-                        reason: error.to_string(),
-                    };
+                    return End::RunError(format!("could not save maintenance up start: {error}"));
                 }
             }
         }
@@ -1365,10 +1410,7 @@ async fn run_steps_locked<T: Transport>(
             if !matches!(result, StepResult::Interrupted(_)) {
                 let (status, code) = result_status(result);
                 if let Err(error) = journal.finish_maintenance(MaintenancePhase::Up, status, code) {
-                    return End::Interrupted {
-                        index: preview.target.steps.len() + 1,
-                        reason: error.to_string(),
-                    };
+                    return End::RunError(format!("could not save maintenance up result: {error}"));
                 }
             }
         }
@@ -1663,6 +1705,7 @@ mod tests {
         reconnects: AtomicUsize,
         lock: Mutex<LockSim>,
         server: Mutex<ServerSim>,
+        on_state_check: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     }
 
     /// The app's checkout as preflight and the recheck see it.
@@ -1855,6 +1898,11 @@ mod tests {
             self
         }
 
+        fn on_state_check(self, f: impl Fn() + Send + Sync + 'static) -> Self {
+            *self.on_state_check.lock().unwrap() = Some(Box::new(f));
+            self
+        }
+
         fn loses_lock_before_step(self, step: usize) -> Self {
             self.lock.lock().unwrap().lost_before_step = Some(step);
             self
@@ -2035,12 +2083,18 @@ mod tests {
             } else if script.contains("not-started") {
                 let _ = output.send(self.probe(script));
                 Ok(0)
+            } else if script.contains("@missing") && script.contains("@file") {
+                let _ = output.send("@missing".into());
+                Ok(0)
             } else if script.contains("@fetch_head") {
                 for line in self.server.lock().unwrap().preflight_lines() {
                     let _ = output.send(line);
                 }
                 Ok(0)
             } else if script.contains("@head") {
+                if let Some(f) = self.on_state_check.lock().unwrap().take() {
+                    f();
+                }
                 let server = self.server.lock().unwrap();
                 if server.inspect_fails && self.launched.lock().unwrap().contains_key("step-0") {
                     return Err(lost());
@@ -2405,7 +2459,76 @@ mod tests {
             )))
         );
         assert_eq!(fake.launched("git merge --ff-only"), 0);
+        assert!(events.contains(&DeployEvent::AppLeftDown));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interrupted_maintenance_down_warns_that_the_app_may_be_down() {
+        let fake = Arc::new(
+            preflight()
+                .drops("php artisan down", &[], 0, 0)
+                .unreachable_after_drop(),
+        );
+        let events = deploy_target(&fake, maintenance_target(false, &[])).await;
+
+        assert!(events.contains(&DeployEvent::AppLeftDown));
+        assert!(matches!(
+            events.last(),
+            Some(DeployEvent::Interrupted { index: 0, .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn vanished_maintenance_down_warns_that_the_app_may_be_down() {
+        let fake = Arc::new(preflight().vanishes("php artisan down"));
+        let events = deploy_target(&fake, maintenance_target(false, &[])).await;
+
+        assert!(events.contains(&DeployEvent::AppLeftDown));
+        assert!(matches!(
+            events.last(),
+            Some(DeployEvent::Finished(DeployOutcome::Unknown {
+                step: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn maintenance_down_that_never_started_does_not_warn() {
+        let fake = Arc::new(preflight().launch("php artisan down", Launch::Unreachable));
+        let events = deploy_target(&fake, maintenance_target(false, &[])).await;
+
         assert!(!events.contains(&DeployEvent::AppLeftDown));
+        assert!(matches!(
+            events.last(),
+            Some(DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
+                AbortReason::ConnectFailed(_)
+            )))
+        ));
+    }
+
+    #[tokio::test]
+    async fn detached_maintenance_down_warns_and_matches_the_receipt() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(preflight().gated("php artisan down", gate));
+        let preview = prepare(maintenance_target(false, &[]), &*fake)
+            .await
+            .unwrap();
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, handle) =
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
+        while fake.launched("php artisan down") == 0 {
+            tokio::task::yield_now().await;
+        }
+        handle.detach();
+        let events = collect(rx).await;
+
+        assert!(events.contains(&DeployEvent::AppLeftDown));
+        assert_eq!(events.last(), Some(&DeployEvent::Detached { index: 0 }));
+        assert!(journal.snapshot().app_left_down);
     }
 
     #[tokio::test]
@@ -2741,6 +2864,60 @@ mod tests {
         assert_eq!(fake.launched("migrate"), 0);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn stopped_outcome_is_saved_before_post_checks_finish() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .gated("composer install", gate.clone())
+                .on("migrate", &[], 0),
+        );
+        let mut target = target(false, &["composer install", "migrate"]);
+        target.watch_log = true;
+        let preview = prepare(target, &*fake).await.unwrap();
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (mut rx, handle) =
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
+        while !matches!(
+            rx.recv().await,
+            Some(DeployEvent::StepStarted { index: 1, .. })
+        ) {}
+        handle.stop_after_step();
+        gate.notify_one();
+        while !matches!(
+            rx.recv().await,
+            Some(DeployEvent::StepFinished { index: 1, .. })
+        ) {}
+        for _ in 0..20 {
+            if journal.snapshot().outcome.is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            journal.snapshot().outcome,
+            Some(DeployOutcome::StoppedAfterStep {
+                step: 1,
+                reason: StopReason::Requested,
+            })
+        );
+        assert!(journal.snapshot().watch.is_none());
+        assert_eq!(fake.launched("migrate"), 0);
+        handle.cancel_watch();
+        assert!(matches!(
+            collect(rx).await.last(),
+            Some(DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
+                step: 1,
+                ..
+            }))
+        ));
+    }
+
     #[tokio::test]
     async fn detach_leaves_running_step_and_emits_no_finished() {
         let gate = Arc::new(Notify::new());
@@ -2797,6 +2974,59 @@ mod tests {
             vec![DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges)]
         );
         assert_eq!(fake.launched("git merge --ff-only"), 0);
+    }
+
+    #[tokio::test]
+    async fn detach_during_recheck_does_not_mark_an_unlaunched_step_running() {
+        let handle = Arc::new(OnceLock::<ExecutionHandle>::new());
+        let on_recheck = handle.clone();
+        let fake = Arc::new(
+            preflight()
+                .on_state_check(move || on_recheck.get().unwrap().detach())
+                .on("git merge --ff-only", &[], 0),
+        );
+        let preview = prepared(&fake, false, &[]).await;
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, execution) =
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
+        handle.set(execution).unwrap();
+
+        let events = collect(rx).await;
+        assert_eq!(
+            events,
+            vec![DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges)]
+        );
+        assert_eq!(fake.launched("git merge --ff-only"), 0);
+        assert_eq!(
+            journal.snapshot().steps[0].status,
+            ReceiptStepStatus::Pending
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_during_recheck_does_not_start_maintenance_down() {
+        let handle = Arc::new(OnceLock::<ExecutionHandle>::new());
+        let on_recheck = handle.clone();
+        let fake = Arc::new(
+            preflight()
+                .on_state_check(move || on_recheck.get().unwrap().stop_after_step())
+                .on("php artisan down", &[], 0),
+        );
+        let preview = prepare(maintenance_target(false, &[]), &*fake)
+            .await
+            .unwrap();
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, execution) = execute(preview, confirmation, fake.clone()).unwrap();
+        handle.set(execution).unwrap();
+
+        assert_eq!(
+            collect(rx).await,
+            vec![DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges)]
+        );
+        assert_eq!(fake.launched("php artisan down"), 0);
     }
 
     #[tokio::test]
@@ -3247,12 +3477,14 @@ mod tests {
         let path = journal.path().to_path_buf();
         let confirmation = Confirmation::from(&preview, None).unwrap();
         let (events, _handle) =
-            execute_recorded(preview, confirmation, fake.clone(), journal).unwrap();
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
         assert_eq!(
             collect(events).await.last(),
             Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
         );
-        let saved = ReceiptJournal::load(&path).unwrap().snapshot();
+        let loaded = ReceiptJournal::load(&path).unwrap();
+        loaded.claim().unwrap();
+        let saved = loaded.snapshot();
         assert_eq!(saved.status, ReceiptStatus::Final);
         assert_eq!(saved.outcome, Some(DeployOutcome::Succeeded));
         assert_eq!(saved.steps[0].status, ReceiptStepStatus::Ok);
@@ -3316,6 +3548,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attach_does_not_restart_steps_after_a_saved_stop() {
+        let fake = Arc::new(preflight());
+        let preview = prepared(&fake, false, &["first command", "second command"]).await;
+        let dir = TempReceipts::new();
+        let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        journal.confirm().unwrap();
+        journal.begin_step(0).unwrap();
+        journal.finish_step(0, StepStatus::Ok, Some(0)).unwrap();
+        journal.begin_step(1).unwrap();
+        journal.finish_step(1, StepStatus::Ok, Some(0)).unwrap();
+        journal
+            .record_outcome(DeployOutcome::StoppedAfterStep {
+                step: 1,
+                reason: StopReason::Requested,
+            })
+            .unwrap();
+        let path = journal.path().to_path_buf();
+        drop(journal);
+
+        let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (events, _handle) = attach(resumed, fake.clone()).unwrap();
+        assert_eq!(
+            collect(events).await.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
+                step: 1,
+                reason: StopReason::Requested,
+            }))
+        );
+        assert_eq!(fake.launched("second command"), 0);
+    }
+
+    #[tokio::test]
     async fn attach_observes_journaled_but_unlaunched_step() {
         let fake = Arc::new(preflight().on("git merge --ff-only", &[], 0));
         let preview = prepared(&fake, false, &[]).await;
@@ -3357,6 +3621,33 @@ mod tests {
             Err(ExecuteError::Receipt(_))
         ));
         assert_eq!(fake.launched("git merge --ff-only"), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_failure_after_a_step_is_a_local_run_error() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(preflight().gated("git merge --ff-only", gate.clone()));
+        let preview = prepared(&fake, false, &[]).await;
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (mut rx, _handle) = execute_recorded(preview, confirmation, fake, journal).unwrap();
+        while !matches!(
+            rx.recv().await,
+            Some(DeployEvent::StepStarted { index: 0, .. })
+        ) {}
+        std::fs::remove_dir_all(&dir.0).unwrap();
+        gate.notify_one();
+
+        let events = collect(rx).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(DeployEvent::RunError { reason }) if reason.contains("could not save step result")
+            ),
+            "{events:?}"
+        );
     }
 
     #[tokio::test]
