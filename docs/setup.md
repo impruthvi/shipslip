@@ -1,0 +1,126 @@
+# Set up Shipslip for a Laravel project
+
+This guide is for a teammate making a first staging deploy. Shipslip runs on
+your macOS or Linux computer and connects to a Linux server over SSH. Start
+with staging; configure production separately after the staging flow works.
+
+## 1. Get access and install Shipslip
+
+You need a local Git checkout of the Laravel project, SSH access to its
+staging server, and permission for the server to fetch the project's Git
+repository. The server must already have the project checked out.
+
+Install Rust 1.88 or newer, Git, and OpenSSH on your computer. Install `curl`
+if you plan to use a smoke URL. Then install the current Shipslip CLI from
+the [public source repository](https://github.com/impruthvi/shipslip):
+
+```sh
+cargo install --git https://github.com/impruthvi/shipslip.git --branch main --locked --bin slip
+slip --help
+```
+
+If your shell cannot find `slip`, add `~/.cargo/bin` to your `PATH` or restart
+the shell after installing Rust.
+
+## 2. Configure SSH
+
+Add an alias to `~/.ssh/config`, using the staging server's real host, user,
+and your own private key path:
+
+```sshconfig
+Host my-app-staging
+  HostName staging.example.com
+  User deploy
+  IdentityFile ~/.ssh/id_ed25519
+```
+
+Check the connection with `ssh my-app-staging`. Verify the server's host key
+before accepting it. Shipslip uses strict host key checking, so the host must
+be in your `known_hosts` file. Keep your private key out of Git and out of
+messages to teammates.
+
+The server's deploy user needs permission to run the recipe commands and read
+Laravel's log. Its Git checkout must be clean, on the configured branch, and
+able to `git fetch origin` without an interactive prompt.
+
+## 3. Add the project config
+
+In the **Laravel project's Git root**, create `.shipslip.toml`. Replace every
+example value below. Use the exact deploy steps that are safe for this app;
+the example includes a database migration.
+
+```toml
+[project]
+name = "my-app"
+stack = "laravel"
+
+[env.staging]
+ssh = "my-app-staging"
+path = "/srv/my-app"
+branch = "main"
+production = false
+maintenance = true
+smoke_url = "https://staging.example.com/health"
+
+[recipe.deploy]
+steps = [
+  "composer install --no-interaction --no-dev --prefer-dist",
+  "php artisan migrate --force",
+  "php artisan config:cache",
+]
+```
+
+`ssh` names the alias from step 2. `path` is the absolute path of the Git
+checkout on the server. `maintenance = true` takes the app down before the
+steps and brings it up after they succeed. If a step fails, the app stays
+down until you recover it; use `false` if that is not your deploy procedure.
+`smoke_url` is optional and must be reachable from **your computer**. Shipslip
+considers an HTTP 2xx response a pass.
+
+Shipslip watches `storage/logs/laravel.log` by default. Set `log` to a
+different path if your app uses one. For Laravel daily logs, set
+`log_daily = true`; its default prefix is `storage/logs/laravel`, which follows
+the newest `laravel-*.log`. If you omit `[recipe.deploy]`, Shipslip uses its
+default Laravel recipe; review that recipe before deploying.
+
+You can commit `.shipslip.toml` so teammates share the same deploy settings.
+Each teammate can map the same SSH alias to their own key locally.
+
+## 4. Review and deploy staging
+
+Push the intended app commit to the branch named in `.shipslip.toml`. From
+anywhere inside your **local Laravel project checkout**, run:
+
+```sh
+slip trust staging
+slip deploy staging
+```
+
+`trust` shows the config and asks you to approve it. `deploy` fetches the
+configured branch on the server, previews the exact commits and steps, and
+asks for confirmation before making changes. Read that preview. If you change
+the config later, run `slip trust staging` again before deploying.
+
+Leave the terminal open for the deploy and the 120-second log watch. Check
+the final deploy outcome, `Log watch` status, and (if configured) the smoke
+check's HTTP result. `Complete` means Shipslip observed the log; `NoLogSeen`,
+`Unavailable`, or `Partial` means you should inspect the log path, permissions,
+or format. A failed smoke check is recorded separately and does not roll back
+the deploy.
+
+Shipslip saves a receipt on your computer. On macOS, look under
+`~/Library/Application Support/Shipslip/receipts/`; on Linux, under
+`~/.local/share/shipslip/receipts/`. Receipts can contain command output and
+should be treated as private.
+
+## If the command is interrupted
+
+From the **same local project checkout**, run:
+
+```sh
+slip attach staging
+```
+
+This resumes observation of an unfinished run without relaunching its active
+server command. Use `slip rerun staging` only when the server is already on
+the intended clean commit and repeating every recipe step is safe.

@@ -4,6 +4,9 @@ Shipslip runs a configured deploy recipe over SSH. It prepares and displays a
 preview before asking for confirmation. Production runs require typing the
 environment name.
 
+New teammate? Follow the [staging setup guide](docs/setup.md) for installation,
+SSH access, project configuration, deployment, and recovery.
+
 ## Quick start
 
 Put `.shipslip.toml` at the root of your Laravel project's Git repository:
@@ -50,15 +53,15 @@ path. With `log_daily = true`, `log` is a directory and prefix (default
 `storage/logs/laravel`), and Shipslip follows the newest `laravel-*.log`.
 An optional `smoke_url` is requested from your Mac after the deploy steps.
 
-From anywhere in the project repository, review and approve the config before
-the first run:
+From anywhere in the Laravel project repository, review and approve the config
+before the first run:
 
 ```sh
-cargo run --bin slip -- trust staging
-cargo run --bin slip -- deploy staging
+slip trust staging
+slip deploy staging
 ```
 
-If installed as a binary, use `slip` in place of `cargo run --bin slip --`.
+Install `slip` first using the [setup guide](docs/setup.md).
 Shipslip searches from the current directory to the Git root for
 `.shipslip.toml`. `--config FILE` selects a specific file; `SHIPSLIP_CONFIG`
 sets a default override.
