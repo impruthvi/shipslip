@@ -197,6 +197,19 @@ pub struct ReceiptJournal {
     claim: Mutex<Option<File>>,
 }
 
+impl Drop for ReceiptJournal {
+    fn drop(&mut self) {
+        if let Some(file) = self
+            .claim
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            let _ = FileExt::unlock(&file);
+        }
+    }
+}
+
 impl ReceiptJournal {
     pub fn create(
         root: &Path,
