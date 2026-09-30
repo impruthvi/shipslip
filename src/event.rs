@@ -9,13 +9,24 @@ pub enum StepStatus {
     NotStarted,
 }
 
+/// Why a deploy stopped between steps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopReason {
+    /// Stop-after-step, or a detach between steps.
+    Requested,
+    /// Another run took over the deploy lock.
+    LockLost,
+    /// The server could not be reached to start or check the next step.
+    ConnectFailed(String),
+}
+
 /// Final result of a deploy run. Step indexes: 0 is the git fast-forward,
 /// 1..=N are recipe steps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeployOutcome {
     Succeeded,
     FailedAtStep(usize),
-    StoppedAfterStep(usize),
+    StoppedAfterStep { step: usize, reason: StopReason },
     CancelledBeforeChanges,
     AbortedBeforeChanges(String),
     Unknown { step: usize, reason: String },

@@ -7,7 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
-use crate::event::{DeployEvent, DeployOutcome, StepStatus};
+use crate::event::{DeployEvent, DeployOutcome, StepStatus, StopReason};
+use crate::lock::{self, Acquire, Break, LockInfo, LockOwner};
 use crate::runner::{self, StepResult};
 use crate::script::{is_full_sha, is_safe_branch, shell_quote, wrap_step};
 use crate::transport::{Transport, TransportError};
@@ -33,6 +34,10 @@ pub enum PrepareError {
     Blocked(String),
     #[error("unexpected output from `{command}`: {output}")]
     UnexpectedOutput { command: String, output: String },
+    #[error("deploy lock is {0}")]
+    LockHeld(LockInfo),
+    #[error("could not take the deploy lock: {0}")]
+    Lock(String),
     #[error(transparent)]
     Transport(#[from] TransportError),
 }
@@ -144,8 +149,10 @@ impl ExecutionHandle {
     pub fn cancel_watch(&self) {}
 }
 
-/// Read-only preflight: resolves the current and target commits and builds
-/// the [`Preview`]. Changes nothing on the server except fetching refs.
+/// Preflight: resolves the current and target commits, takes the deploy
+/// lock, and builds the [`Preview`]. Changes nothing on the server except
+/// fetching refs and taking the lock. Release it with [`cancel`] if the
+/// deploy does not go ahead.
 pub async fn prepare<T: Transport>(
     target: DeployTarget,
     transport: &T,
@@ -178,6 +185,16 @@ pub async fn prepare<T: Transport>(
     )
     .await?;
 
+    let run_id = new_run_id();
+    let owner = LockOwner::current(&run_id, &target_sha);
+    match lock::acquire(transport, &target.path, &owner)
+        .await
+        .map_err(PrepareError::Lock)?
+    {
+        Acquire::Acquired => {}
+        Acquire::Held(info) => return Err(PrepareError::LockHeld(info)),
+    }
+
     let recipe_hash = recipe_hash(&target);
     Ok(Preview {
         target,
@@ -185,8 +202,45 @@ pub async fn prepare<T: Transport>(
         target_sha,
         commits,
         recipe_hash,
-        run_id: new_run_id(),
+        run_id,
     })
+}
+
+/// Gives up a prepared deploy without running it, releasing its lock.
+pub async fn cancel<T: Transport>(preview: Preview, transport: &T) -> Result<(), TransportError> {
+    lock::release(transport, &preview.target.path, &preview.run_id).await
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum BreakLockError {
+    #[error("breaking the lock requires typing the environment name `{0}`")]
+    EnvNameRequired(String),
+    #[error("no deploy lock is held")]
+    NotHeld,
+    #[error("the lock is live (last heartbeat {0}s ago); only a stale lock can be broken")]
+    Live(u64),
+    #[error("could not break the lock: {0}")]
+    Failed(String),
+}
+
+/// Breaks a stale deploy lock (see [`LockInfo::is_stale`]). Check first,
+/// e.g. with `slip shell`, that no step of the old run is still running.
+pub async fn break_lock<T: Transport>(
+    target: &DeployTarget,
+    transport: &T,
+    typed_env: &str,
+) -> Result<(), BreakLockError> {
+    if typed_env != target.env {
+        return Err(BreakLockError::EnvNameRequired(target.env.clone()));
+    }
+    match lock::break_stale(transport, &target.path)
+        .await
+        .map_err(BreakLockError::Failed)?
+    {
+        Break::Broken => Ok(()),
+        Break::NotHeld => Err(BreakLockError::NotHeld),
+        Break::Live(age) => Err(BreakLockError::Live(age)),
+    }
 }
 
 /// Runs the confirmed deploy in the background. Events arrive on the
@@ -219,9 +273,40 @@ async fn run_steps<T: Transport>(
     transport: Arc<T>,
     events: mpsc::UnboundedSender<DeployEvent>,
     stop: Arc<AtomicBool>,
-    mut detach: watch::Receiver<bool>,
+    detach: watch::Receiver<bool>,
 ) {
-    let path = &preview.target.path;
+    let (path, run_id) = (&preview.target.path, &preview.run_id);
+    let heartbeat = async {
+        loop {
+            tokio::time::sleep(lock::HEARTBEAT_EVERY).await;
+            lock::heartbeat(&*transport, path, run_id).await;
+        }
+    };
+    let outcome = tokio::select! {
+        outcome = run_steps_locked(&preview, &*transport, &events, &stop, detach) => outcome,
+        () = heartbeat => unreachable!("heartbeat never ends"),
+    };
+    let Some(outcome) = outcome else {
+        return;
+    };
+    // After an unknown outcome the server's state needs checking first, so
+    // the lock is kept and goes stale.
+    if !matches!(outcome, DeployOutcome::Unknown { .. }) {
+        let _ = lock::release(&*transport, path, run_id).await;
+    }
+    let _ = events.send(DeployEvent::Finished(outcome));
+}
+
+/// Runs the steps and returns the outcome to finish with, or `None` after a
+/// `Detached` or `Interrupted` event.
+async fn run_steps_locked<T: Transport>(
+    preview: &Preview,
+    transport: &T,
+    events: &mpsc::UnboundedSender<DeployEvent>,
+    stop: &AtomicBool,
+    mut detach: watch::Receiver<bool>,
+) -> Option<DeployOutcome> {
+    let (path, run_id) = (&preview.target.path, &preview.run_id);
     let mut steps = vec![(
         "git fast-forward".to_string(),
         format!("git merge --ff-only {}", preview.target_sha),
@@ -231,12 +316,12 @@ async fn run_steps<T: Transport>(
     for (index, (name, body)) in steps.into_iter().enumerate() {
         // Detaching between steps leaves nothing running, so it is a stop.
         if stop.load(Ordering::SeqCst) || *detach.borrow() {
-            let outcome = match index {
-                0 => DeployOutcome::CancelledBeforeChanges,
-                n => DeployOutcome::StoppedAfterStep(n - 1),
-            };
-            let _ = events.send(DeployEvent::Finished(outcome));
-            return;
+            return Some(stopped_before(index, StopReason::Requested));
+        }
+        match lock_owned(transport, path, run_id).await {
+            Ok(true) => {}
+            Ok(false) => return Some(stopped_before(index, StopReason::LockLost)),
+            Err(reason) => return Some(stopped_before(index, StopReason::ConnectFailed(reason))),
         }
 
         let _ = events.send(DeployEvent::StepStarted { index, name });
@@ -245,7 +330,7 @@ async fn run_steps<T: Transport>(
         let step = async {
             let tx = line_tx;
             let script = wrap_step(path, &body);
-            runner::run_step(&*transport, &preview.run_id, index, &script, &tx).await
+            runner::run_step(transport, run_id, index, &script, &tx).await
         };
         // All output for this step is delivered before its StepFinished.
         let forward = async {
@@ -257,7 +342,7 @@ async fn run_steps<T: Transport>(
             biased;
             _ = wait_for_detach(&mut detach) => {
                 let _ = events.send(DeployEvent::Detached { index });
-                return;
+                return None;
             }
             (r, ()) = async { tokio::join!(step, forward) } => r,
         };
@@ -272,10 +357,7 @@ async fn run_steps<T: Transport>(
             StepResult::NotStarted(reason) => (
                 StepStatus::NotStarted,
                 None,
-                Some(match index {
-                    0 => DeployOutcome::AbortedBeforeChanges(reason),
-                    n => DeployOutcome::StoppedAfterStep(n - 1),
-                }),
+                Some(stopped_before(index, StopReason::ConnectFailed(reason))),
             ),
             StepResult::Gone => (
                 StepStatus::Unknown,
@@ -287,7 +369,7 @@ async fn run_steps<T: Transport>(
             ),
             StepResult::Interrupted(reason) => {
                 let _ = events.send(DeployEvent::Interrupted { index, reason });
-                return;
+                return None;
             }
         };
         let _ = events.send(DeployEvent::StepFinished {
@@ -295,13 +377,35 @@ async fn run_steps<T: Transport>(
             status,
             exit_code,
         });
-        if let Some(outcome) = outcome {
-            let _ = events.send(DeployEvent::Finished(outcome));
-            return;
+        if outcome.is_some() {
+            return outcome;
         }
     }
+    Some(DeployOutcome::Succeeded)
+}
 
-    let _ = events.send(DeployEvent::Finished(DeployOutcome::Succeeded));
+/// The outcome of stopping before step `index` starts.
+fn stopped_before(index: usize, reason: StopReason) -> DeployOutcome {
+    match (index, reason) {
+        (0, StopReason::Requested) => DeployOutcome::CancelledBeforeChanges,
+        (0, StopReason::LockLost) => DeployOutcome::AbortedBeforeChanges("lock_lost".into()),
+        (0, StopReason::ConnectFailed(reason)) => DeployOutcome::AbortedBeforeChanges(reason),
+        (n, reason) => DeployOutcome::StoppedAfterStep {
+            step: n - 1,
+            reason,
+        },
+    }
+}
+
+/// Checks lock ownership, reconnecting once if the server did not answer.
+async fn lock_owned<T: Transport>(transport: &T, path: &str, run_id: &str) -> Result<bool, String> {
+    match lock::is_owned(transport, path, run_id).await {
+        Err(_) => {
+            let _ = transport.reconnect().await;
+            lock::is_owned(transport, path, run_id).await
+        }
+        owned => owned,
+    }
 }
 
 async fn wait_for_detach(detach: &mut watch::Receiver<bool>) {
@@ -377,6 +481,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
 
     use tokio::sync::Notify;
 
@@ -395,6 +500,17 @@ mod tests {
         launched: Mutex<HashMap<usize, usize>>,
         reconnect_fails: bool,
         reconnects: AtomicUsize,
+        lock: Mutex<LockSim>,
+    }
+
+    #[derive(Default)]
+    struct LockSim {
+        owner: Option<String>,
+        stale: bool,
+        /// Another run takes the lock just before this step's check.
+        lost_before_step: Option<usize>,
+        checks: usize,
+        heartbeats: usize,
     }
 
     #[derive(Default)]
@@ -487,6 +603,76 @@ mod tests {
             self
         }
 
+        fn locked_by_other(self, stale: bool) -> Self {
+            *self.lock.lock().unwrap() = LockSim {
+                owner: Some("other".into()),
+                stale,
+                ..LockSim::default()
+            };
+            self
+        }
+
+        fn loses_lock_before_step(self, step: usize) -> Self {
+            self.lock.lock().unwrap().lost_before_step = Some(step);
+            self
+        }
+
+        fn lock_owner(&self) -> Option<String> {
+            self.lock.lock().unwrap().owner.clone()
+        }
+
+        fn lock_script(&self, script: &str) -> String {
+            let start = script.find("r='").unwrap() + 3;
+            let run_id = &script[start..start + script[start..].find('\'').unwrap()];
+            let mut lock = self.lock.lock().unwrap();
+            let owned = |lock: &LockSim| lock.owner.as_deref() == Some(run_id);
+            let answer = |owned| if owned { "owned" } else { "lost" };
+            if script.contains("echo acquired") {
+                match &lock.owner {
+                    Some(other) => {
+                        let owner = LockOwner {
+                            run_id: other.clone(),
+                            user: "ana".into(),
+                            machine: "mac".into(),
+                            pid: 1,
+                            started_at: 0,
+                            target_sha: TO.into(),
+                        };
+                        format!("held 30 {}", serde_json::to_string(&owner).unwrap())
+                    }
+                    None => {
+                        lock.owner = Some(run_id.into());
+                        "acquired".into()
+                    }
+                }
+            } else if script.contains("released-") {
+                if owned(&lock) {
+                    lock.owner = None;
+                    "released".into()
+                } else {
+                    "not-owner".into()
+                }
+            } else if script.contains(".broken-") {
+                match (&lock.owner, lock.stale) {
+                    (None, _) => "not-held".into(),
+                    (Some(_), false) => "live 30".into(),
+                    (Some(_), true) => {
+                        lock.owner = None;
+                        "broken".into()
+                    }
+                }
+            } else if script.contains("heartbeat.tmp") {
+                lock.heartbeats += 1;
+                answer(owned(&lock)).into()
+            } else {
+                if lock.lost_before_step == Some(lock.checks) {
+                    lock.owner = Some("other".into());
+                }
+                lock.checks += 1;
+                answer(owned(&lock)).into()
+            }
+        }
+
         fn unreachable_after_drop(mut self) -> Self {
             self.reconnect_fails = true;
             self
@@ -575,7 +761,10 @@ mod tests {
             output: mpsc::UnboundedSender<String>,
         ) -> Result<i32, TransportError> {
             self.ran.lock().unwrap().push(script.to_string());
-            if script.contains("setsid") {
+            if script.contains("shipslip.lock") {
+                let _ = output.send(self.lock_script(script));
+                Ok(0)
+            } else if script.contains("setsid") {
                 self.launch_step(script)
             } else if script.contains(runner::LOG_START) {
                 self.observe(script, &output).await
@@ -689,9 +878,8 @@ mod tests {
 
     #[tokio::test]
     async fn confirmation_for_another_preview_is_rejected() {
-        let fake = preflight();
-        let a = prepared(&fake, false, &["echo a"]).await;
-        let b = prepared(&fake, false, &["echo b"]).await;
+        let a = prepared(&preflight(), false, &["echo a"]).await;
+        let b = prepared(&preflight(), false, &["echo b"]).await;
         let confirm_a = Confirmation::from(&a, None).unwrap();
         let err = execute(b, confirm_a, Arc::new(preflight())).unwrap_err();
         assert_eq!(err, ExecuteError::ConfirmationMismatch);
@@ -908,7 +1096,10 @@ mod tests {
         }));
         assert_eq!(
             events.last(),
-            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep(0)))
+            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
+                step: 0,
+                reason: StopReason::ConnectFailed("connection lost: reset".into())
+            }))
         );
         assert_eq!(fake.ran_matching("migrate"), 1);
     }
@@ -943,7 +1134,10 @@ mod tests {
         let events = collect(rx).await;
         assert_eq!(
             events.last(),
-            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep(1)))
+            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
+                step: 1,
+                reason: StopReason::Requested
+            }))
         );
         assert_eq!(fake.ran_matching("migrate"), 0);
     }
@@ -1034,7 +1228,10 @@ mod tests {
         }));
         assert_eq!(
             events.last(),
-            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep(1)))
+            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
+                step: 1,
+                reason: StopReason::Requested
+            }))
         );
         assert_eq!(fake.ran_matching("migrate"), 0);
     }
@@ -1081,20 +1278,179 @@ mod tests {
         }));
         assert_eq!(
             events.last(),
-            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep(0)))
+            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
+                step: 0,
+                reason: StopReason::ConnectFailed("could not connect: refused".into())
+            }))
         );
     }
 
     #[tokio::test]
     async fn confirmation_for_an_identical_earlier_preview_is_rejected() {
-        let fake = preflight();
-        let a = prepared(&fake, false, &["echo a"]).await;
-        let b = prepared(&fake, false, &["echo a"]).await;
+        let a = prepared(&preflight(), false, &["echo a"]).await;
+        let b = prepared(&preflight(), false, &["echo a"]).await;
         assert_eq!(a.recipe_hash(), b.recipe_hash());
         assert_ne!(a.run_id(), b.run_id());
         let confirm_a = Confirmation::from(&a, None).unwrap();
         let err = execute(b, confirm_a, Arc::new(preflight())).unwrap_err();
         assert_eq!(err, ExecuteError::ConfirmationMismatch);
+    }
+
+    #[tokio::test]
+    async fn prepare_blocks_when_the_lock_is_held() {
+        let fake = preflight().locked_by_other(false);
+        let err = prepare(target(false, &[]), &fake).await.unwrap_err();
+        let PrepareError::LockHeld(info) = err else {
+            panic!("{err:?}");
+        };
+        assert!(!info.is_stale());
+        assert_eq!(info.owner.unwrap().run_id, "other");
+    }
+
+    #[tokio::test]
+    async fn lock_lost_before_step_0_aborts_before_changes() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .loses_lock_before_step(0),
+        );
+        let events = deploy(&fake, &[]).await;
+        assert_eq!(
+            events,
+            [DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
+                "lock_lost".into()
+            ))]
+        );
+        assert_eq!(fake.ran_matching("git merge --ff-only"), 0);
+    }
+
+    #[tokio::test]
+    async fn lock_lost_mid_deploy_stops_after_the_current_step() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .on("composer", &[], 0)
+                .on("migrate", &[], 0)
+                .loses_lock_before_step(2),
+        );
+        let events = deploy(&fake, &["composer install", "php artisan migrate"]).await;
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
+                step: 1,
+                reason: StopReason::LockLost
+            }))
+        );
+        assert_eq!(fake.ran_matching("migrate"), 0);
+        assert_eq!(fake.lock_owner().as_deref(), Some("other"));
+    }
+
+    #[tokio::test]
+    async fn lock_is_released_after_success_and_failure() {
+        for code in [0, 1] {
+            let fake = Arc::new(preflight().on("git merge --ff-only", &[], 0).on(
+                "migrate",
+                &[],
+                code,
+            ));
+            let events = deploy(&fake, &["php artisan migrate"]).await;
+            assert!(matches!(events.last(), Some(DeployEvent::Finished(_))));
+            assert_eq!(fake.lock_owner(), None, "exit {code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn lock_is_kept_after_an_unknown_outcome() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .vanishes("migrate"),
+        );
+        deploy(&fake, &["php artisan migrate"]).await;
+        assert!(fake.lock_owner().is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lock_is_kept_after_interrupted_and_detached() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .drops("migrate", &[], 0, 0)
+                .unreachable_after_drop(),
+        );
+        deploy(&fake, &["php artisan migrate"]).await;
+        assert!(fake.lock_owner().is_some());
+
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .gated("migrate", Arc::new(Notify::new())),
+        );
+        let p = prepared(&fake, false, &["php artisan migrate"]).await;
+        let c = Confirmation::from(&p, None).unwrap();
+        let (mut rx, h) = execute(p, c, fake.clone()).unwrap();
+        while !matches!(
+            rx.recv().await,
+            Some(DeployEvent::StepStarted { index: 1, .. })
+        ) {}
+        h.detach();
+        collect(rx).await;
+        assert!(fake.lock_owner().is_some());
+    }
+
+    #[tokio::test]
+    async fn cancel_releases_the_lock() {
+        let fake = preflight();
+        let p = prepared(&fake, false, &[]).await;
+        assert!(fake.lock_owner().is_some());
+        cancel(p, &fake).await.unwrap();
+        assert_eq!(fake.lock_owner(), None);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn heartbeat_runs_while_a_step_runs() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .gated("migrate", gate.clone()),
+        );
+        let p = prepared(&fake, false, &["php artisan migrate"]).await;
+        let c = Confirmation::from(&p, None).unwrap();
+        let (mut rx, _h) = execute(p, c, fake.clone()).unwrap();
+        while !matches!(
+            rx.recv().await,
+            Some(DeployEvent::StepStarted { index: 1, .. })
+        ) {}
+        tokio::time::sleep(lock::HEARTBEAT_EVERY * 2 + Duration::from_secs(1)).await;
+        assert_eq!(fake.lock.lock().unwrap().heartbeats, 2);
+        gate.notify_one();
+        let events = collect(rx).await;
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+    }
+
+    #[tokio::test]
+    async fn break_lock_needs_the_env_name_and_a_stale_lock() {
+        let t = target(false, &[]);
+        let live = preflight().locked_by_other(false);
+        assert_eq!(
+            break_lock(&t, &live, "production").await,
+            Err(BreakLockError::EnvNameRequired("staging".into()))
+        );
+        assert_eq!(
+            break_lock(&t, &live, "staging").await,
+            Err(BreakLockError::Live(30))
+        );
+        assert_eq!(
+            break_lock(&t, &preflight(), "staging").await,
+            Err(BreakLockError::NotHeld)
+        );
+        let stale = preflight().locked_by_other(true);
+        assert_eq!(break_lock(&t, &stale, "staging").await, Ok(()));
+        assert_eq!(stale.lock_owner(), None);
     }
 
     #[test]
