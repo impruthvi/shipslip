@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{
-    execute, prepare, Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle,
-    StepStatus,
+    break_lock, cancel, execute, prepare, BreakLockError, Confirmation, DeployEvent, DeployOutcome,
+    DeployTarget, ExecutionHandle, PrepareError, StepStatus, StopReason,
 };
 use tokio::sync::mpsc;
 
@@ -180,6 +180,24 @@ impl Server {
         let out = child.wait_with_output().unwrap();
         assert!(out.status.success(), "docker exec failed: {script}");
         String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    fn lock_exists(&self, path: &str) -> bool {
+        self.exec(
+            &format!("test -e {path}/.git/shipslip.lock && echo yes || echo no"),
+            "",
+        ) == "yes"
+    }
+
+    /// Adds a commit to origin, so a deployed app is behind again.
+    fn push_commit(&self, name: &str) {
+        self.exec(
+            &format!(
+                "git clone -q ~/origin.git /tmp/{name} && cd /tmp/{name} \
+                 && echo {name} > file && git commit -qam {name} && git push -q origin main"
+            ),
+            "",
+        );
     }
 
     /// A clone of the fixture repo, one commit behind origin.
@@ -406,6 +424,11 @@ async fn deploy_runs_steps_verbatim_and_fast_forwards() {
     );
     let head = server.exec(&format!("git -C {path} log -1 --format=%s"), "");
     assert_eq!(head, "Second");
+    assert_eq!(
+        server.exec(&format!("git -C {path} status --porcelain"), ""),
+        ""
+    );
+    assert!(!server.lock_exists(&path));
 }
 
 #[tokio::test]
@@ -526,6 +549,7 @@ async fn killed_step_process_is_unknown() {
         ),
         "{events:#?}"
     );
+    assert!(server.lock_exists(&path));
 }
 
 #[tokio::test]
@@ -580,4 +604,95 @@ async fn run_files_are_private() {
         };
         assert!(line.starts_with(expected), "{line}");
     }
+}
+
+#[tokio::test]
+async fn lock_blocks_a_second_deploy_until_cancelled() {
+    let server = Server::start().await;
+    let ssh = server.connect().await;
+    let path = server.app("app");
+
+    let first = prepare(target(&path, &[]), &ssh).await.unwrap();
+    let err = prepare(target(&path, &[]), &ssh).await.unwrap_err();
+    let PrepareError::LockHeld(info) = err else {
+        panic!("{err:?}");
+    };
+    assert!(info.age_secs < 10 && !info.is_stale(), "{info:?}");
+    let owner = info.owner.unwrap();
+    assert_eq!(owner.run_id, first.run_id());
+    assert_eq!(owner.target_sha, first.target_sha());
+
+    cancel(first, &ssh).await.unwrap();
+    assert!(!server.lock_exists(&path));
+    let second = prepare(target(&path, &[]), &ssh).await.unwrap();
+    cancel(second, &ssh).await.unwrap();
+}
+
+#[tokio::test]
+async fn only_a_stale_lock_can_be_broken() {
+    let server = Server::start().await;
+    let ssh = server.connect().await;
+    let path = server.app("app");
+    let t = target(&path, &[]);
+    let held = prepare(t.clone(), &ssh).await.unwrap();
+
+    assert!(matches!(
+        break_lock(&t, &ssh, "staging").await,
+        Err(BreakLockError::Live(_))
+    ));
+    server.exec(&format!("echo 0 > {path}/.git/shipslip.lock/heartbeat"), "");
+    assert_eq!(
+        break_lock(&t, &ssh, "production").await,
+        Err(BreakLockError::EnvNameRequired("staging".into()))
+    );
+    assert_eq!(break_lock(&t, &ssh, "staging").await, Ok(()));
+    assert!(!server.lock_exists(&path));
+    assert_eq!(
+        server.exec(
+            &format!("ls -d {path}/.git/shipslip.lock.broken-* | wc -l"),
+            ""
+        ),
+        "1"
+    );
+
+    // The displaced holder cancelling must not touch anything.
+    cancel(held, &ssh).await.unwrap();
+    assert_eq!(
+        server.exec(
+            &format!("ls -d {path}/.git/shipslip.lock.broken-* | wc -l"),
+            ""
+        ),
+        "1"
+    );
+}
+
+#[tokio::test]
+async fn lock_broken_mid_deploy_stops_after_the_step_and_spares_the_successor() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let other = server.connect().await;
+    let path = server.app("app");
+    let t = target(&path, &["echo one; sleep 4", "echo two"]);
+
+    let (events, running) = deploy_until(ssh, t.clone(), is_output("one")).await;
+    server.exec(&format!("echo 0 > {path}/.git/shipslip.lock/heartbeat"), "");
+    break_lock(&t, &other, "staging").await.unwrap();
+    server.push_commit("third");
+    let successor = prepare(target(&path, &[]), &other).await.unwrap();
+
+    let events = running.rest(events).await;
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
+            step: 1,
+            reason: StopReason::LockLost
+        })),
+        "{events:#?}"
+    );
+    assert!(!step_output(&events, 2).contains(&"two"));
+    assert_eq!(
+        server.exec(&format!("cat {path}/.git/shipslip.lock/run_id"), ""),
+        successor.run_id()
+    );
+    cancel(successor, &other).await.unwrap();
 }

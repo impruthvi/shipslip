@@ -194,7 +194,7 @@ fn unexpected(lines: &[String]) -> StepResult {
     ))
 }
 
-async fn run_collect<T: Transport>(
+pub(crate) async fn run_collect<T: Transport>(
     transport: &T,
     script: &str,
 ) -> (Result<i32, TransportError>, Vec<String>) {

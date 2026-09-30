@@ -12,12 +12,14 @@
 
 mod engine;
 mod event;
+mod lock;
 mod runner;
 mod script;
 pub mod transport;
 
 pub use engine::{
-    execute, prepare, ConfirmError, Confirmation, DeployTarget, ExecuteError, ExecutionHandle,
-    PrepareError, Preview,
+    break_lock, cancel, execute, prepare, BreakLockError, ConfirmError, Confirmation, DeployTarget,
+    ExecuteError, ExecutionHandle, PrepareError, Preview,
 };
-pub use event::{DeployEvent, DeployOutcome, StepStatus};
+pub use event::{DeployEvent, DeployOutcome, StepStatus, StopReason};
+pub use lock::{LockInfo, LockOwner, STALE_AFTER};
