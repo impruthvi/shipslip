@@ -1,3 +1,5 @@
+use crate::preflight::AbortReason;
+
 /// Result of a single step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepStatus {
@@ -25,11 +27,22 @@ pub enum StopReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeployOutcome {
     Succeeded,
-    FailedAtStep(usize),
-    StoppedAfterStep { step: usize, reason: StopReason },
+    /// A step exited non-zero. `partial_update` is set when step 0 (the
+    /// fast-forward) failed but the server's code or tree changed anyway.
+    FailedAtStep {
+        step: usize,
+        partial_update: bool,
+    },
+    StoppedAfterStep {
+        step: usize,
+        reason: StopReason,
+    },
     CancelledBeforeChanges,
-    AbortedBeforeChanges(String),
-    Unknown { step: usize, reason: String },
+    AbortedBeforeChanges(AbortReason),
+    Unknown {
+        step: usize,
+        reason: String,
+    },
 }
 
 /// Progress reported by [`crate::execute`], in order.
@@ -58,6 +71,12 @@ pub enum DeployEvent {
     Interrupted {
         index: usize,
         reason: String,
+    },
+    /// The server's checkout after step 0 failed; `None` where it could not
+    /// be read.
+    ServerState {
+        head: Option<String>,
+        tree_dirty: Option<bool>,
     },
     Finished(DeployOutcome),
 }

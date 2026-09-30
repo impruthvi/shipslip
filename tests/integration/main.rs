@@ -10,8 +10,9 @@ use std::time::Duration;
 
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{
-    break_lock, cancel, execute, prepare, BreakLockError, Confirmation, DeployEvent, DeployOutcome,
-    DeployTarget, ExecutionHandle, PrepareError, StepStatus, StopReason,
+    break_lock, cancel, execute, prepare, AbortReason, BlockReason, BreakLockError, Confirmation,
+    DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle, PrepareError, StepStatus,
+    StopReason,
 };
 use tokio::sync::mpsc;
 
@@ -447,7 +448,10 @@ async fn steps_run_in_strict_mode() {
         let events = deploy(ssh.clone(), target(&path, &[step])).await;
         let expected = match failure {
             None => DeployOutcome::Succeeded,
-            Some(_) => DeployOutcome::FailedAtStep(1),
+            Some(_) => DeployOutcome::FailedAtStep {
+                step: 1,
+                partial_update: false,
+            },
         };
         assert_eq!(
             events.last(),
@@ -489,7 +493,10 @@ async fn step_survives_a_dropped_connection() {
     assert_eq!(step_output(&events, 1), ["before", "after"], "{events:#?}");
     assert_eq!(
         events.last(),
-        Some(&DeployEvent::Finished(DeployOutcome::FailedAtStep(1)))
+        Some(&DeployEvent::Finished(DeployOutcome::FailedAtStep {
+            step: 1,
+            partial_update: false
+        }))
     );
     assert!(events.contains(&DeployEvent::StepFinished {
         index: 1,
@@ -695,4 +702,137 @@ async fn lock_broken_mid_deploy_stops_after_the_step_and_spares_the_successor() 
         successor.run_id()
     );
     cancel(successor, &other).await.unwrap();
+}
+
+#[tokio::test]
+async fn unsafe_checkouts_are_blocked_before_the_lock() {
+    let server = Server::start().await;
+    let ssh = server.connect().await;
+    type Case = (
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        fn(&BlockReason) -> bool,
+    );
+    let cases: [Case; 6] = [
+        ("dirty", "echo x >> file", &[], |r| {
+            *r == BlockReason::DirtyTree(vec![" M file".into()])
+        }),
+        ("branch", "git checkout -q -b other", &[], |r| {
+            *r == BlockReason::WrongBranch {
+                expected: "main".into(),
+                actual: "other".into(),
+            }
+        }),
+        (
+            "merging",
+            "touch \"$(git rev-parse --absolute-git-dir)/MERGE_HEAD\"",
+            &[],
+            |r| *r == BlockReason::OperationInProgress("MERGE_HEAD".into()),
+        ),
+        (
+            "diverged",
+            "git commit -q --allow-empty -m local",
+            &[],
+            |r| *r == BlockReason::NotFastForward,
+        ),
+        (
+            "nofetch",
+            "git remote set-url origin /nonexistent",
+            &[],
+            |r| matches!(r, BlockReason::FetchFailed(m) if m.contains("/nonexistent")),
+        ),
+        (
+            "syntax",
+            "true",
+            &["echo ok", "echo 'unclosed"],
+            |r| matches!(r, BlockReason::InvalidStep { step: 2, message } if message.contains("unexpected EOF")),
+        ),
+    ];
+    for (name, setup, steps, expected) in cases {
+        let path = server.app(name);
+        server.exec(&format!("cd {path} && {setup}"), "");
+        let err = prepare(target(&path, steps), &ssh).await.unwrap_err();
+        assert!(
+            matches!(&err, PrepareError::Blocked(r) if expected(r)),
+            "{name}: {err:?}"
+        );
+        assert!(!server.lock_exists(&path), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn head_moved_after_the_preview_aborts_before_changes() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    let preview = prepare(target(&path, &["true"]), &*ssh).await.unwrap();
+    let run_id = preview.run_id().to_string();
+    server.exec(
+        &format!("git -C {path} commit -q --allow-empty -m sneaky"),
+        "",
+    );
+
+    let confirmation = Confirmation::from(&preview, None).unwrap();
+    let (mut rx, _handle) = execute(preview, confirmation, ssh).unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    assert!(
+        matches!(
+            &events[..],
+            [DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
+                AbortReason::HeadMoved { .. }
+            ))]
+        ),
+        "{events:#?}"
+    );
+    assert_eq!(
+        server.exec(
+            &format!("test -e ~/.shipslip/runs/{run_id} && echo ran || echo none"),
+            ""
+        ),
+        "none"
+    );
+    assert!(!server.lock_exists(&path));
+}
+
+#[tokio::test]
+async fn fast_forward_that_fails_partway_is_a_partial_update() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    server.exec(
+        "git clone -q ~/origin.git /tmp/seed && cd /tmp/seed \
+         && mkdir locked && echo 1 > locked/f && git add locked \
+         && git commit -qm 'add locked' && git push -q origin main \
+         && echo 2 > file && echo 2 > locked/f && git commit -qam 'change both' \
+         && git push -q origin main",
+        "",
+    );
+    let path = server.app("app");
+    server.exec_as(
+        "root",
+        &format!("chown root:root {path}/locked && chmod 555 {path}/locked"),
+        "",
+    );
+    let from = server.exec(&format!("git -C {path} rev-parse HEAD"), "");
+
+    let events = deploy(ssh, target(&path, &["echo never"])).await;
+    let n = events.len();
+    assert_eq!(
+        &events[n - 2..],
+        [
+            DeployEvent::ServerState {
+                head: Some(from),
+                tree_dirty: Some(true),
+            },
+            DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                step: 0,
+                partial_update: true,
+            }),
+        ],
+        "{events:#?}"
+    );
+    assert!(!step_output(&events, 1).contains(&"never"));
 }
