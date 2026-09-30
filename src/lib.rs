@@ -19,8 +19,9 @@ mod script;
 pub mod transport;
 
 pub use engine::{
-    break_lock, bring_app_up, cancel, execute, prepare, BreakLockError, BringUpError, ConfirmError,
-    Confirmation, DeployTarget, ExecuteError, ExecutionHandle, PrepareError, Preview,
+    break_lock, bring_app_up, cancel, execute, prepare, prepare_with_plan, BreakLockError,
+    BringUpError, ConfirmError, Confirmation, DeployTarget, ExecuteError, ExecutionHandle,
+    PrepareError, Preview, RunPlan,
 };
 pub use event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason};
 pub use lock::{LockInfo, LockOwner, STALE_AFTER};
