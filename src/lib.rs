@@ -10,6 +10,7 @@
 //! 2. [`execute`] runs the deploy, and only accepts a [`Confirmation`]
 //!    built from that exact preview.
 
+pub mod config;
 mod engine;
 mod event;
 mod lock;

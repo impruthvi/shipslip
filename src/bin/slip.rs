@@ -1,12 +1,12 @@
-use std::collections::BTreeMap;
 use std::error::Error;
-use std::fs::File;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use serde::Deserialize;
+use shipslip::config::{
+    approve_trust, default_trust_path, trust_status, LoadedConfig, TrustSnapshot, TrustStatus,
+};
 use shipslip::transport::SshTransport;
 use shipslip::{
     cancel, execute, prepare_with_plan, Confirmation, DeployEvent, DeployOutcome, DeployTarget,
@@ -28,22 +28,35 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     let Some(command) = parse_args()? else {
         return Ok(ExitCode::SUCCESS);
     };
-
-    let config_file = File::open(&command.config)?;
-    let config: Config = serde_json::from_reader(config_file)?;
-    let environment = config
-        .environments
-        .get(&command.environment)
-        .ok_or_else(|| {
-            invalid_input(format!(
-                "environment `{}` is not in the config",
-                command.environment
-            ))
-        })?;
-    let target = environment.to_target(&command.environment);
+    let config = LoadedConfig::load(&std::env::current_dir()?, command.config.as_deref())?;
+    if config.uses_default_recipe() {
+        eprintln!("Using the default Laravel deploy recipe; add [recipe.deploy] to customize it.");
+    }
+    let trust_path = default_trust_path()?;
+    let (environment, plan) = match command.action {
+        Action::Trust { environment } => {
+            return trust_command(&config, &trust_path, environment.as_deref());
+        }
+        Action::Run { environment, plan } => (environment, plan),
+    };
+    let target = config.target(&environment).ok_or_else(|| {
+        invalid_input(format!("environment `{environment}` is not in the config"))
+    })?;
+    let snapshot = config
+        .trust_snapshot(&environment)
+        .expect("target has an environment");
+    if !matches!(
+        trust_status(&trust_path, config.repo_root(), &environment, &snapshot)?,
+        TrustStatus::Trusted
+    ) {
+        return Err(invalid_input(format!(
+            "config for `{environment}` is untrusted; run `slip trust {environment}` to review it"
+        ))
+        .into());
+    }
 
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
-    let preview = prepare_with_plan(target.clone(), command.plan, transport.as_ref()).await?;
+    let preview = prepare_with_plan(target.clone(), plan, transport.as_ref()).await?;
     show_preview(&preview);
 
     let Some((preview, confirmation)) = confirm(preview, &target, transport.as_ref()).await? else {
@@ -131,17 +144,25 @@ fn parse_args() -> Result<Option<Command>, Box<dyn Error>> {
             .get(index)
             .ok_or_else(|| invalid_input("--config requires a file path"))?;
         index += 1;
-        PathBuf::from(path)
+        Some(PathBuf::from(path))
     } else {
-        std::env::var_os("SHIPSLIP_CONFIG")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("shipslip.json"))
+        std::env::var_os("SHIPSLIP_CONFIG").map(PathBuf::from)
     };
 
     let action = args
         .get(index)
         .ok_or_else(|| invalid_input("missing command"))?;
     index += 1;
+    if action == "trust" {
+        let environment = args.get(index).cloned();
+        if index + usize::from(environment.is_some()) != args.len() {
+            return Err(invalid_input("trust accepts at most one environment name").into());
+        }
+        return Ok(Some(Command {
+            config,
+            action: Action::Trust { environment },
+        }));
+    }
     let environment = args
         .get(index)
         .ok_or_else(|| invalid_input("missing environment name"))?
@@ -177,8 +198,7 @@ fn parse_args() -> Result<Option<Command>, Box<dyn Error>> {
 
     Ok(Some(Command {
         config,
-        environment,
-        plan,
+        action: Action::Run { environment, plan },
     }))
 }
 
@@ -186,12 +206,15 @@ fn print_help() {
     println!(
         "Shipslip deploy runner\n\n\
          Usage:\n\
-         \x20 slip [--config FILE] <deploy|rerun|from-step> <ENV> [STEP]\n\n\
+         \x20 slip [--config FILE] <deploy|rerun|from-step> <ENV> [STEP]\n\
+         \x20 slip [--config FILE] trust [ENV]\n\n\
          Commands:\n\
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\
          \x20 rerun ENV          Run all recipe steps on the already-deployed commit\n\
          \x20 from-step ENV STEP Run recipe steps starting at STEP (steps start at 1)\n\n\
-         Config defaults to ./shipslip.json, or SHIPSLIP_CONFIG."
+         \x20 trust [ENV]         Review and approve config changes\n\n\
+         Config is discovered from the current directory up to the git root.\n\
+         SHIPSLIP_CONFIG can select a different file."
     );
 }
 
@@ -206,6 +229,7 @@ fn show_preview(preview: &shipslip::Preview) {
         ),
     }
     println!("Branch:      {}", preview.target().branch);
+    println!("SSH alias:   {}", preview.target().ssh_alias);
     println!("Path:        {}", preview.target().path);
     println!("Current SHA: {}", preview.from_sha());
     println!("Target SHA:  {}", preview.target_sha());
@@ -215,11 +239,131 @@ fn show_preview(preview: &shipslip::Preview) {
             println!("  {commit}");
         }
     }
+    let first_step = match preview.run_plan() {
+        RunPlan::Deploy | RunPlan::Rerun => 1,
+        RunPlan::FromStep(step) => step,
+    };
+    println!("Recipe steps:");
+    for (index, step) in preview.target().steps.iter().enumerate() {
+        if index + 1 >= first_step {
+            println!("  {}. {step}", index + 1);
+        }
+    }
     if preview.target().maintenance {
         println!("Maintenance: enabled");
     }
     if preview.target().production {
         println!("This is a production environment.");
+    }
+}
+
+fn trust_command(
+    config: &LoadedConfig,
+    trust_path: &Path,
+    environment: Option<&str>,
+) -> Result<ExitCode, Box<dyn Error>> {
+    let names: Vec<String> = match environment {
+        Some(name) => {
+            if config.trust_snapshot(name).is_none() {
+                return Err(
+                    invalid_input(format!("environment `{name}` is not in the config")).into(),
+                );
+            }
+            vec![name.to_string()]
+        }
+        None => config.environment_names().map(str::to_string).collect(),
+    };
+    println!(
+        "Project: {} ({})",
+        config.project_name(),
+        config.repo_root().display()
+    );
+    println!("Config:  {}", config.path().display());
+    for name in names {
+        let snapshot = config
+            .trust_snapshot(&name)
+            .expect("environment was listed");
+        match trust_status(trust_path, config.repo_root(), &name, &snapshot)? {
+            TrustStatus::Trusted => println!("{name}: already trusted"),
+            TrustStatus::Untrusted { previous } => {
+                println!("\n{name}: review these settings before approving:");
+                show_trust_changes(previous.as_ref(), &snapshot);
+                print!("Type `{name}` to trust this environment (Enter to skip): ");
+                io::stdout().flush()?;
+                if read_answer()? == name {
+                    approve_trust(trust_path, config.repo_root(), &name, snapshot)?;
+                    println!("{name}: trusted");
+                } else {
+                    println!("{name}: remains untrusted");
+                }
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) {
+    show_change(
+        "ssh",
+        previous.map(|old| old.ssh_alias.clone()),
+        current.ssh_alias.clone(),
+    );
+    show_change(
+        "path",
+        previous.map(|old| old.path.clone()),
+        current.path.clone(),
+    );
+    show_change(
+        "branch",
+        previous.map(|old| old.branch.clone()),
+        current.branch.clone(),
+    );
+    show_change(
+        "production",
+        previous.map(|old| old.production.to_string()),
+        current.production.to_string(),
+    );
+    show_change(
+        "maintenance",
+        previous.map(|old| old.maintenance.to_string()),
+        current.maintenance.to_string(),
+    );
+    show_change(
+        "log",
+        previous.map(|old| format!("{:?}", old.log)),
+        format!("{:?}", current.log),
+    );
+    show_change(
+        "log_daily",
+        previous.map(|old| old.log_daily.to_string()),
+        current.log_daily.to_string(),
+    );
+    show_change(
+        "smoke_url",
+        previous.map(|old| format!("{:?}", old.smoke_url)),
+        format!("{:?}", current.smoke_url),
+    );
+    if previous.is_none_or(|old| old.steps != current.steps) {
+        if let Some(old) = previous {
+            println!("  recipe steps before:");
+            for (index, step) in old.steps.iter().enumerate() {
+                println!("    {}. {step}", index + 1);
+            }
+        }
+        println!("  recipe steps now:");
+        for (index, step) in current.steps.iter().enumerate() {
+            println!("    {}. {step}", index + 1);
+        }
+    }
+}
+
+fn show_change(label: &str, previous: Option<String>, current: String) {
+    if previous.as_deref() == Some(current.as_str()) {
+        return;
+    }
+    match previous {
+        Some(previous) => println!("  {label}: {previous} -> {current}"),
+        None => println!("  {label}: {current}"),
     }
 }
 
@@ -335,40 +479,11 @@ fn invalid_input(message: impl Into<String>) -> io::Error {
 }
 
 struct Command {
-    config: PathBuf,
-    environment: String,
-    plan: RunPlan,
+    config: Option<PathBuf>,
+    action: Action,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    environments: BTreeMap<String, Environment>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Environment {
-    production: bool,
-    ssh_alias: String,
-    path: String,
-    branch: String,
-    #[serde(default)]
-    steps: Vec<String>,
-    #[serde(default)]
-    maintenance: bool,
-}
-
-impl Environment {
-    fn to_target(&self, name: &str) -> DeployTarget {
-        DeployTarget {
-            env: name.to_string(),
-            production: self.production,
-            ssh_alias: self.ssh_alias.clone(),
-            path: self.path.clone(),
-            branch: self.branch.clone(),
-            steps: self.steps.clone(),
-            maintenance: self.maintenance,
-        }
-    }
+enum Action {
+    Run { environment: String, plan: RunPlan },
+    Trust { environment: Option<String> },
 }
