@@ -100,6 +100,22 @@ steps if the run still owns the deploy lock. It requires the same local receipt
 and project checkout. Only one process can use a receipt at a time. If the
 server cannot be reached, the receipt stays unfinished so you can try again.
 
+If the result is unknown and the deploy lock becomes stale, first inspect the
+server over SSH to confirm no command from the old run is still running. The
+receipt's run ID identifies its directory under `~/.shipslip/runs/`. Then
+clear the stale lock and, if maintenance mode may still be on, bring the app up:
+
+```sh
+slip break-lock staging
+slip up staging
+```
+
+`break-lock` shows who holds the lock and its run ID, and only clears a lock
+whose heartbeat is at least two minutes old; it asks you to type the
+environment name. `up` takes a new deploy lock and runs
+`php artisan up`; it asks for confirmation. Neither command resumes the old
+deploy. Check the receipt and server state before choosing a new run plan.
+
 ## Post-deploy checks
 
 Shipslip compares log entries against the last 2 MiB of the log and previously

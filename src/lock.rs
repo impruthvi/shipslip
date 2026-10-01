@@ -107,6 +107,9 @@ fn script(path: &str, run_id: &str, body: &str) -> String {
     )
 }
 
+/// Prints `held AGE OWNER_JSON` for the lock at `$l`.
+const PRINT_HELD: &str = r#"echo "held $(( $(date +%s) - $(cat "$l/heartbeat" 2>/dev/null || echo 0) )) $(cat "$l/owner.json" 2>/dev/null)""#;
+
 pub(crate) fn acquire_script(path: &str, owner: &LockOwner) -> String {
     let json = serde_json::to_string(owner).expect("owner serializes");
     script(
@@ -114,16 +117,25 @@ pub(crate) fn acquire_script(path: &str, owner: &LockOwner) -> String {
         &owner.run_id,
         &format!(
             r#"if mkdir "$l" 2>/dev/null; then
+  printf '%s\n' "$r" > "$l/run_id"
   date +%s > "$l/heartbeat"
   printf '%s' {owner} > "$l/owner.json"
-  printf '%s\n' "$r" > "$l/run_id"
   echo acquired
 else
-  echo "held $(( $(date +%s) - $(cat "$l/heartbeat" 2>/dev/null || echo 0) )) $(cat "$l/owner.json" 2>/dev/null)"
+  {held}
 fi
 "#,
             owner = shell_quote(&json),
+            held = PRINT_HELD,
         ),
+    )
+}
+
+pub(crate) fn status_script(path: &str) -> String {
+    script(
+        path,
+        "",
+        &format!("[ -d \"$l\" ] || {{ echo not-held; exit 0; }}\n{PRINT_HELD}\n"),
     )
 }
 
@@ -190,12 +202,23 @@ fn parse_acquire(lines: &[String]) -> Option<Acquire> {
     if last == "acquired" {
         return Some(Acquire::Acquired);
     }
-    let rest = last.strip_prefix("held ")?;
+    parse_held(last).map(Acquire::Held)
+}
+
+fn parse_held(line: &str) -> Option<LockInfo> {
+    let rest = line.strip_prefix("held ")?;
     let (age, owner) = rest.split_once(' ').unwrap_or((rest, ""));
-    Some(Acquire::Held(LockInfo {
+    Some(LockInfo {
         owner: serde_json::from_str(owner).ok(),
         age_secs: age.parse().ok()?,
-    }))
+    })
+}
+
+fn parse_status(lines: &[String]) -> Option<Option<LockInfo>> {
+    match last_line(lines)? {
+        "not-held" => Some(None),
+        other => parse_held(other).map(Some),
+    }
 }
 
 fn parse_break(lines: &[String]) -> Option<Break> {
@@ -220,8 +243,40 @@ pub(crate) async fn acquire<T: Transport>(
     path: &str,
     owner: &LockOwner,
 ) -> Result<Acquire, String> {
-    let lines = run(transport, &acquire_script(path, owner)).await?;
-    parse_acquire(&lines).ok_or_else(|| format!("unexpected output: {}", lines.join("\n")))
+    let (result, lines) = run_collect(transport, &acquire_script(path, owner)).await;
+    match result {
+        Ok(0) => {
+            parse_acquire(&lines).ok_or_else(|| format!("unexpected output: {}", lines.join("\n")))
+        }
+        Ok(code) => Err(format!("exited with {code}: {}", lines.join("\n"))),
+        Err(TransportError::ConnectionLost(reason)) => {
+            let lost = format!("connection lost while taking the deploy lock: {reason}");
+            transport.reconnect().await.map_err(|error| {
+                format!("{lost}; could not check for an orphaned lock: {error}")
+            })?;
+            match is_owned(transport, path, &owner.run_id).await {
+                Ok(true) => {
+                    release(transport, path, &owner.run_id)
+                        .await
+                        .map_err(|error| {
+                            format!("{lost}; could not release the orphaned lock: {error}")
+                        })?;
+                    match is_owned(transport, path, &owner.run_id).await {
+                        Ok(false) => Err(format!("{lost}; released the orphaned lock")),
+                        Ok(true) => Err(format!("{lost}; the orphaned lock is still held")),
+                        Err(error) => {
+                            Err(format!("{lost}; could not verify lock cleanup: {error}"))
+                        }
+                    }
+                }
+                Ok(false) => Err(lost),
+                Err(error) => Err(format!(
+                    "{lost}; could not check for an orphaned lock: {error}"
+                )),
+            }
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 pub(crate) async fn is_owned<T: Transport>(
@@ -251,6 +306,15 @@ pub(crate) async fn release<T: Transport>(
         (Err(e), _) => Err(e),
         _ => Ok(()),
     }
+}
+
+/// Reads the lock without changing it. `None` if no lock is held.
+pub(crate) async fn status<T: Transport>(
+    transport: &T,
+    path: &str,
+) -> Result<Option<LockInfo>, String> {
+    let lines = run(transport, &status_script(path)).await?;
+    parse_status(&lines).ok_or_else(|| format!("unexpected output: {}", lines.join("\n")))
 }
 
 pub(crate) async fn break_stale<T: Transport>(transport: &T, path: &str) -> Result<Break, String> {
@@ -333,5 +397,29 @@ mod tests {
         assert_eq!(parse_break(&lines(&["broken"])), Some(Break::Broken));
         assert_eq!(parse_break(&lines(&["not-held"])), Some(Break::NotHeld));
         assert_eq!(parse_break(&lines(&["live 12"])), Some(Break::Live(12)));
+    }
+
+    #[test]
+    fn status_output_is_parsed() {
+        assert_eq!(parse_status(&lines(&["motd", "not-held"])), Some(None));
+        let json = serde_json::to_string(&owner()).unwrap();
+        assert_eq!(
+            parse_status(&lines(&[&format!("held 300 {json}")])),
+            Some(Some(LockInfo {
+                owner: Some(owner()),
+                age_secs: 300
+            }))
+        );
+        assert_eq!(parse_status(&lines(&["broken"])), None);
+    }
+
+    #[test]
+    fn status_script_only_reads_the_lock() {
+        let s = status_script("/app");
+        assert!(s.contains("echo not-held"));
+        assert!(s.contains(PRINT_HELD));
+        for write in ["mkdir", "mv ", "rm ", "> "] {
+            assert!(!s.contains(write), "status script contains `{write}`");
+        }
     }
 }

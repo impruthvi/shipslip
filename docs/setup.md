@@ -124,3 +124,10 @@ slip attach staging
 This resumes observation of an unfinished run without relaunching its active
 server command. Use `slip rerun staging` only when the server is already on
 the intended clean commit and repeating every recipe step is safe.
+
+If `attach` cannot resolve an unknown outcome and the lock has gone stale,
+connect with `ssh my-app-staging` and check that no command from the old run is
+still running. After that, run `slip break-lock staging` to clear the stale
+lock. If the app may still be in maintenance mode, run `slip up staging` to
+bring it back. Both commands require the trusted project config and ask for
+confirmation; `up` takes a new deploy lock.
