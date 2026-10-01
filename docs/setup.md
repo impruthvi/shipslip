@@ -101,11 +101,12 @@ configured branch on the server, previews the exact commits and steps, and
 asks for confirmation before making changes. Read that preview. If you change
 the config later, run `slip trust staging` again before deploying.
 
-Leave the terminal open for the deploy and the 120-second log watch. Check
-the final deploy outcome, `Log watch` status, and (if configured) the smoke
-check's HTTP result. `Complete` means Shipslip observed the log; `NoLogSeen`,
-`Unavailable`, or `Partial` means you should inspect the log path, permissions,
-or format. A failed smoke check is recorded separately and does not roll back
+Leave the terminal open for the deploy and the 120-second log watch; Shipslip
+prints the time left every 30 seconds, and Ctrl-C ends the watch early. Check
+the final deploy outcome, the `Log watch` line, and (if configured) the smoke
+check's HTTP result. `complete` means Shipslip observed the log; `no log file
+found`, `log could not be read`, or `partial` means you should inspect the log
+path, permissions, or format. A failed smoke check is recorded separately and does not roll back
 the deploy.
 
 Shipslip saves a receipt on your computer. On macOS, look under
@@ -115,7 +116,9 @@ should be treated as private.
 
 ## If the command is interrupted
 
-From the **same local project checkout**, run:
+Ctrl-C at the confirmation prompt cancels cleanly. During the steps, it stops
+following the running command, which keeps running on the server. To resume,
+from the **same local project checkout**, run:
 
 ```sh
 slip attach staging

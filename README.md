@@ -87,6 +87,12 @@ plan, exact commits, step results, recent step output, log watch, smoke result,
 and final outcome.
 Treat receipts as private: command output can contain secrets.
 
+Ctrl-C at the confirmation prompt cancels the run and releases the deploy
+lock. During the steps, Ctrl-C starts no new step and stops following the
+running command. During the post-deploy log watch, it ends the watch early and
+still finishes the run. While maintenance mode is being turned off, Shipslip
+finishes that first. Press Ctrl-C again to quit at once.
+
 If `slip` exits while a command is running, that command continues on the
 server. Resume the unfinished run from the same project with:
 

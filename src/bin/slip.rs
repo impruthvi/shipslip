@@ -1,8 +1,10 @@
 use std::error::Error;
-use std::io::{self, Write};
+use std::future::Future;
+use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use shipslip::config::{
     approve_trust, default_trust_path, trust_status, LoadedConfig, TrustSnapshot, TrustStatus,
@@ -12,9 +14,15 @@ use shipslip::transport::SshTransport;
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute_recorded, lock_status, prepare_with_plan,
     BreakLockError, BringUpError, Confirmation, DeployEvent, DeployOutcome, DeployTarget,
-    ExecuteRejected, MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus,
-    POST_DEPLOY_WATCH,
+    ExecuteRejected, ExecutionHandle, MaintenancePhase, PrepareError, RunPlan, SmokeResult,
+    StepStatus, WatchResult, WatchStatus, POST_DEPLOY_WATCH,
 };
+use tokio::sync::mpsc;
+use tokio::time::Instant;
+
+/// Exit status after Ctrl-C, as shells report it.
+const INTERRUPTED: u8 = 130;
+const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
@@ -55,7 +63,12 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     let target = trusted_target(&config, &trust_path, &environment)?;
 
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
-    let preview = prepare_with_plan(target.clone(), plan, transport.as_ref())
+    let mut interrupts = Interrupts::listen();
+    let preview = interrupts
+        .defer(
+            prepare_with_plan(target.clone(), plan, transport.as_ref()),
+            "Cancelling once the server check finishes; press Ctrl-C again to quit now.",
+        )
         .await
         .map_err(|error| match error {
             PrepareError::LockHeld(info) => format!(
@@ -65,6 +78,13 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
             .into(),
             error => Box::<dyn Error>::from(error),
         })?;
+    if interrupts.pending {
+        interrupts
+            .defer(cancel(preview, transport.as_ref()), "")
+            .await?;
+        println!("Cancelled; no deploy steps were run.");
+        exit_interrupted();
+    }
     let journal = match ReceiptJournal::create(
         &receipts_root,
         config.project_name(),
@@ -79,12 +99,18 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     };
     show_preview(&preview);
 
-    let Some((preview, confirmation)) =
-        confirm(preview, &target, transport.as_ref(), &journal).await?
+    let Some((preview, confirmation)) = confirm(
+        preview,
+        &target,
+        transport.as_ref(),
+        &journal,
+        &mut interrupts,
+    )
+    .await?
     else {
         return Ok(ExitCode::SUCCESS);
     };
-    let (events, _handle) =
+    let (events, handle) =
         match execute_recorded(preview, confirmation, transport.clone(), journal.clone()) {
             Ok(run) => run,
             Err(ExecuteRejected { error, preview }) => {
@@ -92,14 +118,267 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
                 return Err(error.into());
             }
         };
-    follow_events(events).await
+    follow_events(events, &handle, &mut interrupts, &RunView::new(&target)).await
+}
+
+/// Ctrl-C presses, delivered as messages once the listener is installed.
+/// Installing it replaces the default of killing the process.
+struct Interrupts {
+    rx: mpsc::UnboundedReceiver<()>,
+    /// A Ctrl-C was pressed and its effect has not finished yet.
+    pending: bool,
+}
+
+impl Interrupts {
+    fn listen() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while tokio::signal::ctrl_c().await.is_ok() {
+                if tx.send(()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self::from_channel(rx)
+    }
+
+    fn from_channel(rx: mpsc::UnboundedReceiver<()>) -> Self {
+        Self { rx, pending: false }
+    }
+
+    async fn recv(&mut self) {
+        if self.rx.recv().await.is_none() {
+            std::future::pending::<()>().await;
+        }
+    }
+
+    /// Runs `work` to the end. The first Ctrl-C prints `notice` and is
+    /// remembered in `pending`; another one exits at once.
+    async fn defer<F: Future>(&mut self, work: F, notice: &str) -> F::Output {
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                output = &mut work => return output,
+                () = self.recv() => {
+                    if self.pending {
+                        exit_interrupted();
+                    }
+                    self.pending = true;
+                    eprintln!("\n{notice}");
+                }
+            }
+        }
+    }
+}
+
+/// Exits without waiting for a prompt's reader thread, which cannot be
+/// cancelled while it waits for input.
+fn exit_interrupted() -> ! {
+    let _ = io::stdout().flush();
+    std::process::exit(INTERRUPTED.into())
+}
+
+/// Reads one answer on a blocking thread. `None` if Ctrl-C came first.
+async fn ask(
+    read: impl FnOnce() -> io::Result<String> + Send + 'static,
+    interrupts: &mut Interrupts,
+) -> io::Result<Option<String>> {
+    let answer = tokio::task::spawn_blocking(read);
+    tokio::select! {
+        answer = answer => answer.map_err(io::Error::other)?.map(Some),
+        () = interrupts.recv() => Ok(None),
+    }
+}
+
+/// What the running deploy can be asked to do.
+trait RunControls {
+    fn detach(&self);
+    fn cancel_watch(&self);
+}
+
+impl RunControls for ExecutionHandle {
+    fn detach(&self) {
+        ExecutionHandle::detach(self);
+    }
+
+    fn cancel_watch(&self) {
+        ExecutionHandle::cancel_watch(self);
+    }
+}
+
+/// Where a followed run is, for deciding what Ctrl-C does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Running,
+    BringingUp,
+    Watching,
+    Finishing,
+}
+
+fn next_stage(stage: Stage, event: &DeployEvent) -> Stage {
+    match event {
+        DeployEvent::MaintenanceStarted {
+            phase: MaintenancePhase::Up,
+        } => Stage::BringingUp,
+        DeployEvent::MaintenanceFinished {
+            phase: MaintenancePhase::Up,
+            ..
+        }
+        | DeployEvent::WatchFinished(_) => Stage::Finishing,
+        DeployEvent::WatchStarted { .. } => Stage::Watching,
+        _ => stage,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Interrupt {
+    /// Start no new step and stop following the running one.
+    Detach,
+    /// Maintenance up cannot be left half-done; skip the watch after it.
+    SkipWatch,
+    StopWatch,
+    /// Only the lock release and receipt remain.
+    Wait,
+    Quit,
+}
+
+/// A second Ctrl-C in the same stage quits; a new stage starts over.
+fn on_interrupt(stage: Stage, again: bool) -> Interrupt {
+    if again {
+        return Interrupt::Quit;
+    }
+    match stage {
+        Stage::Running => Interrupt::Detach,
+        Stage::BringingUp => Interrupt::SkipWatch,
+        Stage::Watching => Interrupt::StopWatch,
+        Stage::Finishing => Interrupt::Wait,
+    }
+}
+
+struct RunView {
+    env: String,
+    log: String,
+}
+
+impl RunView {
+    fn new(target: &DeployTarget) -> Self {
+        Self {
+            env: target.env.clone(),
+            log: log_display(target),
+        }
+    }
+}
+
+fn log_display(target: &DeployTarget) -> String {
+    format!(
+        "{}{}",
+        target.log_path(),
+        if target.log_daily { "-*.log" } else { "" }
+    )
+}
+
+fn watch_left_text(left: Duration) -> Option<String> {
+    let secs = left.as_secs_f64().round() as u64;
+    (secs > 0).then(|| format!("Log watch: {secs} s left"))
+}
+
+fn watch_summary(result: &WatchResult) -> String {
+    let errors = match result.new_errors.len() {
+        0 => "no new errors".to_string(),
+        1 => "1 new error group".to_string(),
+        n => format!("{n} new error groups"),
+    };
+    let state = match result.status {
+        WatchStatus::Complete => "complete",
+        WatchStatus::Partial => "partial",
+        WatchStatus::Cancelled => "stopped early",
+        WatchStatus::Unavailable => "log could not be read",
+        WatchStatus::NoLogSeen => "no log file found",
+        WatchStatus::NotRun => "not run",
+    };
+    let checked = matches!(
+        result.status,
+        WatchStatus::Complete | WatchStatus::Partial | WatchStatus::Cancelled
+    );
+    if checked || !result.new_errors.is_empty() {
+        format!("Log watch: {state}, {errors}")
+    } else {
+        format!("Log watch: {state}")
+    }
 }
 
 async fn follow_events(
-    mut events: tokio::sync::mpsc::UnboundedReceiver<DeployEvent>,
+    mut events: mpsc::UnboundedReceiver<DeployEvent>,
+    controls: &impl RunControls,
+    interrupts: &mut Interrupts,
+    view: &RunView,
 ) -> Result<ExitCode, Box<dyn Error>> {
     let mut succeeded = false;
-    while let Some(event) = events.recv().await {
+    let mut stage = Stage::Running;
+    let mut interrupted_in = None;
+    let mut progress: Option<(tokio::time::Interval, Instant)> = None;
+    loop {
+        let event = tokio::select! {
+            biased;
+            event = events.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+            () = interrupts.recv() => {
+                let action = on_interrupt(stage, interrupted_in == Some(stage));
+                interrupted_in = Some(stage);
+                match action {
+                    Interrupt::Detach => {
+                        controls.detach();
+                        controls.cancel_watch();
+                        eprintln!(
+                            "\nStopping: no new step will start; a running command keeps running \
+                             on the server. Press Ctrl-C again to quit now."
+                        );
+                    }
+                    Interrupt::SkipWatch => {
+                        controls.cancel_watch();
+                        eprintln!(
+                            "\nBringing the app back up first; the log watch will be skipped. \
+                             Press Ctrl-C again to quit now (the app may stay in maintenance mode)."
+                        );
+                    }
+                    Interrupt::StopWatch => {
+                        controls.cancel_watch();
+                        progress = None;
+                        eprintln!("\nStopping the log watch...");
+                    }
+                    Interrupt::Wait => {
+                        eprintln!("\nFinishing the run. Press Ctrl-C again to quit now.");
+                    }
+                    Interrupt::Quit => {
+                        eprintln!(
+                            "Quit before the run finished; run `slip attach {}` to check it.",
+                            view.env
+                        );
+                        return Ok(ExitCode::from(INTERRUPTED));
+                    }
+                }
+                continue;
+            }
+            () = async {
+                match progress.as_mut() {
+                    Some((ticks, _)) => {
+                        ticks.tick().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(text) = progress
+                    .as_ref()
+                    .and_then(|(_, end)| watch_left_text(end.saturating_duration_since(Instant::now())))
+                {
+                    println!("{text}");
+                }
+                continue;
+            }
+        };
+        stage = next_stage(stage, &event);
         match event {
             DeployEvent::StepStarted { index, name } => println!("\nStep {index}: {name}"),
             DeployEvent::Output { line, .. } => println!("  {line}"),
@@ -150,12 +429,20 @@ async fn follow_events(
                     println!("  at {file_line}");
                 }
             }
-            DeployEvent::WatchFinished(result) => {
+            DeployEvent::WatchStarted { window } => {
                 println!(
-                    "Log watch: {:?} ({} new groups)",
-                    result.status,
-                    result.new_errors.len()
+                    "Watching {} for {} s for new errors (Ctrl-C to stop watching)",
+                    view.log,
+                    window.as_secs()
                 );
+                progress = Some((
+                    tokio::time::interval_at(Instant::now() + PROGRESS_EVERY, PROGRESS_EVERY),
+                    Instant::now() + window,
+                ));
+            }
+            DeployEvent::WatchFinished(result) => {
+                progress = None;
+                println!("{}", watch_summary(&result));
                 for warning in result.warnings {
                     eprintln!("  {warning}");
                 }
@@ -174,7 +461,11 @@ async fn follow_events(
                 SmokeResult::NotConfigured => {}
             },
             DeployEvent::Detached { index } => {
-                println!("Stopped observing step {index}; it continues on the server.");
+                println!(
+                    "Stopped observing step {index}; it continues on the server. \
+                     Run `slip attach {}` to follow it.",
+                    view.env
+                );
             }
             DeployEvent::Interrupted { index, reason } => {
                 eprintln!("Lost contact while observing step {index}: {reason}");
@@ -184,6 +475,7 @@ async fn follow_events(
                 succeeded = matches!(&outcome, DeployOutcome::Succeeded);
                 show_outcome(&outcome);
             }
+            _ => {}
         }
     }
 
@@ -344,13 +636,8 @@ fn show_preview(preview: &shipslip::Preview) {
     }
     if preview.target().watch_log {
         println!(
-            "Log watch:   {}{} ({} s after steps)",
-            preview.target().log_path(),
-            if preview.target().log_daily {
-                "-*.log"
-            } else {
-                ""
-            },
+            "Log watch:   {} ({} s after steps)",
+            log_display(preview.target()),
             POST_DEPLOY_WATCH.as_secs()
         );
     }
@@ -455,8 +742,10 @@ async fn attach_command(
         return Ok(ExitCode::SUCCESS);
     }
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
-    let (events, _handle) = attach(journal, transport)?;
-    follow_events(events).await
+    let (events, handle) = attach(journal, transport)?;
+    // Installed only now: Ctrl-C at the prompt above must leave the run as it is.
+    let mut interrupts = Interrupts::listen();
+    follow_events(events, &handle, &mut interrupts, &RunView::new(&target)).await
 }
 
 fn trusted_target(
@@ -672,18 +961,28 @@ async fn confirm(
     target: &DeployTarget,
     transport: &SshTransport,
     journal: &ReceiptJournal,
+    interrupts: &mut Interrupts,
 ) -> Result<Option<(shipslip::Preview, Confirmation)>, Box<dyn Error>> {
-    let answer = (|| {
-        if target.production {
-            print!("Type the environment name `{}` to proceed: ", target.env);
-        } else {
-            print!("Proceed with this run? [y/N] ");
-        }
-        io::stdout().flush()?;
-        read_answer()
-    })();
+    if target.production {
+        print!("Type the environment name `{}` to proceed: ", target.env);
+    } else {
+        print!("Proceed with this run? [y/N] ");
+    }
+    let answer = match io::stdout().flush() {
+        Ok(()) => ask(read_answer, interrupts).await,
+        Err(error) => Err(error),
+    };
     let answer = match answer {
-        Ok(answer) => answer,
+        Ok(Some(answer)) => answer,
+        Ok(None) => {
+            println!();
+            interrupts.pending = true;
+            interrupts
+                .defer(cancel_prepared(preview, transport, journal), "")
+                .await?;
+            println!("Cancelled; no deploy steps were run.");
+            exit_interrupted();
+        }
         Err(error) => {
             cancel_prepared(preview, transport, journal).await?;
             return Err(error.into());
@@ -783,8 +1082,12 @@ fn status_name(status: &StepStatus) -> &'static str {
 }
 
 fn read_answer() -> io::Result<String> {
+    read_line_from(io::stdin().lock())
+}
+
+fn read_line_from(mut input: impl BufRead) -> io::Result<String> {
     let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
+    input.read_line(&mut answer)?;
     Ok(answer.trim().to_string())
 }
 
@@ -807,7 +1110,293 @@ enum Action {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::io::BufReader;
+
     use super::*;
+
+    #[derive(Default)]
+    struct Controls {
+        detached: Cell<usize>,
+        watch_cancelled: Cell<usize>,
+    }
+
+    impl RunControls for Controls {
+        fn detach(&self) {
+            self.detached.set(self.detached.get() + 1);
+        }
+
+        fn cancel_watch(&self) {
+            self.watch_cancelled.set(self.watch_cancelled.get() + 1);
+        }
+    }
+
+    enum Input {
+        Event(DeployEvent),
+        CtrlC,
+    }
+
+    /// Follows a run fed `inputs` one at a time.
+    async fn follow(inputs: Vec<Input>) -> (ExitCode, Controls) {
+        let controls = Controls::default();
+        let (events_tx, events) = mpsc::unbounded_channel();
+        let (ctrl_c, rx) = mpsc::unbounded_channel();
+        let mut interrupts = Interrupts::from_channel(rx);
+        let view = RunView {
+            env: "staging".into(),
+            log: "storage/logs/laravel.log".into(),
+        };
+        let feed = async move {
+            for input in inputs {
+                match input {
+                    Input::Event(event) => {
+                        let _ = events_tx.send(event);
+                    }
+                    Input::CtrlC => {
+                        let _ = ctrl_c.send(());
+                    }
+                }
+                for _ in 0..5 {
+                    tokio::task::yield_now().await;
+                }
+            }
+            // Keep Ctrl-C open while the run's events end.
+            ctrl_c
+        };
+        let (code, _ctrl_c) = tokio::join!(
+            follow_events(events, &controls, &mut interrupts, &view),
+            feed
+        );
+        (code.unwrap(), controls)
+    }
+
+    fn watch_finished(status: WatchStatus) -> DeployEvent {
+        let mut result = WatchResult::not_run();
+        result.status = status;
+        DeployEvent::WatchFinished(result)
+    }
+
+    fn step_started() -> DeployEvent {
+        DeployEvent::StepStarted {
+            index: 1,
+            name: "migrate".into(),
+        }
+    }
+
+    #[test]
+    fn ctrl_c_acts_on_the_current_stage_and_quits_when_repeated() {
+        assert_eq!(on_interrupt(Stage::Running, false), Interrupt::Detach);
+        assert_eq!(on_interrupt(Stage::BringingUp, false), Interrupt::SkipWatch);
+        assert_eq!(on_interrupt(Stage::Watching, false), Interrupt::StopWatch);
+        assert_eq!(on_interrupt(Stage::Finishing, false), Interrupt::Wait);
+        for stage in [
+            Stage::Running,
+            Stage::BringingUp,
+            Stage::Watching,
+            Stage::Finishing,
+        ] {
+            assert_eq!(on_interrupt(stage, true), Interrupt::Quit);
+        }
+    }
+
+    #[test]
+    fn stages_follow_maintenance_up_and_the_log_watch() {
+        let up = |phase| DeployEvent::MaintenanceStarted { phase };
+        assert_eq!(
+            next_stage(Stage::Running, &up(MaintenancePhase::Down)),
+            Stage::Running
+        );
+        assert_eq!(next_stage(Stage::Running, &step_started()), Stage::Running);
+        assert_eq!(
+            next_stage(Stage::Running, &up(MaintenancePhase::Up)),
+            Stage::BringingUp
+        );
+        assert_eq!(
+            next_stage(
+                Stage::BringingUp,
+                &DeployEvent::MaintenanceFinished {
+                    phase: MaintenancePhase::Up,
+                    status: StepStatus::Ok,
+                    exit_code: Some(0),
+                }
+            ),
+            Stage::Finishing
+        );
+        assert_eq!(
+            next_stage(
+                Stage::Finishing,
+                &DeployEvent::WatchStarted {
+                    window: Duration::from_secs(120)
+                }
+            ),
+            Stage::Watching
+        );
+        assert_eq!(
+            next_stage(Stage::Watching, &watch_finished(WatchStatus::Complete)),
+            Stage::Finishing
+        );
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_during_the_watch_stops_only_the_watch() {
+        let (code, controls) = follow(vec![
+            Input::Event(DeployEvent::WatchStarted {
+                window: Duration::from_secs(120),
+            }),
+            Input::CtrlC,
+            Input::Event(watch_finished(WatchStatus::Cancelled)),
+            Input::Event(DeployEvent::Finished(DeployOutcome::Succeeded)),
+        ])
+        .await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(controls.watch_cancelled.get(), 1);
+        assert_eq!(controls.detached.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_during_a_step_detaches_and_a_second_one_quits() {
+        let (code, controls) = follow(vec![
+            Input::Event(step_started()),
+            Input::CtrlC,
+            Input::CtrlC,
+        ])
+        .await;
+        assert_eq!(code, ExitCode::from(INTERRUPTED));
+        assert_eq!(controls.detached.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_in_a_new_stage_does_not_quit() {
+        // A stop between steps still runs the post-deploy watch.
+        let (code, controls) = follow(vec![
+            Input::Event(step_started()),
+            Input::CtrlC,
+            Input::Event(DeployEvent::WatchStarted {
+                window: Duration::from_secs(120),
+            }),
+            Input::CtrlC,
+            Input::Event(watch_finished(WatchStatus::Cancelled)),
+            Input::Event(DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
+                step: 1,
+                reason: shipslip::StopReason::Requested,
+            })),
+        ])
+        .await;
+        assert_eq!(code, ExitCode::FAILURE);
+        assert_eq!(controls.detached.get(), 1);
+        assert_eq!(controls.watch_cancelled.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_while_bringing_the_app_up_skips_the_watch_but_waits() {
+        let (code, controls) = follow(vec![
+            Input::Event(DeployEvent::MaintenanceStarted {
+                phase: MaintenancePhase::Up,
+            }),
+            Input::CtrlC,
+            Input::Event(DeployEvent::MaintenanceFinished {
+                phase: MaintenancePhase::Up,
+                status: StepStatus::Ok,
+                exit_code: Some(0),
+            }),
+            Input::Event(DeployEvent::Finished(DeployOutcome::Succeeded)),
+        ])
+        .await;
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(controls.detached.get(), 0);
+        assert_eq!(controls.watch_cancelled.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn ctrl_c_ends_a_prompt_that_is_still_waiting_for_input() {
+        let (reader, writer) = io::pipe().unwrap();
+        let (ctrl_c, rx) = mpsc::unbounded_channel();
+        let mut interrupts = Interrupts::from_channel(rx);
+        ctrl_c.send(()).unwrap();
+        let answer = tokio::time::timeout(
+            Duration::from_secs(5),
+            ask(
+                move || read_line_from(BufReader::new(reader)),
+                &mut interrupts,
+            ),
+        )
+        .await
+        .expect("Ctrl-C must not wait for input")
+        .unwrap();
+        assert_eq!(answer, None);
+        // Lets the blocked reader thread finish so the runtime can shut down.
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn prompt_returns_the_typed_answer() {
+        let (reader, mut writer) = io::pipe().unwrap();
+        let (_ctrl_c, rx) = mpsc::unbounded_channel();
+        let mut interrupts = Interrupts::from_channel(rx);
+        writer.write_all(b" yes \n").unwrap();
+        let answer = ask(
+            move || read_line_from(BufReader::new(reader)),
+            &mut interrupts,
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.as_deref(), Some("yes"));
+    }
+
+    #[tokio::test]
+    async fn deferred_work_finishes_after_one_ctrl_c() {
+        let (ctrl_c, rx) = mpsc::unbounded_channel();
+        let mut interrupts = Interrupts::from_channel(rx);
+        let (done, finished) = tokio::sync::oneshot::channel();
+        let work = async move { finished.await.unwrap() };
+        let feed = async move {
+            ctrl_c.send(()).unwrap();
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+            done.send(7).unwrap();
+            ctrl_c
+        };
+        let (output, _ctrl_c) = tokio::join!(interrupts.defer(work, "cancelling"), feed);
+        assert_eq!(output, 7);
+        assert!(interrupts.pending);
+    }
+
+    #[test]
+    fn watch_progress_shows_whole_seconds_left() {
+        assert_eq!(
+            watch_left_text(Duration::from_millis(89_600)).as_deref(),
+            Some("Log watch: 90 s left")
+        );
+        assert_eq!(watch_left_text(Duration::from_millis(400)), None);
+        assert_eq!(watch_left_text(Duration::ZERO), None);
+    }
+
+    #[test]
+    fn watch_summary_uses_plain_words() {
+        let summary = |status| {
+            let mut result = WatchResult::not_run();
+            result.status = status;
+            watch_summary(&result)
+        };
+        assert_eq!(
+            summary(WatchStatus::Complete),
+            "Log watch: complete, no new errors"
+        );
+        assert_eq!(
+            summary(WatchStatus::Cancelled),
+            "Log watch: stopped early, no new errors"
+        );
+        assert_eq!(summary(WatchStatus::NotRun), "Log watch: not run");
+        assert_eq!(
+            summary(WatchStatus::NoLogSeen),
+            "Log watch: no log file found"
+        );
+        assert_eq!(
+            summary(WatchStatus::Unavailable),
+            "Log watch: log could not be read"
+        );
+    }
 
     #[test]
     fn recovery_commands_require_exactly_one_environment() {

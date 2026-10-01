@@ -14,7 +14,7 @@ use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute, execute_recorded, lock_status, prepare,
     prepare_with_plan, AbortReason, BlockReason, BreakLockError, BringUpError, Confirmation,
     DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle, MaintenancePhase, PrepareError,
-    RunPlan, SmokeResult, StepStatus, StopReason, WatchStatus,
+    RunPlan, SmokeResult, StepStatus, StopReason, WatchStatus, POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 
@@ -1243,6 +1243,44 @@ async fn log_watch_reports_only_errors_written_during_the_deploy() {
         events.last(),
         Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
     );
+}
+
+#[tokio::test]
+async fn stopping_the_post_deploy_watch_finishes_the_run_and_releases_the_lock() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    let t = DeployTarget {
+        watch_log: true,
+        ..target(&path, &["true"])
+    };
+
+    let (events, running) = deploy_until(ssh.clone(), t.clone(), |e| {
+        matches!(e, DeployEvent::WatchStarted { .. })
+    })
+    .await;
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::WatchStarted {
+            window: POST_DEPLOY_WATCH
+        })
+    );
+    running.handle.cancel_watch();
+    let events = tokio::time::timeout(Duration::from_secs(30), running.rest(events))
+        .await
+        .expect("stopping the watch must not wait for its full window");
+
+    assert!(
+        events.iter().any(
+            |e| matches!(e, DeployEvent::WatchFinished(w) if w.status == WatchStatus::Cancelled)
+        ),
+        "{events:#?}"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    assert_eq!(lock_status(&t, &*ssh).await, Ok(None));
 }
 
 /// Answers one HTTP request with 204 on a local port.
