@@ -45,9 +45,19 @@ able to `git fetch origin` without an interactive prompt.
 
 ## 3. Add the project config
 
-In the **Laravel project's Git root**, create `.shipslip.toml`. Replace every
-example value below. Use the exact deploy steps that are safe for this app;
-the example includes a database migration.
+From the **Laravel project's Git checkout**, run:
+
+```sh
+slip init
+```
+
+It asks a few questions and writes `.shipslip.toml` at the Git root, with the
+default Laravel recipe written out so you can edit it. Review the file before
+the first deploy: the recipe includes `php artisan migrate --force`.
+
+To write the file by hand instead, create `.shipslip.toml` in the **Laravel
+project's Git root**. Replace every example value below. Use the exact deploy
+steps that are safe for this app; the example includes a database migration.
 
 ```toml
 [project]

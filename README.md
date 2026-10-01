@@ -9,7 +9,11 @@ SSH access, project configuration, deployment, and recovery.
 
 ## Quick start
 
-Put `.shipslip.toml` at the root of your Laravel project's Git repository:
+From your Laravel project's Git repository, run `slip init`. It asks for the
+environment name, SSH host alias, server path, branch, whether the environment
+is production, maintenance mode, and an optional smoke URL, then writes
+`.shipslip.toml` at the repository root. It never replaces an existing file.
+Or write the file yourself:
 
 ```toml
 [project]

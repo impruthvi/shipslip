@@ -53,6 +53,8 @@ pub enum ConfigError {
     TrustSerialize(#[from] serde_json::Error),
     #[error("unsupported trust store version {0}")]
     TrustVersion(u32),
+    #[error("`{0}` already exists; edit it instead of running init")]
+    AlreadyExists(PathBuf),
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,7 +130,11 @@ impl LoadedConfig {
             path: path.clone(),
             source,
         })?;
-        let config: FileConfig = toml::from_str(&raw).map_err(|source| ConfigError::Parse {
+        Self::parse(&raw, path, repo_root)
+    }
+
+    fn parse(raw: &str, path: PathBuf, repo_root: PathBuf) -> Result<Self, ConfigError> {
+        let config: FileConfig = toml::from_str(raw).map_err(|source| ConfigError::Parse {
             path: path.clone(),
             source,
         })?;
@@ -278,13 +284,7 @@ fn validate_environment(name: &str, env: &Environment) -> Result<(), ConfigError
             "environment name `{name}` must not be empty or contain whitespace"
         )));
     }
-    if env.ssh_alias.is_empty()
-        || env.ssh_alias.starts_with('-')
-        || !env
-            .ssh_alias
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-    {
+    if !is_ssh_alias(&env.ssh_alias) {
         return Err(ConfigError::Invalid(format!(
             "env.{name}.ssh must be an SSH host alias"
         )));
@@ -304,18 +304,166 @@ fn validate_environment(name: &str, env: &Environment) -> Result<(), ConfigError
             "env.{name}.log must not be empty"
         )));
     }
-    if env.smoke_url.as_ref().is_some_and(|url| {
-        let host = url
-            .strip_prefix("https://")
-            .or_else(|| url.strip_prefix("http://"))
-            .and_then(|rest| rest.split(['/', '?', '#']).next());
-        host.is_none_or(str::is_empty) || url.chars().any(char::is_whitespace)
-    }) {
+    if env
+        .smoke_url
+        .as_deref()
+        .is_some_and(|url| !is_smoke_url(url))
+    {
         return Err(ConfigError::Invalid(format!(
             "env.{name}.smoke_url must be an HTTP or HTTPS URL without whitespace"
         )));
     }
     Ok(())
+}
+
+/// An OpenSSH host alias that cannot be read as an option.
+pub fn is_ssh_alias(alias: &str) -> bool {
+    !alias.is_empty()
+        && !alias.starts_with('-')
+        && alias
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// An HTTP or HTTPS URL with a host and no whitespace.
+pub fn is_smoke_url(url: &str) -> bool {
+    let host = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .and_then(|rest| rest.split(['/', '?', '#']).next());
+    host.is_some_and(|host| !host.is_empty()) && !url.chars().any(char::is_whitespace)
+}
+
+/// A branch name Shipslip can deploy.
+pub fn is_branch_name(branch: &str) -> bool {
+    is_safe_branch(branch)
+}
+
+/// An environment name `init` can use as a plain TOML key.
+pub fn is_env_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// Answers for a new `.shipslip.toml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitAnswers {
+    pub env: String,
+    pub ssh_alias: String,
+    pub path: String,
+    pub branch: String,
+    pub production: bool,
+    pub maintenance: bool,
+    pub smoke_url: Option<String>,
+}
+
+/// Where `init` writes a new config: the git root, if no config is found.
+#[derive(Debug)]
+pub struct InitPlan {
+    path: PathBuf,
+    repo_root: PathBuf,
+    project_name: String,
+}
+
+impl InitPlan {
+    pub fn new(start: &Path) -> Result<Self, ConfigError> {
+        let start = fs::canonicalize(start).map_err(|source| ConfigError::Io {
+            path: start.to_path_buf(),
+            source,
+        })?;
+        let repo_root = git_root(&start).ok_or_else(|| ConfigError::NoGitRoot(start.clone()))?;
+        if let Some(existing) = config_path(&start, &repo_root) {
+            return Err(ConfigError::AlreadyExists(existing));
+        }
+        let project_name = repo_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "app".into());
+        Ok(Self {
+            path: repo_root.join(".shipslip.toml"),
+            repo_root,
+            project_name,
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The config text, checked with the same rules as [`LoadedConfig::load`].
+    pub fn render(&self, answers: &InitAnswers) -> Result<String, ConfigError> {
+        if !is_env_name(&answers.env) {
+            return Err(ConfigError::Invalid(format!(
+                "environment name `{}` may only use letters, digits, `-` and `_`",
+                answers.env
+            )));
+        }
+        let quote = |value: &str| toml::Value::String(value.into()).to_string();
+        let mut text = format!(
+            "# Shipslip deploy config. Review every value, then run `slip trust {env}`.\n\n\
+             [project]\nname = {name}\nstack = \"laravel\"\n\n\
+             [env.{env}]\n\
+             # Host alias from your ~/.ssh/config.\nssh = {ssh}\n\
+             # Absolute path of the app's Git checkout on the server.\npath = {path}\n\
+             branch = {branch}\n\
+             # Production deploys ask you to type the environment name to confirm.\n\
+             production = {production}\n\
+             # Runs `php artisan down` before the steps and `php artisan up` once they all succeed.\n\
+             maintenance = {maintenance}\n",
+            env = answers.env,
+            name = quote(&self.project_name),
+            ssh = quote(&answers.ssh_alias),
+            path = quote(&answers.path),
+            branch = quote(&answers.branch),
+            production = answers.production,
+            maintenance = answers.maintenance,
+        );
+        match &answers.smoke_url {
+            Some(url) => text.push_str(&format!(
+                "# Requested from your computer after the steps; 2xx passes.\nsmoke_url = {}\n",
+                quote(url)
+            )),
+            None => text.push_str("# smoke_url = \"https://example.com/health\"\n"),
+        }
+        text.push_str(
+            "\n[recipe.deploy]\n\
+             # Run in order on the server. Remove any step that is not safe for this app.\n\
+             steps = [\n",
+        );
+        for step in DEFAULT_STEPS {
+            if step.contains("migrate") {
+                text.push_str("  # Runs database migrations on every deploy.\n");
+            }
+            text.push_str(&format!("  {},\n", quote(step)));
+        }
+        text.push_str("]\n");
+        LoadedConfig::parse(&text, self.path.clone(), self.repo_root.clone())?;
+        Ok(text)
+    }
+
+    /// Writes the config. Never replaces an existing file.
+    pub fn write(&self, answers: &InitAnswers) -> Result<(), ConfigError> {
+        let text = self.render(answers)?;
+        let io_error = |source| ConfigError::Io {
+            path: self.path.clone(),
+            source,
+        };
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+            .map_err(|error| match error.kind() {
+                io::ErrorKind::AlreadyExists => ConfigError::AlreadyExists(self.path.clone()),
+                _ => io_error(error),
+            })?;
+        file.write_all(text.as_bytes()).map_err(|error| {
+            let _ = fs::remove_file(&self.path);
+            io_error(error)
+        })
+    }
 }
 
 /// Syntax added in bash 4 that bash 3.2, the stock macOS bash, rejects.
@@ -592,6 +740,167 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn answers() -> InitAnswers {
+        InitAnswers {
+            env: "staging".into(),
+            ssh_alias: "app-staging".into(),
+            path: "/var/www/app".into(),
+            branch: "main".into(),
+            production: false,
+            maintenance: true,
+            smoke_url: Some("https://staging.example.com/health".into()),
+        }
+    }
+
+    #[test]
+    fn init_writes_a_config_that_loads_with_an_explicit_recipe() {
+        let fixture = Fixture::new();
+        let plan = InitPlan::new(&fixture.root).unwrap();
+        plan.write(&answers()).unwrap();
+
+        let text = fs::read_to_string(fixture.root.join(".shipslip.toml")).unwrap();
+        assert!(text.contains(
+            "# Runs database migrations on every deploy.\n  \"php artisan migrate --force\""
+        ));
+        let config = fixture.load().unwrap();
+        assert!(!config.uses_default_recipe());
+        assert_eq!(
+            config.project_name(),
+            fixture.root.file_name().unwrap().to_str().unwrap()
+        );
+        let target = config.target("staging").unwrap();
+        assert_eq!(target.ssh_alias, "app-staging");
+        assert_eq!(target.path, "/var/www/app");
+        assert_eq!(target.branch, "main");
+        assert!(!target.production);
+        assert!(target.maintenance);
+        assert_eq!(
+            target.smoke_url.as_deref(),
+            Some("https://staging.example.com/health")
+        );
+        assert_eq!(target.steps, DEFAULT_STEPS);
+    }
+
+    #[test]
+    fn init_keeps_production_and_an_unset_smoke_url() {
+        let fixture = Fixture::new();
+        let answers = InitAnswers {
+            env: "production".into(),
+            production: true,
+            maintenance: false,
+            smoke_url: None,
+            ..answers()
+        };
+        InitPlan::new(&fixture.root)
+            .unwrap()
+            .write(&answers)
+            .unwrap();
+        let target = fixture.load().unwrap().target("production").unwrap();
+        assert!(target.production);
+        assert!(!target.maintenance);
+        assert_eq!(target.smoke_url, None);
+    }
+
+    #[test]
+    fn init_quotes_values_that_need_escaping() {
+        let fixture = Fixture::new();
+        let answers = InitAnswers {
+            path: "/srv/it's \"here\"\\app".into(),
+            ..answers()
+        };
+        InitPlan::new(&fixture.root)
+            .unwrap()
+            .write(&answers)
+            .unwrap();
+        let target = fixture.load().unwrap().target("staging").unwrap();
+        assert_eq!(target.path, answers.path);
+    }
+
+    #[test]
+    fn init_refuses_when_a_config_already_exists() {
+        let fixture = Fixture::new();
+        let sub = fixture.root.join("app/Http");
+        fs::create_dir_all(&sub).unwrap();
+        fixture.write_config("", "staging-host", "echo ok");
+        for start in [&fixture.root, &sub] {
+            assert!(matches!(
+                InitPlan::new(start),
+                Err(ConfigError::AlreadyExists(path)) if path.ends_with(".shipslip.toml")
+            ));
+        }
+
+        // Created between the check and the write.
+        let fresh = Fixture::new();
+        let plan = InitPlan::new(&fresh.root).unwrap();
+        fresh.write_config("", "staging-host", "echo ok");
+        assert!(matches!(
+            plan.write(&answers()),
+            Err(ConfigError::AlreadyExists(_))
+        ));
+        assert!(fresh.load().is_ok());
+    }
+
+    #[test]
+    fn init_writes_at_the_git_root_and_rejects_invalid_answers() {
+        let fixture = Fixture::new();
+        let sub = fixture.root.join("app");
+        fs::create_dir_all(&sub).unwrap();
+        let plan = InitPlan::new(&sub).unwrap();
+        assert_eq!(
+            plan.path(),
+            fs::canonicalize(&fixture.root)
+                .unwrap()
+                .join(".shipslip.toml")
+        );
+        for bad in [
+            InitAnswers {
+                env: "stag ing".into(),
+                ..answers()
+            },
+            InitAnswers {
+                ssh_alias: "-oProxyCommand=x".into(),
+                ..answers()
+            },
+            InitAnswers {
+                path: "var/www".into(),
+                ..answers()
+            },
+            InitAnswers {
+                branch: "-main".into(),
+                ..answers()
+            },
+            InitAnswers {
+                smoke_url: Some("ftp://example.com".into()),
+                ..answers()
+            },
+        ] {
+            assert!(
+                matches!(plan.render(&bad), Err(ConfigError::Invalid(_))),
+                "{bad:?}"
+            );
+            assert!(plan.write(&bad).is_err());
+        }
+        assert!(!plan.path().exists());
+    }
+
+    #[test]
+    fn answer_checks_match_the_config_rules() {
+        assert!(is_ssh_alias("app-staging.example_1"));
+        assert!(!is_ssh_alias(""));
+        assert!(!is_ssh_alias("-oProxyCommand=x"));
+        assert!(!is_ssh_alias("user@host"));
+        assert!(is_smoke_url("http://16.171.70.231/"));
+        assert!(is_smoke_url("https://example.com/health?x=1"));
+        assert!(!is_smoke_url("https://"));
+        assert!(!is_smoke_url("example.com"));
+        assert!(!is_smoke_url("https://example.com/a b"));
+        assert!(is_branch_name("release/1.2"));
+        assert!(!is_branch_name("-main"));
+        assert!(is_env_name("staging_2-eu"));
+        assert!(!is_env_name("env.staging"));
+        assert!(!is_env_name(""));
     }
 
     #[test]
