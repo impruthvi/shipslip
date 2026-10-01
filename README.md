@@ -144,5 +144,7 @@ Shipslip's application support directory. They are not committed to Git.
 
 Shipslip rejects unknown config keys and checks the syntax of each generated
 step with local `bash -n` when it loads the config. The server repeats the
-syntax check during preflight, before taking the deploy lock. A declined
+syntax check during preflight, before taking the deploy lock. If local bash is
+older than 4, as on stock macOS, steps using bash 4 syntax such as `|&` are
+left to the server's check. A declined
 deploy confirmation releases its lock without running recipe steps.

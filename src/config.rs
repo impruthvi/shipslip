@@ -298,6 +298,19 @@ fn validate_environment(name: &str, env: &Environment) -> Result<(), ConfigError
     Ok(())
 }
 
+/// Syntax added in bash 4 that bash 3.2, the stock macOS bash, rejects.
+const BASH4_SYNTAX: [&str; 3] = ["|&", ";&", "&>>"];
+
+fn local_bash_major() -> Option<u32> {
+    let output = Command::new("bash")
+        .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
 fn check_step_syntax(env: &str, step: usize, path: &str, body: &str) -> Result<(), ConfigError> {
     let mut child = Command::new("bash")
         .arg("-n")
@@ -326,7 +339,12 @@ fn check_step_syntax(env: &str, step: usize, path: &str, body: &str) -> Result<(
             step,
             message: error.to_string(),
         })?;
-    if output.status.success() {
+    if output.status.success()
+        || (BASH4_SYNTAX.iter().any(|syntax| body.contains(syntax))
+            && local_bash_major().is_some_and(|major| major < 4))
+    {
+        // Older local bash cannot parse this step; the server's `bash -n`
+        // in preflight decides before anything changes.
         Ok(())
     } else {
         Err(ConfigError::InvalidStep {
@@ -572,6 +590,10 @@ mod tests {
         fixture.write_config("", "staging-host", "echo ok");
         let config = fixture.load().unwrap();
         assert_eq!(config.target("staging").unwrap().steps, ["echo ok"]);
+
+        // Valid on the server's bash even where local bash is 3.2.
+        fixture.write_config("", "staging-host", "echo ok |& cat");
+        assert!(fixture.load().is_ok());
     }
 
     #[test]
