@@ -83,6 +83,12 @@ pub enum AbortReason {
     },
     DirtyTree(Vec<String>),
     OperationInProgress(String),
+    /// The checkout left the configured branch. `actual` is empty when HEAD
+    /// is detached.
+    WrongBranch {
+        expected: String,
+        actual: String,
+    },
     /// `php artisan down` exited with this code.
     MaintenanceDownFailed(i32),
     ConnectFailed(String),
@@ -99,6 +105,12 @@ impl fmt::Display for AbortReason {
             }
             Self::DirtyTree(files) => write!(f, "uncommitted changes: {}", files.join(", ")),
             Self::OperationInProgress(op) => write!(f, "git operation in progress ({op})"),
+            Self::WrongBranch { expected, actual } if actual.is_empty() => {
+                write!(f, "HEAD is detached, expected branch `{expected}`")
+            }
+            Self::WrongBranch { expected, actual } => {
+                write!(f, "on branch `{actual}`, expected `{expected}`")
+            }
             Self::MaintenanceDownFailed(code) => {
                 write!(f, "`php artisan down` exited with {code}")
             }
@@ -138,7 +150,8 @@ echo "@branch $(git symbolic-ref --quiet --short HEAD)"
 for op in MERGE_HEAD rebase-merge rebase-apply CHERRY_PICK_HEAD REVERT_HEAD; do
   [ -e "$g/$op" ] && echo "@operation $op"
 done
-git status --porcelain | sed 's/^/@dirty /'
+s=$(git status --porcelain) || exit $?
+[ -z "$s" ] || printf '%s\n' "$s" | sed 's/^/@dirty /'
 "#,
         path = shell_quote(path),
     )
@@ -207,19 +220,25 @@ pub(crate) fn parse_preflight(lines: &[String]) -> Preflight {
         ..Preflight::default()
     };
     let mut messages = Vec::new();
+    let mut collecting = false;
     for (key, value) in facts(lines) {
         match key {
-            "fetch_failed" => p.fetch_failed = Some(String::new()),
+            "fetch_failed" => {
+                p.fetch_failed = Some(String::new());
+                collecting = true;
+            }
             "target" => p.target = value.to_string(),
             "fetch_head" => p.fetch_head = value.to_string(),
             "ancestor" => p.ancestor = true,
             "commit" => p.commits.push(value.to_string()),
-            "invalid" if p.invalid_step.is_none() => {
-                p.invalid_step = value.parse().ok().map(|n| (n, String::new()))
+            // Only the first invalid step is reported, with its own messages.
+            "invalid" => {
+                collecting = p.invalid_step.is_none();
+                if collecting {
+                    p.invalid_step = value.parse().ok().map(|n| (n, String::new()));
+                }
             }
-            "message" if p.fetch_failed.is_some() || p.invalid_step.is_some() => {
-                messages.push(value)
-            }
+            "message" if collecting => messages.push(value),
             _ => {}
         }
     }
@@ -278,7 +297,7 @@ pub(crate) fn block_reason(
 }
 
 /// Why the checkout is no longer safe to change, if it isn't.
-pub(crate) fn recheck(state: &State, from_sha: &str) -> Option<AbortReason> {
+pub(crate) fn recheck(state: &State, from_sha: &str, branch: &str) -> Option<AbortReason> {
     if let Some(op) = &state.operation {
         return Some(AbortReason::OperationInProgress(op.clone()));
     }
@@ -286,6 +305,12 @@ pub(crate) fn recheck(state: &State, from_sha: &str) -> Option<AbortReason> {
         return Some(AbortReason::HeadMoved {
             expected: from_sha.into(),
             actual: state.head.clone(),
+        });
+    }
+    if state.branch != branch {
+        return Some(AbortReason::WrongBranch {
+            expected: branch.into(),
+            actual: state.branch.clone(),
         });
     }
     if !state.dirty.is_empty() {
@@ -434,15 +459,79 @@ mod tests {
             operation: None,
             dirty: dirty.iter().map(|s| s.to_string()).collect(),
         };
-        assert_eq!(recheck(&state("a", &[]), "a"), None);
+        assert_eq!(recheck(&state("a", &[]), "a", "main"), None);
         assert!(matches!(
-            recheck(&state("b", &[]), "a"),
+            recheck(&state("b", &[]), "a", "main"),
             Some(AbortReason::HeadMoved { .. })
         ));
+        assert_eq!(
+            recheck(&state("a", &[]), "a", "release"),
+            Some(AbortReason::WrongBranch {
+                expected: "release".into(),
+                actual: "main".into(),
+            })
+        );
         assert!(matches!(
-            recheck(&state("a", &[" M f"]), "a"),
+            recheck(&state("a", &[" M f"]), "a", "main"),
             Some(AbortReason::DirtyTree(_))
         ));
+    }
+
+    #[test]
+    fn only_the_first_invalid_step_and_its_messages_are_kept() {
+        let p = parse_preflight(&lines(&[
+            "@head a",
+            "@invalid 1",
+            "@message e1",
+            "@invalid 2",
+            "@message e2",
+        ]));
+        assert_eq!(p.invalid_step, Some((1, "e1".into())));
+    }
+
+    /// Runs the state script against a local repo.
+    fn local_state(setup: &str) -> (Option<i32>, Vec<String>) {
+        let dir = std::env::temp_dir().join(format!(
+            "shipslip-state-{}-{}",
+            std::process::id(),
+            setup.len()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let status = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!(
+                "git init -q && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m init && {setup}"
+            ))
+            .current_dir(&dir)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(state_script(dir.to_str().unwrap()))
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        let lines = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(String::from)
+            .collect();
+        (output.status.code(), lines)
+    }
+
+    #[test]
+    fn state_script_reports_dirty_files_and_fails_when_git_status_fails() {
+        let (code, lines) = local_state("echo x > new");
+        assert_eq!(code, Some(0));
+        assert_eq!(parse_state(&lines).dirty, ["?? new"]);
+
+        let (code, lines) = local_state("true");
+        assert_eq!(code, Some(0));
+        assert!(parse_state(&lines).dirty.is_empty());
+
+        let (code, _) = local_state("echo garbage > .git/index");
+        assert_ne!(code, Some(0));
     }
 
     #[test]

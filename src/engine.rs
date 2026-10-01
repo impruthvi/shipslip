@@ -1159,7 +1159,9 @@ async fn run_steps_locked<T: Transport>(
         if index == first_index && !active_step {
             if !active_down {
                 let changed = match read_state(transport, path).await {
-                    Ok(state) => preflight::recheck(&state, &preview.from_sha),
+                    Ok(state) => {
+                        preflight::recheck(&state, &preview.from_sha, &preview.target.branch)
+                    }
                     Err(reason) => Some(reason),
                 };
                 if let Some(reason) = changed {
@@ -3409,10 +3411,18 @@ mod tests {
     #[tokio::test]
     async fn changes_after_the_preview_abort_before_step_0() {
         type Case = (fn(&mut ServerSim), fn(&AbortReason) -> bool);
-        let cases: [Case; 3] = [
+        let cases: [Case; 5] = [
             (
                 |s| s.head = "3".repeat(40),
                 |r| matches!(r, AbortReason::HeadMoved { .. }),
+            ),
+            (
+                |s| s.branch = "hotfix".into(),
+                |r| matches!(r, AbortReason::WrongBranch { actual, .. } if actual == "hotfix"),
+            ),
+            (
+                |s| s.branch = String::new(),
+                |r| matches!(r, AbortReason::WrongBranch { actual, .. } if actual.is_empty()),
             ),
             (
                 |s| s.dirty = vec![" M file".into()],
