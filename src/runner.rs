@@ -51,6 +51,14 @@ fn run_dir(run_id: &str) -> String {
     format!("\"$HOME\"/.shipslip/runs/{}", shell_quote(run_id))
 }
 
+/// Defines `ident PID`: the boot id and the process start time. A process ID
+/// reused after a reboot, or by a later process, gives a different value.
+const IDENT_FN: &str = r#"ident() { s=$(cat "/proc/$1/stat" 2>/dev/null) || return 0; s=${s##*) }; set -- $s; echo "$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) ${20}"; }"#;
+
+/// True unless `$d/ident` was recorded and `$d/pid` is now another process.
+/// Runs launched before `ident` was recorded fall back to `kill -0`.
+const SAME_PROCESS_FN: &str = r#"same_process() { [ ! -s "$d/ident" ] || [ "$(ident "$(cat "$d/pid")")" = "$(cat "$d/ident")" ]; }"#;
+
 pub(crate) fn launch_script(run_id: &str, key: &str, script: &str) -> String {
     format!(
         r#"set -e
@@ -62,38 +70,57 @@ mkdir {runs}/{key}
 d={runs}/{key}
 mv "$d.sh" "$d/script.sh"
 setsid nohup bash -c 'echo $$ > "$1/pid.tmp" && mv "$1/pid.tmp" "$1/pid"; bash -l -s < "$1/script.sh"; echo $? > "$1/exit.tmp"; mv "$1/exit.tmp" "$1/exit"' _ "$d" > "$d/log" 2>&1 < /dev/null &
-for _ in $(seq 100); do [ -s "$d/pid" ] && exit 0; sleep 0.05; done
+{ident}
+for _ in $(seq 100); do
+  if [ -s "$d/pid" ]; then
+    ident "$(cat "$d/pid")" > "$d/ident.tmp" && mv "$d/ident.tmp" "$d/ident"
+    exit 0
+  fi
+  sleep 0.05
+done
 exit 1
 "#,
         runs = run_dir(run_id),
         script = shell_quote(script),
+        ident = IDENT_FN,
     )
 }
 
 /// Streams the step's log from line `skip + 1` until the step's process ends.
+/// If its process ID now belongs to another process, prints the rest and stops.
 pub(crate) fn observe_script(run_id: &str, key: &str, skip: usize) -> String {
     format!(
-        "d={runs}/{key}\n\
-         echo {LOG_START}\n\
-         exec tail -n +{from} -s 0.2 --pid=\"$(cat \"$d/pid\")\" -f \"$d/log\" 2>/dev/null\n",
+        r#"d={runs}/{key}
+echo {LOG_START}
+{ident}
+{same_process}
+same_process || exec tail -n +{from} "$d/log" 2>/dev/null
+exec tail -n +{from} -s 0.2 --pid="$(cat "$d/pid")" -f "$d/log" 2>/dev/null
+"#,
         runs = run_dir(run_id),
         from = skip + 1,
+        ident = IDENT_FN,
+        same_process = SAME_PROCESS_FN,
     )
 }
 
 pub(crate) fn probe_script(run_id: &str, key: &str) -> String {
     format!(
         r#"d={runs}/{key}
+{ident}
+{same_process}
 state() {{
   if [ -e "$d/exit" ]; then echo "exited $(cat "$d/exit")"
   elif [ ! -d "$d" ]; then echo not-started
-  elif [ -s "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null; then echo running
+  elif [ -s "$d/pid" ] && kill -0 "$(cat "$d/pid")" 2>/dev/null && same_process; then echo running
   else return 1
   fi
 }}
 state || {{ sleep 1; state || echo gone; }}
 "#,
         runs = run_dir(run_id),
+        ident = IDENT_FN,
+        same_process = SAME_PROCESS_FN,
     )
 }
 
@@ -338,5 +365,56 @@ mod tests {
         );
         assert_eq!(parse_probe(&lines(&["exited x"])), None);
         assert_eq!(parse_probe(&[]), None);
+    }
+
+    /// Runs the real scripts with bash; they rely on Linux `/proc`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reused_process_id_is_not_the_running_step() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+
+        let home = std::env::temp_dir().join(format!("shipslip-runner-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let run = |script: &str| {
+            let output = Command::new("bash")
+                .arg("-c")
+                .arg(script)
+                .env("HOME", &home)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+        let probe = || parse_probe(&run(&probe_script("r1", "step-1")));
+        let dir = home.join(".shipslip/runs/r1/step-1");
+
+        run(&launch_script("r1", "step-1", "echo hi; sleep 30"));
+        let pid = std::fs::read_to_string(dir.join("pid")).unwrap();
+        assert!(!std::fs::read_to_string(dir.join("ident"))
+            .unwrap()
+            .trim()
+            .is_empty());
+        assert_eq!(probe(), Some(Probe::Running));
+
+        std::fs::write(dir.join("ident"), "another-boot 1\n").unwrap();
+        assert_eq!(probe(), Some(Probe::Gone));
+        let started = Instant::now();
+        let observed = run(&observe_script("r1", "step-1", 0));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(observed.last().map(String::as_str), Some("hi"));
+
+        // Runs launched before the identity was recorded.
+        std::fs::remove_file(dir.join("ident")).unwrap();
+        assert_eq!(probe(), Some(Probe::Running));
+
+        let _ = Command::new("kill")
+            .arg("--")
+            .arg(format!("-{}", pid.trim()))
+            .status();
+        let _ = std::fs::remove_dir_all(&home);
     }
 }
