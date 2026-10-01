@@ -1,12 +1,13 @@
 [package]
 name = "shipslip"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
-description = "Deploy with a receipt. Early development."
+description = "Deploy Laravel apps over SSH with a preview, a deploy lock, and a receipt."
 license = "MIT"
 repository = "https://github.com/impruthvi/shipslip"
 readme = "README.md"
+include = ["/src", "/docs", "/Cargo.toml", "/Cargo.lock", "/README.md", "/CHANGELOG.md", "/LICENSE"]
 
 [dependencies]
 base64 = "0.22"
