@@ -1,6 +1,7 @@
 use crate::observation::{LogPhase, SmokeResult, WatchResult};
 use crate::preflight::AbortReason;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Result of a single step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +37,17 @@ pub enum StopReason {
     ConnectFailed(String),
     /// The local receipt could not be saved before another step.
     JournalFailed(String),
+}
+
+impl fmt::Display for StopReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Requested => write!(f, "a stop was requested"),
+            Self::LockLost => write!(f, "the deploy lock was taken over"),
+            Self::ConnectFailed(reason) => write!(f, "could not reach the server: {reason}"),
+            Self::JournalFailed(reason) => write!(f, "could not save the receipt: {reason}"),
+        }
+    }
 }
 
 /// Final result of a deploy run. Step indexes: 0 is the git fast-forward,

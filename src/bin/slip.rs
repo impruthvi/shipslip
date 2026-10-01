@@ -12,7 +12,7 @@ use shipslip::transport::SshTransport;
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute_recorded, lock_status, prepare_with_plan,
     BreakLockError, BringUpError, Confirmation, DeployEvent, DeployOutcome, DeployTarget,
-    MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus, WatchStatus,
+    MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus, POST_DEPLOY_WATCH,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -156,9 +156,6 @@ async fn follow_events(
                     result.status,
                     result.new_errors.len()
                 );
-                if result.status == WatchStatus::NoLogSeen {
-                    eprintln!("No log file appeared; check LOG_CHANNEL.");
-                }
                 for warning in result.warnings {
                     eprintln!("  {warning}");
                 }
@@ -335,10 +332,7 @@ fn show_preview(preview: &shipslip::Preview) {
             println!("  {commit}");
         }
     }
-    let first_step = match preview.run_plan() {
-        RunPlan::Deploy | RunPlan::Rerun => 1,
-        RunPlan::FromStep(step) => step,
-    };
+    let first_step = preview.run_plan().first_recipe_step();
     println!("Recipe steps:");
     for (index, step) in preview.target().steps.iter().enumerate() {
         if index + 1 >= first_step {
@@ -349,19 +343,15 @@ fn show_preview(preview: &shipslip::Preview) {
         println!("Maintenance: enabled");
     }
     if preview.target().watch_log {
-        let default = if preview.target().log_daily {
-            "storage/logs/laravel"
-        } else {
-            "storage/logs/laravel.log"
-        };
         println!(
-            "Log watch:   {}{} (120 s after steps)",
-            preview.target().log.as_deref().unwrap_or(default),
+            "Log watch:   {}{} ({} s after steps)",
+            preview.target().log_path(),
             if preview.target().log_daily {
                 "-*.log"
             } else {
                 ""
-            }
+            },
+            POST_DEPLOY_WATCH.as_secs()
         );
     }
     if let Some(url) = &preview.target().smoke_url {
@@ -764,11 +754,11 @@ fn show_outcome(outcome: &DeployOutcome) {
             }
         ),
         DeployOutcome::StoppedAfterStep { step, reason } => {
-            eprintln!("Deploy stopped after step {step}: {reason:?}.");
+            eprintln!("Deploy stopped after step {step}: {reason}.");
         }
         DeployOutcome::CancelledBeforeChanges => eprintln!("Deploy was cancelled before changes."),
         DeployOutcome::AbortedBeforeChanges(reason) => {
-            eprintln!("Deploy was aborted before changes: {reason:?}.");
+            eprintln!("Deploy was aborted before changes: {reason}.");
         }
         DeployOutcome::Unknown { step, reason } => {
             eprintln!("Outcome of step {step} is unknown: {reason}");

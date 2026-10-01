@@ -1,9 +1,8 @@
 //! Durable local record of a deploy, written before every remote mutation.
 
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,7 +17,6 @@ use crate::{
 const VERSION: u32 = 1;
 const OUTPUT_LINES: usize = 200;
 const OUTPUT_LINE_BYTES: usize = 16 * 1024;
-static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReceiptError {
@@ -129,33 +127,21 @@ impl Receipt {
     fn from_preview(project: &str, repo_root: &Path, preview: &Preview) -> Self {
         let target = preview.target().clone();
         let run_plan = preview.run_plan();
-        let mut steps = Vec::new();
-        if run_plan == RunPlan::Deploy {
-            steps.push(ReceiptStep {
-                index: 0,
-                command: format!("git merge --ff-only {}", preview.target_sha()),
-                status: ReceiptStepStatus::Pending,
-                exit_code: None,
-                output: Vec::new(),
-            });
-        }
-        let first = match run_plan {
-            RunPlan::Deploy | RunPlan::Rerun => 1,
-            RunPlan::FromStep(step) => step,
-        };
-        for (index, command) in target.steps.iter().enumerate() {
-            steps.push(ReceiptStep {
-                index: index + 1,
-                command: command.clone(),
-                status: if index + 1 < first {
+        let first = run_plan.first_recipe_step();
+        let steps = crate::engine::plan_steps(&target, run_plan, preview.target_sha())
+            .into_iter()
+            .map(|(index, command)| ReceiptStep {
+                index,
+                command,
+                status: if index > 0 && index < first {
                     ReceiptStepStatus::Skipped
                 } else {
                     ReceiptStepStatus::Pending
                 },
                 exit_code: None,
                 output: Vec::new(),
-            });
-        }
+            })
+            .collect();
         Self {
             version: VERSION,
             project: project.into(),
@@ -571,25 +557,7 @@ fn private_dir(path: &Path) -> Result<(), ReceiptError> {
 }
 
 fn write_atomic(path: &Path, receipt: &Receipt) -> Result<(), ReceiptError> {
-    let suffix = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let temp = path.with_extension(format!("tmp.{}.{}", std::process::id(), suffix));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(&temp)
-        .map_err(|source| io_error(&temp, source))?;
-    serde_json::to_writer_pretty(&mut file, receipt)?;
-    file.write_all(b"\n")
-        .map_err(|source| io_error(&temp, source))?;
-    file.sync_all().map_err(|source| io_error(&temp, source))?;
-    fs::rename(&temp, path).map_err(|source| io_error(path, source))?;
-    File::open(path.parent().expect("receipt path has parent"))
-        .and_then(|dir| dir.sync_all())
-        .map_err(|source| io_error(path.parent().unwrap(), source))?;
-    Ok(())
+    let mut bytes = serde_json::to_vec_pretty(receipt)?;
+    bytes.push(b'\n');
+    crate::private_file::write_atomic(path, &bytes).map_err(|source| io_error(path, source))
 }
