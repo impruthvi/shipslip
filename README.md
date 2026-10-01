@@ -1,5 +1,11 @@
 # Shipslip
 
+<p align="center">
+  <a href="https://crates.io/crates/shipslip"><img src="https://img.shields.io/crates/v/shipslip" alt="Crates.io version"></a>
+  <a href="https://github.com/impruthvi/shipslip/actions/workflows/ci.yml"><img src="https://github.com/impruthvi/shipslip/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status on main"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/crates/l/shipslip" alt="License"></a>
+</p>
+
 Shipslip runs a configured deploy recipe over SSH. It prepares and displays a
 preview before asking for confirmation. Production runs require typing the
 environment name.
