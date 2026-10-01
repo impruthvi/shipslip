@@ -511,6 +511,13 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
         print_help();
         return Ok(None);
     }
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-V" | "--version"))
+    {
+        println!("slip {}", env!("CARGO_PKG_VERSION"));
+        return Ok(None);
+    }
 
     let mut index = 0;
     let config = if args.get(index).map(String::as_str) == Some("--config") {
@@ -611,7 +618,8 @@ fn print_help() {
          \x20 slip [--config FILE] trust [ENV]\n\
          \x20 slip [--config FILE] attach ENV\n\
          \x20 slip [--config FILE] break-lock ENV\n\
-         \x20 slip [--config FILE] up ENV\n\n\
+         \x20 slip [--config FILE] up ENV\n\
+         \x20 slip --version\n\n\
          Commands:\n\
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\
          \x20 rerun ENV          Run all recipe steps on the already-deployed commit\n\
@@ -1646,6 +1654,13 @@ mod tests {
         let parsed = parse_args_from(vec!["init".into()]).unwrap().unwrap();
         assert!(matches!(parsed.action, Action::Init));
         assert!(parse_args_from(vec!["init".into(), "staging".into()]).is_err());
+    }
+
+    #[test]
+    fn version_flag_exits_without_a_command() {
+        for flag in ["--version", "-V"] {
+            assert!(parse_args_from(vec![flag.into()]).unwrap().is_none());
+        }
     }
 
     #[test]

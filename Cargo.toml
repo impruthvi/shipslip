@@ -1,6 +1,6 @@
 [package]
 name = "shipslip"
-version = "0.1.0"
+version = "0.1.1-rc.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Deploy Laravel apps over SSH with a preview, a deploy lock, and a receipt."
@@ -33,3 +33,7 @@ integration = []
 name = "integration"
 path = "tests/integration/main.rs"
 required-features = ["integration"]
+
+[profile.dist]
+inherits = "release"
+lto = "thin"

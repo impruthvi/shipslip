@@ -4,6 +4,14 @@ All notable changes to Shipslip are listed here. Shipslip follows
 [Semantic Versioning](https://semver.org/); before 1.0, a minor release may
 change the library API.
 
+## [0.1.1] - Unreleased
+
+### Added
+
+- Prebuilt binaries for macOS and Linux and a one-line installer; Rust is no
+  longer required to install.
+- `slip --version` (or `-V`) prints the installed version.
+
 ## [0.1.0] - 2026-10-01
 
 First usable release. Version 0.0.1 only reserved the crate name.
