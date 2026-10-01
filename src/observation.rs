@@ -1,8 +1,8 @@
 //! Bounded Laravel log observation and a local HTTP smoke check.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -20,14 +20,12 @@ use crate::DeployTarget;
 const BASELINE_BYTES: usize = 2 * 1024 * 1024;
 const POLL_BYTES: usize = 256 * 1024;
 const ENTRY_BYTES: usize = 256 * 1024;
-const VIEW_BYTES: usize = 10 * 1024 * 1024;
 const MAX_SIGNATURES: usize = 10_000;
 const MAX_GROUPS: usize = 500;
 const MAX_VARIANTS: usize = 50;
 const POLL_EVERY: Duration = Duration::from_millis(500);
 const MAX_HISTORY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_HISTORY: usize = 5_000;
-static HISTORY_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LogPhase {
@@ -73,6 +71,7 @@ pub struct WatchResult {
     pub history_signatures: usize,
     pub observed_lines: u64,
     pub parsed_lines: u64,
+    /// Always 0; kept so receipts keep their shape.
     pub dropped_view_lines: u64,
     pub truncated_entries: u64,
     pub new_errors: Vec<ErrorGroup>,
@@ -158,7 +157,7 @@ impl LogObserver {
                 state.saw_file = true;
                 state.result.log_path = Some(path.clone());
                 state.bytes(&bytes, LogPhase::During, true, &events);
-                state.flush(LogPhase::During, true, &events);
+                state.flush(true, &events);
                 state.partial_line.clear();
                 state.cursor = Cursor {
                     path,
@@ -216,14 +215,9 @@ struct LogSpec {
 
 impl LogSpec {
     fn from_target(target: &DeployTarget) -> Self {
-        let default = if target.log_daily {
-            "storage/logs/laravel"
-        } else {
-            "storage/logs/laravel.log"
-        };
         Self {
             app_path: target.path.clone(),
-            path: target.log.as_deref().unwrap_or(default).into(),
+            path: target.log_path().into(),
             daily: target.log_daily,
         }
     }
@@ -364,8 +358,6 @@ struct LogState {
     seen: HashSet<String>,
     group_index: HashMap<(String, Option<String>), usize>,
     overflow_group_keys: HashSet<(String, Option<String>)>,
-    view: VecDeque<String>,
-    view_bytes: usize,
     partial_line: Vec<u8>,
     dropping_line: bool,
     current_entry: Option<String>,
@@ -401,8 +393,6 @@ impl LogState {
             seen: HashSet::new(),
             group_index: HashMap::new(),
             overflow_group_keys: HashSet::new(),
-            view: VecDeque::new(),
-            view_bytes: 0,
             partial_line: Vec::new(),
             dropping_line: false,
             current_entry: None,
@@ -452,17 +442,9 @@ impl LogState {
     ) {
         if !baseline {
             self.result.observed_lines += 1;
-            self.view_bytes += line.len();
-            self.view.push_back(line.clone());
-            while self.view_bytes > VIEW_BYTES {
-                if let Some(old) = self.view.pop_front() {
-                    self.view_bytes -= old.len();
-                    self.result.dropped_view_lines += 1;
-                }
-            }
         }
         if let Some(header) = parse_header(&line) {
-            self.flush(phase, baseline, events);
+            self.flush(baseline, events);
             self.current_entry = Some(header.message.clone());
             self.current_header = Some(header);
             self.current_phase = phase;
@@ -484,12 +466,7 @@ impl LogState {
         }
     }
 
-    fn flush(
-        &mut self,
-        _phase: LogPhase,
-        baseline: bool,
-        events: &mpsc::UnboundedSender<DeployEvent>,
-    ) {
+    fn flush(&mut self, baseline: bool, events: &mpsc::UnboundedSender<DeployEvent>) {
         let (Some(header), Some(entry)) = (self.current_header.take(), self.current_entry.take())
         else {
             return;
@@ -571,7 +548,7 @@ impl LogState {
         if requested == WatchStatus::NotRun {
             return (WatchResult::not_run(), Vec::new());
         }
-        self.flush(LogPhase::After, false, events);
+        self.flush(false, events);
         if self.behind {
             self.partial = true;
             self.warn("Log grew faster than it could be read; later entries were not checked");
@@ -785,7 +762,7 @@ async fn watch_loop<T: Transport>(
                     state.partial = true;
                     state.warn("Log rotated or truncated during watch");
                     state.partial_line.clear();
-                    state.flush(phase, false, &events);
+                    state.flush(false, &events);
                 }
                 state.saw_file = true;
                 state.unavailable = false;
@@ -802,14 +779,14 @@ async fn watch_loop<T: Transport>(
                 };
                 state.bytes(&bytes, phase, recovering_baseline, &events);
                 if recovering_baseline {
-                    state.flush(phase, true, &events);
+                    state.flush(true, &events);
                     state.partial_line.clear();
                     state.warn("Log baseline recovered; entries during the gap may be missing");
                 } else if bytes.is_empty()
                     && state.current_entry.is_some()
                     && state.last_entry_update.elapsed() >= Duration::from_secs(1)
                 {
-                    state.flush(phase, false, &events);
+                    state.flush(false, &events);
                 }
             }
             // The log directory was readable, so a file created later is new.
@@ -885,31 +862,7 @@ fn write_history(path: &Path, signatures: &[String]) -> Result<(), std::io::Erro
             }
         }
     }
-    let bytes = serde_json::to_vec(signatures)?;
-    let temp = path.with_extension(format!(
-        "tmp.{}.{}",
-        std::process::id(),
-        HISTORY_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(&temp)?;
-    if let Err(error) = std::io::Write::write_all(&mut file, &bytes)
-        .and_then(|()| file.sync_all())
-        .and_then(|()| std::fs::rename(&temp, path))
-    {
-        let _ = std::fs::remove_file(&temp);
-        return Err(error);
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
+    crate::private_file::write_atomic(path, &serde_json::to_vec(signatures)?)
 }
 
 pub async fn smoke_check(url: Option<&str>) -> SmokeResult {

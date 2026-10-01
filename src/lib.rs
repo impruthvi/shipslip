@@ -16,6 +16,7 @@ mod event;
 mod lock;
 pub mod observation;
 mod preflight;
+mod private_file;
 pub mod receipt;
 mod runner;
 mod script;
@@ -25,6 +26,7 @@ pub use engine::{
     attach, break_lock, bring_app_up, cancel, execute, execute_recorded, lock_status, prepare,
     prepare_with_plan, AttachError, BreakLockError, BringUpError, ConfirmError, Confirmation,
     DeployTarget, ExecuteError, ExecutionHandle, LockStatusError, PrepareError, Preview, RunPlan,
+    POST_DEPLOY_WATCH,
 };
 pub use event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason};
 pub use lock::{LockInfo, LockOwner, STALE_AFTER};

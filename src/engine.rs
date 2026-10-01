@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -44,6 +44,18 @@ pub struct DeployTarget {
     pub smoke_url: Option<String>,
 }
 
+impl DeployTarget {
+    /// The watched log: `log`, or Laravel's default. With `log_daily` it is
+    /// the directory and prefix of the daily files.
+    pub fn log_path(&self) -> &str {
+        self.log.as_deref().unwrap_or(if self.log_daily {
+            "storage/logs/laravel"
+        } else {
+            "storage/logs/laravel.log"
+        })
+    }
+}
+
 /// Which part of the configured recipe to run after its commit is deployed.
 /// Recipe steps are numbered from 1; step 0 is the built-in Git fast-forward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,13 +72,33 @@ impl RunPlan {
         !matches!(self, Self::Deploy)
     }
 
-    fn first_recipe_step(self) -> usize {
+    /// The first recipe step this plan runs.
+    pub fn first_recipe_step(self) -> usize {
         match self {
             Self::Deploy | Self::Rerun => 1,
             Self::FromStep(step) => step,
         }
     }
 }
+
+/// Every step of a plan as `(index, command)`: the fast-forward for
+/// [`RunPlan::Deploy`], then all recipe steps, including those a
+/// [`RunPlan::FromStep`] skips.
+pub(crate) fn plan_steps(
+    target: &DeployTarget,
+    plan: RunPlan,
+    target_sha: &str,
+) -> Vec<(usize, String)> {
+    let fast_forward =
+        (plan == RunPlan::Deploy).then(|| (0, format!("git merge --ff-only {target_sha}")));
+    fast_forward
+        .into_iter()
+        .chain((1..).zip(target.steps.iter().cloned()))
+        .collect()
+}
+
+/// How long the log is watched after the last step.
+pub const POST_DEPLOY_WATCH: Duration = Duration::from_secs(120);
 
 #[derive(Debug, thiserror::Error)]
 pub enum PrepareError {
@@ -337,15 +369,9 @@ pub async fn bring_app_up<T: Transport>(
         }
         lines
     };
-    let heartbeat = async {
-        loop {
-            tokio::time::sleep(lock::HEARTBEAT_EVERY).await;
-            lock::heartbeat(transport, &target.path, &run_id).await;
-        }
-    };
     let (result, lines) = tokio::select! {
         result = async { tokio::join!(run, collect) } => result,
-        () = heartbeat => unreachable!("heartbeat never ends"),
+        () = heartbeat_forever(transport, &target.path, &run_id) => unreachable!("heartbeat never ends"),
     };
     match result {
         StepResult::Exited(0) => {
@@ -473,6 +499,16 @@ fn execute_inner<T: Transport>(
             .map_err(|error| ExecuteError::Receipt(error.to_string()))?;
     }
 
+    Ok(spawn_run(preview, transport, journal, None))
+}
+
+/// Starts [`run_steps`] in the background.
+fn spawn_run<T: Transport>(
+    preview: Preview,
+    transport: Arc<T>,
+    journal: Option<Arc<ReceiptJournal>>,
+    resume: Option<Receipt>,
+) -> (mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle) {
     let (events, rx) = mpsc::unbounded_channel();
     let (detach_tx, detach_rx) = watch::channel(false);
     let handle = ExecutionHandle {
@@ -480,20 +516,17 @@ fn execute_inner<T: Transport>(
         detach: detach_tx,
         watch_cancel: Arc::new(AtomicBool::new(false)),
     };
-    let stop = handle.stop.clone();
-    let watch_cancel = handle.watch_cancel.clone();
-
     tokio::spawn(run_steps(
         preview,
         transport,
         events,
-        stop,
+        handle.stop.clone(),
         detach_rx,
         journal,
-        None,
-        watch_cancel,
+        resume,
+        handle.watch_cancel.clone(),
     ));
-    Ok((rx, handle))
+    (rx, handle)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -544,26 +577,7 @@ pub fn attach<T: Transport>(
     journal
         .set_owner_pid(std::process::id())
         .map_err(|error| AttachError::Receipt(error.to_string()))?;
-    let (events, rx) = mpsc::unbounded_channel();
-    let (detach_tx, detach_rx) = watch::channel(false);
-    let handle = ExecutionHandle {
-        stop: Arc::new(AtomicBool::new(false)),
-        detach: detach_tx,
-        watch_cancel: Arc::new(AtomicBool::new(false)),
-    };
-    let stop = handle.stop.clone();
-    let watch_cancel = handle.watch_cancel.clone();
-    tokio::spawn(run_steps(
-        preview,
-        transport,
-        events,
-        stop,
-        detach_rx,
-        Some(journal),
-        Some(receipt),
-        watch_cancel,
-    ));
-    Ok((rx, handle))
+    Ok(spawn_run(preview, transport, Some(journal), Some(receipt)))
 }
 
 fn validate_receipt_plan(receipt: &Receipt) -> Result<(), String> {
@@ -575,30 +589,18 @@ fn validate_receipt_plan(receipt: &Receipt) -> Result<(), String> {
     if receipt.run_plan == RunPlan::Rerun && receipt.target.steps.is_empty() {
         return Err("saved rerun has no recipe steps".into());
     }
-    let expected_len =
-        receipt.target.steps.len() + usize::from(receipt.run_plan == RunPlan::Deploy);
-    if receipt.steps.len() != expected_len {
+    let expected = plan_steps(&receipt.target, receipt.run_plan, &receipt.target_sha);
+    if receipt.steps.len() != expected.len() {
         return Err("saved step list does not match the plan".into());
     }
-    for (position, step) in receipt.steps.iter().enumerate() {
-        let expected_index = if receipt.run_plan == RunPlan::Deploy {
-            position
-        } else {
-            position + 1
-        };
-        let expected_command = if expected_index == 0 {
-            format!("git merge --ff-only {}", receipt.target_sha)
-        } else {
-            receipt.target.steps[expected_index - 1].clone()
-        };
-        if step.index != expected_index || step.command != expected_command {
+    for (step, (index, command)) in receipt.steps.iter().zip(expected) {
+        if step.index != index || step.command != command {
             return Err("saved step list does not match the plan".into());
         }
-        if expected_index > 0 && expected_index < first && step.status != ReceiptStepStatus::Skipped
-        {
+        if index > 0 && index < first && step.status != ReceiptStepStatus::Skipped {
             return Err("saved skipped steps are inconsistent".into());
         }
-        if expected_index >= first && step.status == ReceiptStepStatus::Skipped {
+        if index >= first && step.status == ReceiptStepStatus::Skipped {
             return Err("saved step status is inconsistent".into());
         }
     }
@@ -715,16 +717,10 @@ async fn run_steps<T: Transport>(
     } else {
         None
     };
-    let heartbeat = async {
-        loop {
-            tokio::time::sleep(lock::HEARTBEAT_EVERY).await;
-            lock::heartbeat(&*transport, path, run_id).await;
-        }
-    };
     let mut app_down = resume.as_ref().is_some_and(|receipt| receipt.app_left_down);
     let end = tokio::select! {
         end = run_steps_locked(&preview, &*transport, &events, &stop, detach, &mut app_down, journal.as_deref(), resume.as_ref(), observer.as_ref()) => end,
-        () = heartbeat => unreachable!("heartbeat never ends"),
+        () = heartbeat_forever(&*transport, path, run_id) => unreachable!("heartbeat never ends"),
     };
     if app_down {
         let _ = events.send(DeployEvent::AppLeftDown);
@@ -789,12 +785,7 @@ async fn run_steps<T: Transport>(
     } else {
         tokio::select! {
             results = checks => results,
-            () = async {
-                loop {
-                    tokio::time::sleep(lock::HEARTBEAT_EVERY).await;
-                    lock::heartbeat(&*transport, path, run_id).await;
-                }
-            } => unreachable!("heartbeat never ends"),
+            () = heartbeat_forever(&*transport, path, run_id) => unreachable!("heartbeat never ends"),
         }
     };
     if resume.is_some() && !using_saved_checks && watch_result.status == WatchStatus::Complete {
@@ -966,14 +957,21 @@ fn merge_previous_watch(current: &mut WatchResult, previous: &WatchResult) {
     }
 }
 
-fn post_window() -> std::time::Duration {
+fn post_window() -> Duration {
     #[cfg(test)]
     {
-        std::time::Duration::from_millis(100)
+        Duration::from_millis(100)
     }
     #[cfg(not(test))]
     {
-        std::time::Duration::from_secs(120)
+        POST_DEPLOY_WATCH
+    }
+}
+
+async fn heartbeat_forever<T: Transport>(transport: &T, path: &str, run_id: &str) {
+    loop {
+        tokio::time::sleep(lock::HEARTBEAT_EVERY).await;
+        lock::heartbeat(transport, path, run_id).await;
     }
 }
 
@@ -993,25 +991,18 @@ async fn run_steps_locked<T: Transport>(
 ) -> End {
     let path = &preview.target.path;
     let first_recipe_step = preview.run_plan.first_recipe_step();
-    let mut steps = Vec::new();
-    if preview.run_plan == RunPlan::Deploy {
-        steps.push((
-            0,
-            "git fast-forward".to_string(),
-            format!("git merge --ff-only {}", preview.target_sha),
-        ));
-    }
-    steps.extend(
-        preview
-            .target
-            .steps
-            .iter()
-            .enumerate()
-            .filter_map(|(step, body)| {
-                let index = step + 1;
-                (index >= first_recipe_step).then(|| (index, body.clone(), body.clone()))
-            }),
-    );
+    let steps: Vec<_> = plan_steps(&preview.target, preview.run_plan, &preview.target_sha)
+        .into_iter()
+        .filter(|(index, _)| *index == 0 || *index >= first_recipe_step)
+        .map(|(index, body)| {
+            let name = if index == 0 {
+                "git fast-forward".to_string()
+            } else {
+                body.clone()
+            };
+            (index, name, body)
+        })
+        .collect();
     let first_index = steps.first().map(|(index, _, _)| *index).unwrap_or(0);
     let mut watching = false;
 
@@ -1681,7 +1672,6 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Mutex, OnceLock};
-    use std::time::Duration;
 
     use tokio::sync::Notify;
 
