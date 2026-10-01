@@ -684,7 +684,8 @@ async fn run_files_are_private() {
         ),
         "",
     );
-    assert_eq!(modes.lines().count(), 8, "{modes}");
+    // 4 directories, then exit, ident, log, pid and script.sh.
+    assert_eq!(modes.lines().count(), 9, "{modes}");
     for line in modes.lines() {
         let expected = if line.contains(" directory ") {
             "700"
