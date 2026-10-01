@@ -578,61 +578,82 @@ fn saved_target_matches_current(saved: &DeployTarget, current: &DeployTarget) ->
     }
     // Receipts from before log observation was added have no observation
     // fields. Keep their exact approved deploy commands attachable.
-    !saved.watch_log
-        && saved.log.is_none()
-        && !saved.log_daily
-        && saved.smoke_url.is_none()
-        && saved.env == current.env
-        && saved.production == current.production
-        && saved.ssh_alias == current.ssh_alias
-        && saved.path == current.path
-        && saved.branch == current.branch
-        && saved.steps == current.steps
-        && saved.maintenance == current.maintenance
+    let DeployTarget {
+        env,
+        production,
+        ssh_alias,
+        path,
+        branch,
+        steps,
+        maintenance,
+        watch_log,
+        log,
+        log_daily,
+        smoke_url,
+    } = saved;
+    !watch_log
+        && log.is_none()
+        && !log_daily
+        && smoke_url.is_none()
+        && *env == current.env
+        && *production == current.production
+        && *ssh_alias == current.ssh_alias
+        && *path == current.path
+        && *branch == current.branch
+        && *steps == current.steps
+        && *maintenance == current.maintenance
 }
 
 fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) {
+    // Destructured without `..` so a new setting must be shown here.
+    let TrustSnapshot {
+        ssh_alias,
+        path,
+        branch,
+        production,
+        maintenance,
+        log,
+        log_daily,
+        smoke_url,
+        steps,
+    } = current;
     show_change(
         "ssh",
         previous.map(|old| old.ssh_alias.clone()),
-        current.ssh_alias.clone(),
+        ssh_alias.clone(),
     );
-    show_change(
-        "path",
-        previous.map(|old| old.path.clone()),
-        current.path.clone(),
-    );
+    show_change("path", previous.map(|old| old.path.clone()), path.clone());
     show_change(
         "branch",
         previous.map(|old| old.branch.clone()),
-        current.branch.clone(),
+        branch.clone(),
     );
     show_change(
         "production",
         previous.map(|old| old.production.to_string()),
-        current.production.to_string(),
+        production.to_string(),
     );
     show_change(
         "maintenance",
         previous.map(|old| old.maintenance.to_string()),
-        current.maintenance.to_string(),
+        maintenance.to_string(),
     );
     show_change(
         "log",
         previous.map(|old| format!("{:?}", old.log)),
-        format!("{:?}", current.log),
+        format!("{log:?}"),
     );
     show_change(
         "log_daily",
         previous.map(|old| old.log_daily.to_string()),
-        current.log_daily.to_string(),
+        log_daily.to_string(),
     );
     show_change(
         "smoke_url",
         previous.map(|old| format!("{:?}", old.smoke_url)),
-        format!("{:?}", current.smoke_url),
+        format!("{smoke_url:?}"),
     );
-    if previous.is_none_or(|old| old.steps != current.steps) {
+    if previous.is_none_or(|old| old.steps != *steps) {
         if let Some(old) = previous {
             println!("  recipe steps before:");
             for (index, step) in old.steps.iter().enumerate() {
@@ -640,7 +661,7 @@ fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot)
             }
         }
         println!("  recipe steps now:");
-        for (index, step) in current.steps.iter().enumerate() {
+        for (index, step) in steps.iter().enumerate() {
             println!("    {}. {step}", index + 1);
         }
     }
