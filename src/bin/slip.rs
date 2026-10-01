@@ -1,13 +1,14 @@
 use std::error::Error;
 use std::future::Future;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
 use shipslip::config::{
-    approve_trust, default_trust_path, trust_status, LoadedConfig, TrustSnapshot, TrustStatus,
+    approve_trust, default_trust_path, is_branch_name, is_env_name, is_smoke_url, is_ssh_alias,
+    trust_status, InitAnswers, InitPlan, LoadedConfig, TrustSnapshot, TrustStatus,
 };
 use shipslip::receipt::{default_receipts_root, find_open, ReceiptJournal};
 use shipslip::transport::SshTransport;
@@ -39,13 +40,24 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     let Some(command) = parse_args()? else {
         return Ok(ExitCode::SUCCESS);
     };
+    let action = match command.action {
+        Action::Init if command.config.is_some() => {
+            return Err(invalid_input(
+                "init writes .shipslip.toml at the git root; omit --config and unset SHIPSLIP_CONFIG",
+            )
+            .into());
+        }
+        Action::Init => return init_command(&std::env::current_dir()?),
+        action => action,
+    };
     let config = LoadedConfig::load(&std::env::current_dir()?, command.config.as_deref())?;
     if config.uses_default_recipe() {
         eprintln!("Using the default Laravel deploy recipe; add [recipe.deploy] to customize it.");
     }
     let trust_path = default_trust_path()?;
     let receipts_root = default_receipts_root()?;
-    let (environment, plan) = match command.action {
+    let (environment, plan) = match action {
+        Action::Init => unreachable!("init runs before the config is loaded"),
         Action::Trust { environment } => {
             return trust_command(&config, &trust_path, environment.as_deref());
         }
@@ -516,6 +528,15 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
         .get(index)
         .ok_or_else(|| invalid_input("missing command"))?;
     index += 1;
+    if action == "init" {
+        if index != args.len() {
+            return Err(invalid_input("init takes no arguments").into());
+        }
+        return Ok(Some(Command {
+            config,
+            action: Action::Init,
+        }));
+    }
     if action == "trust" {
         let environment = args.get(index).cloned();
         if index + usize::from(environment.is_some()) != args.len() {
@@ -586,6 +607,7 @@ fn print_help() {
         "Shipslip deploy runner\n\n\
          Usage:\n\
          \x20 slip [--config FILE] <deploy|rerun|from-step> <ENV> [STEP]\n\
+         \x20 slip init\n\
          \x20 slip [--config FILE] trust [ENV]\n\
          \x20 slip [--config FILE] attach ENV\n\
          \x20 slip [--config FILE] break-lock ENV\n\
@@ -594,6 +616,7 @@ fn print_help() {
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\
          \x20 rerun ENV          Run all recipe steps on the already-deployed commit\n\
          \x20 from-step ENV STEP Run recipe steps starting at STEP (steps start at 1)\n\
+         \x20 init               Create .shipslip.toml by answering a few questions\n\
          \x20 trust [ENV]        Review and approve config changes\n\
          \x20 attach ENV         Resume an unfinished run without relaunching its active step\n\
          \x20 break-lock ENV     Clear a stale deploy lock after checking the old run\n\
@@ -647,6 +670,162 @@ fn show_preview(preview: &shipslip::Preview) {
     if preview.target().production {
         println!("This is a production environment.");
     }
+}
+
+fn init_command(start: &Path) -> Result<ExitCode, Box<dyn Error>> {
+    let plan = InitPlan::new(start)?;
+    if !io::stdin().is_terminal() {
+        return Err(invalid_input("init asks questions; run it in an interactive terminal").into());
+    }
+    println!("Creating {}", plan.path().display());
+    let branch = current_branch(start);
+    let answers = ask_init(
+        &mut io::stdin().lock(),
+        &mut io::stdout(),
+        branch.as_deref(),
+    )?;
+    plan.write(&answers)?;
+    println!("\nWrote {}.", plan.path().display());
+    println!(
+        "Review it, especially the recipe steps, then run `slip trust {}`.",
+        answers.env
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn current_branch(dir: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(dir)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let branch = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (output.status.success() && is_branch_name(&branch)).then_some(branch)
+}
+
+fn ask_init(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    branch: Option<&str>,
+) -> io::Result<InitAnswers> {
+    let env = ask_value(input, output, "Environment name", Some("staging"), |v| {
+        is_env_name(v)
+            .then_some(())
+            .ok_or("Use only letters, digits, `-` and `_`.")
+    })?;
+    let ssh_alias = ask_value(
+        input,
+        output,
+        "SSH host alias from ~/.ssh/config",
+        None,
+        |v| {
+            is_ssh_alias(v)
+                .then_some(())
+                .ok_or("Use the `Host` name from ~/.ssh/config, not user@host.")
+        },
+    )?;
+    let path = ask_value(input, output, "App path on the server", None, |v| {
+        Path::new(v)
+            .is_absolute()
+            .then_some(())
+            .ok_or("Use an absolute path, such as /var/www/app.")
+    })?;
+    let branch = ask_value(input, output, "Branch to deploy", branch, |v| {
+        is_branch_name(v)
+            .then_some(())
+            .ok_or("That is not a supported branch name.")
+    })?;
+    let production = ask_yes_no(input, output, "Is this a production environment?", false)?;
+    let maintenance = ask_yes_no(
+        input,
+        output,
+        "Use maintenance mode (php artisan down/up) during deploys?",
+        true,
+    )?;
+    let smoke_url = ask_value(
+        input,
+        output,
+        "Smoke check URL (Enter to skip)",
+        Some(""),
+        |v| {
+            (v.is_empty() || is_smoke_url(v))
+                .then_some(())
+                .ok_or("Use an http:// or https:// URL.")
+        },
+    )?;
+    Ok(InitAnswers {
+        env,
+        ssh_alias,
+        path,
+        branch,
+        production,
+        maintenance,
+        smoke_url: (!smoke_url.is_empty()).then_some(smoke_url),
+    })
+}
+
+/// Asks until `check` accepts the answer. An empty answer takes `default`.
+fn ask_value(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    question: &str,
+    default: Option<&str>,
+    check: impl Fn(&str) -> Result<(), &'static str>,
+) -> io::Result<String> {
+    loop {
+        match default {
+            Some(default) if !default.is_empty() => write!(output, "{question} [{default}]: ")?,
+            _ => write!(output, "{question}: ")?,
+        }
+        let answer = match read_init_line(input, output)?.as_str() {
+            "" => match default {
+                Some(default) => default.to_string(),
+                None => {
+                    writeln!(output, "  An answer is required.")?;
+                    continue;
+                }
+            },
+            answer => answer.to_string(),
+        };
+        match check(&answer) {
+            Ok(()) => return Ok(answer),
+            Err(why) => writeln!(output, "  {why}")?,
+        }
+    }
+}
+
+fn ask_yes_no(
+    input: &mut impl BufRead,
+    output: &mut impl Write,
+    question: &str,
+    default: bool,
+) -> io::Result<bool> {
+    loop {
+        write!(
+            output,
+            "{question} {} ",
+            if default { "[Y/n]" } else { "[y/N]" }
+        )?;
+        match read_init_line(input, output)?.to_ascii_lowercase().as_str() {
+            "" => return Ok(default),
+            "y" | "yes" => return Ok(true),
+            "n" | "no" => return Ok(false),
+            _ => writeln!(output, "  Answer y or n.")?,
+        }
+    }
+}
+
+fn read_init_line(input: &mut impl BufRead, output: &mut impl Write) -> io::Result<String> {
+    output.flush()?;
+    let mut line = String::new();
+    if input.read_line(&mut line)? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "input ended before init finished; nothing was written",
+        ));
+    }
+    Ok(line.trim().to_string())
 }
 
 fn trust_command(
@@ -1101,6 +1280,7 @@ struct Command {
 }
 
 enum Action {
+    Init,
     Run { environment: String, plan: RunPlan },
     Trust { environment: Option<String> },
     Attach { environment: String },
@@ -1396,6 +1576,76 @@ mod tests {
             summary(WatchStatus::Unavailable),
             "Log watch: log could not be read"
         );
+    }
+
+    fn run_init(script: &str, branch: Option<&str>) -> (io::Result<InitAnswers>, String) {
+        let mut output = Vec::new();
+        let answers = ask_init(&mut io::Cursor::new(script), &mut output, branch);
+        (answers, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn init_takes_defaults_for_empty_answers() {
+        let (answers, output) = run_init("\napp-staging\n/var/www/app\n\n\n\n\n", Some("main"));
+        assert_eq!(
+            answers.unwrap(),
+            InitAnswers {
+                env: "staging".into(),
+                ssh_alias: "app-staging".into(),
+                path: "/var/www/app".into(),
+                branch: "main".into(),
+                production: false,
+                maintenance: true,
+                smoke_url: None,
+            }
+        );
+        assert!(output.contains("Environment name [staging]: "), "{output}");
+        assert!(output.contains("Branch to deploy [main]: "), "{output}");
+        assert!(output.contains("Is this a production environment? [y/N] "));
+    }
+
+    #[test]
+    fn init_asks_again_until_answers_are_valid() {
+        let (answers, output) = run_init(
+            "prod env\nproduction\n\nubuntu@1.2.3.4\napp-prod\nvar/www\n/var/www/app\n\
+             -main\nmain\nmaybe\nyes\nn\nexample.com\nhttps://example.com/health\n",
+            None,
+        );
+        let answers = answers.unwrap();
+        assert_eq!(answers.env, "production");
+        assert_eq!(answers.ssh_alias, "app-prod");
+        assert_eq!(answers.path, "/var/www/app");
+        assert_eq!(answers.branch, "main");
+        assert!(answers.production);
+        assert!(!answers.maintenance);
+        assert_eq!(
+            answers.smoke_url.as_deref(),
+            Some("https://example.com/health")
+        );
+        for hint in [
+            "Use only letters, digits",
+            "An answer is required.",
+            "not user@host",
+            "Use an absolute path",
+            "not a supported branch name",
+            "Answer y or n.",
+            "Use an http:// or https:// URL.",
+        ] {
+            assert!(output.contains(hint), "missing {hint:?} in {output}");
+        }
+    }
+
+    #[test]
+    fn init_stops_when_input_ends() {
+        let (answers, _) = run_init("staging\napp-staging\n", Some("main"));
+        assert_eq!(answers.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn init_takes_no_arguments() {
+        let parsed = parse_args_from(vec!["init".into()]).unwrap().unwrap();
+        assert!(matches!(parsed.action, Action::Init));
+        assert!(parse_args_from(vec!["init".into(), "staging".into()]).is_err());
     }
 
     #[test]
