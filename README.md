@@ -9,6 +9,8 @@ SSH access, project configuration, deployment, and recovery.
 
 ## Quick start
 
+Install the CLI with `cargo install shipslip --locked` (Rust 1.88 or newer).
+
 From your Laravel project's Git repository, run `slip init`. It asks for the
 environment name, SSH host alias, server path, branch, whether the environment
 is production, maintenance mode, and an optional smoke URL, then writes

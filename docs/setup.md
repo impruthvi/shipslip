@@ -11,13 +11,18 @@ staging server, and permission for the server to fetch the project's Git
 repository. The server must already have the project checked out.
 
 Install Rust 1.88 or newer, Git, and OpenSSH on your computer. Install `curl`
-if you plan to use a smoke URL. Then install the current Shipslip CLI from
-the [public source repository](https://github.com/impruthvi/shipslip):
+if you plan to use a smoke URL. Then install the Shipslip CLI from
+[crates.io](https://crates.io/crates/shipslip):
 
 ```sh
-cargo install --git https://github.com/impruthvi/shipslip.git --branch main --locked --bin slip
+cargo install shipslip --locked
 slip --help
 ```
+
+Run the same command with `--force` to upgrade to a newer release. To try
+unreleased changes, install from the
+[source repository](https://github.com/impruthvi/shipslip) instead:
+`cargo install --git https://github.com/impruthvi/shipslip.git --branch main --locked --bin slip`.
 
 If your shell cannot find `slip`, add `~/.cargo/bin` to your `PATH` or restart
 the shell after installing Rust.
