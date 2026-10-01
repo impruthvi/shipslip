@@ -791,7 +791,14 @@ async fn run_steps<T: Transport>(
     let checks = async {
         let watch = async {
             match observer {
-                Some(observer) => observer.finish(watch_status, post_window()).await,
+                Some(observer) => {
+                    if watch_status == WatchStatus::Complete {
+                        let _ = events.send(DeployEvent::WatchStarted {
+                            window: post_window(),
+                        });
+                    }
+                    observer.finish(watch_status, post_window()).await
+                }
                 None => WatchResult::not_run(),
             }
         };
@@ -3049,6 +3056,175 @@ mod tests {
             vec![DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges)]
         );
         assert_eq!(fake.launched("git merge --ff-only"), 0);
+    }
+
+    fn watch_started(events: &[DeployEvent]) -> usize {
+        events
+            .iter()
+            .filter(|e| matches!(e, DeployEvent::WatchStarted { .. }))
+            .count()
+    }
+
+    async fn watched_run(fake: Fake, steps: &[&str]) -> Vec<DeployEvent> {
+        let fake = Arc::new(fake);
+        let mut target = maintenance_target(false, steps);
+        target.watch_log = true;
+        let p = prepare(target, &*fake).await.unwrap();
+        let c = Confirmation::from(&p, None).unwrap();
+        let (rx, _h) = execute(p, c, fake).unwrap();
+        collect(rx).await
+    }
+
+    #[tokio::test]
+    async fn watch_started_comes_once_after_maintenance_up_and_before_watch_finished() {
+        let fake = preflight()
+            .on("git merge --ff-only", &[], 0)
+            .on("artisan down", &[], 0)
+            .on("artisan up", &[], 0)
+            .on("migrate", &[], 0);
+        let events = watched_run(fake, &["migrate"]).await;
+
+        assert_eq!(watch_started(&events), 1, "{events:#?}");
+        let position = |wanted: fn(&DeployEvent) -> bool| events.iter().position(wanted).unwrap();
+        let up = position(|e| {
+            matches!(
+                e,
+                DeployEvent::MaintenanceFinished {
+                    phase: MaintenancePhase::Up,
+                    ..
+                }
+            )
+        });
+        let started = position(|e| matches!(e, DeployEvent::WatchStarted { .. }));
+        let finished = position(|e| matches!(e, DeployEvent::WatchFinished(_)));
+        assert!(up < started && started < finished, "{events:#?}");
+        assert_eq!(
+            events[started],
+            DeployEvent::WatchStarted {
+                window: post_window()
+            }
+        );
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_started_is_not_sent_when_post_checks_do_not_run() {
+        let fake = preflight()
+            .on("git merge --ff-only", &[], 1)
+            .on("artisan down", &[], 0);
+        let events = watched_run(fake, &["migrate"]).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                    step: 0,
+                    partial_update: false
+                }))
+            ),
+            "{events:#?}"
+        );
+        assert_eq!(watch_started(&events), 0);
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, DeployEvent::WatchFinished(_))));
+
+        let fake = Arc::new(preflight());
+        let mut target = target(false, &[]);
+        target.watch_log = true;
+        let p = prepare(target, &*fake).await.unwrap();
+        let c = Confirmation::from(&p, None).unwrap();
+        let (rx, h) = execute(p, c, fake).unwrap();
+        h.detach();
+        let events = collect(rx).await;
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(
+                DeployOutcome::CancelledBeforeChanges
+            ))
+        );
+        assert_eq!(watch_started(&events), 0);
+    }
+
+    #[tokio::test]
+    async fn watch_started_is_not_sent_without_log_watch() {
+        let fake = Arc::new(preflight().on("git merge --ff-only", &[], 0));
+        let p = prepared(&fake, false, &[]).await;
+        let c = Confirmation::from(&p, None).unwrap();
+        let (rx, _h) = execute(p, c, fake).unwrap();
+        let events = collect(rx).await;
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+        assert_eq!(watch_started(&events), 0);
+    }
+
+    #[tokio::test]
+    async fn watch_started_is_sent_after_a_requested_stop() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .gated("composer install", gate.clone())
+                .on("migrate", &[], 0),
+        );
+        let mut target = target(false, &["composer install", "migrate"]);
+        target.watch_log = true;
+        let p = prepare(target, &*fake).await.unwrap();
+        let c = Confirmation::from(&p, None).unwrap();
+        let (mut rx, h) = execute(p, c, fake.clone()).unwrap();
+        while !matches!(
+            rx.recv().await,
+            Some(DeployEvent::StepStarted { index: 1, .. })
+        ) {}
+        h.stop_after_step();
+        gate.notify_one();
+        let events = collect(rx).await;
+        assert!(matches!(
+            events.last(),
+            Some(DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
+                step: 1,
+                ..
+            }))
+        ));
+        assert_eq!(watch_started(&events), 1, "{events:#?}");
+        assert_eq!(fake.launched("migrate"), 0);
+    }
+
+    #[tokio::test]
+    async fn attach_with_saved_checks_does_not_restart_the_watch() {
+        let fake = Arc::new(preflight());
+        let mut target = target(false, &[]);
+        target.watch_log = true;
+        let preview = prepare(target, &*fake).await.unwrap();
+        let dir = TempReceipts::new();
+        let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        journal.confirm().unwrap();
+        journal.begin_step(0).unwrap();
+        journal.finish_step(0, StepStatus::Ok, Some(0)).unwrap();
+        journal.record_outcome(DeployOutcome::Succeeded).unwrap();
+        let mut watch = WatchResult::not_run();
+        watch.status = WatchStatus::Complete;
+        journal
+            .observation(watch, SmokeResult::NotConfigured)
+            .unwrap();
+        let path = journal.path().to_path_buf();
+        drop(journal);
+
+        let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (events, _handle) = attach(resumed, fake).unwrap();
+        let events = collect(events).await;
+        assert_eq!(watch_started(&events), 0, "{events:#?}");
+        assert!(events.iter().any(
+            |e| matches!(e, DeployEvent::WatchFinished(w) if w.status == WatchStatus::Complete)
+        ));
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
     }
 
     #[tokio::test]

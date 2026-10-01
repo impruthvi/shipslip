@@ -2,6 +2,7 @@ use crate::observation::{LogPhase, SmokeResult, WatchResult};
 use crate::preflight::AbortReason;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::time::Duration;
 
 /// Result of a single step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +76,7 @@ pub enum DeployOutcome {
 
 /// Progress reported by [`crate::execute`], in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DeployEvent {
     StepStarted {
         index: usize,
@@ -129,6 +131,10 @@ pub enum DeployEvent {
         phase: LogPhase,
         message: String,
         file_line: Option<String>,
+    },
+    /// The post-deploy log watch started; it runs for about `window`.
+    WatchStarted {
+        window: Duration,
     },
     WatchFinished(WatchResult),
     SmokeFinished(SmokeResult),
