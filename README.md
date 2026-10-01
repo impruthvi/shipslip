@@ -1,4 +1,9 @@
-# Shipslip
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+    <img src="assets/logo-light.png" alt="Shipslip" width="400">
+  </picture>
+</h1>
 
 <p align="center">
   <a href="https://crates.io/crates/shipslip"><img src="https://img.shields.io/crates/v/shipslip" alt="Crates.io version"></a>

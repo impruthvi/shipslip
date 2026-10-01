@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 64 64" fill="none">
+  <title>Shipslip</title>
+  <rect width="64" height="64" rx="14" fill="#FFC814"/>
+  <g transform="translate(32 32) scale(0.75) translate(-32 -32)">
+    <g transform="rotate(8 32 27)">
+      <path d="M20 7H44V45L38 40L32 45L26 40L20 45Z" fill="#111111"/>
+      <rect x="25" y="13" width="14" height="4" fill="#FFC814"/>
+      <rect x="25" y="21" width="8" height="4" fill="#FFC814"/>
+      <rect x="31" y="30" width="8" height="4" fill="#FFC814"/>
+    </g>
+    <path d="M11 56L17 51.5L23 56L29 51.5L35 56L41 51.5L47 56L53 51.5" stroke="#111111" stroke-width="4"/>
+  </g>
+</svg>
