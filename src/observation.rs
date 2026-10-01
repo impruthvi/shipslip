@@ -167,6 +167,7 @@ impl LogObserver {
             }
             Fetch::Missing => {}
             Fetch::Unavailable(reason) => {
+                state.partial = true;
                 state.unavailable = true;
                 state.warn(reason);
             }
@@ -730,9 +731,10 @@ async fn watch_loop<T: Transport>(
         } else {
             LogPhase::During
         };
+        let recovering_baseline = state.unavailable && !state.saw_file;
         match tokio::time::timeout(
             Duration::from_secs(10),
-            fetch(&*transport, &spec, &state.cursor, false),
+            fetch(&*transport, &spec, &state.cursor, recovering_baseline),
         )
         .await
         .unwrap_or_else(|_| Fetch::Unavailable("log poll timed out".into()))
@@ -740,7 +742,7 @@ async fn watch_loop<T: Transport>(
             Fetch::File {
                 path,
                 inode,
-                size: _,
+                size,
                 start,
                 bytes,
                 rotated,
@@ -757,10 +759,18 @@ async fn watch_loop<T: Transport>(
                 state.cursor = Cursor {
                     path,
                     inode,
-                    offset: start + bytes.len() as u64,
+                    offset: if recovering_baseline {
+                        size
+                    } else {
+                        start + bytes.len() as u64
+                    },
                 };
-                state.bytes(&bytes, phase, false, &events);
-                if bytes.is_empty()
+                state.bytes(&bytes, phase, recovering_baseline, &events);
+                if recovering_baseline {
+                    state.flush(phase, true, &events);
+                    state.partial_line.clear();
+                    state.warn("Log baseline recovered; entries during the gap may be missing");
+                } else if bytes.is_empty()
                     && state.current_entry.is_some()
                     && state.last_entry_update.elapsed() >= Duration::from_secs(1)
                 {
@@ -928,5 +938,120 @@ pub async fn smoke_check(url: Option<&str>) -> SmokeResult {
             status: None,
             reason: "timed out after 10 seconds".into(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::TransportError;
+    use std::sync::atomic::AtomicUsize;
+
+    #[derive(Clone, Copy)]
+    enum FirstRead {
+        Unavailable,
+        Missing,
+    }
+
+    struct LogTransport {
+        first_read: FirstRead,
+        reads: AtomicUsize,
+    }
+
+    impl Transport for LogTransport {
+        async fn run(
+            &self,
+            script: &str,
+            output: mpsc::UnboundedSender<String>,
+        ) -> Result<i32, TransportError> {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            let baseline = script.contains("if [ 1 -eq 1 ]");
+            if read == 0 {
+                assert!(baseline);
+                return match self.first_read {
+                    FirstRead::Unavailable => {
+                        Err(TransportError::ConnectionLost("baseline lost".into()))
+                    }
+                    FirstRead::Missing => {
+                        let _ = output.send("@missing".into());
+                        Ok(0)
+                    }
+                };
+            }
+            assert_eq!(read, 1);
+            assert_eq!(baseline, matches!(self.first_read, FirstRead::Unavailable));
+            let bytes = b"[2026-09-01 00:00:00] production.ERROR: OldException: old failure\n";
+            let engine = base64::engine::general_purpose::STANDARD;
+            let _ = output.send(format!("@file 42 {} 0 {} 0", bytes.len(), bytes.len()));
+            let _ = output.send(engine.encode("storage/logs/laravel.log"));
+            let _ = output.send(engine.encode(bytes));
+            Ok(0)
+        }
+
+        async fn reconnect(&self) -> Result<(), TransportError> {
+            Ok(())
+        }
+    }
+
+    async fn observe_after(first_read: FirstRead) -> (WatchResult, Vec<DeployEvent>, usize) {
+        let transport = Arc::new(LogTransport {
+            first_read,
+            reads: AtomicUsize::new(0),
+        });
+        let target = DeployTarget {
+            env: "staging".into(),
+            production: false,
+            ssh_alias: "app".into(),
+            path: "/srv/app".into(),
+            branch: "main".into(),
+            steps: Vec::new(),
+            maintenance: false,
+            watch_log: true,
+            log: None,
+            log_daily: false,
+            smoke_url: None,
+        };
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let observer = LogObserver::start(
+            transport.clone(),
+            &target,
+            events,
+            None,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        observer.begin();
+        let result = observer.finish(WatchStatus::Complete, Duration::ZERO).await;
+        let mut emitted = Vec::new();
+        while let Ok(event) = receiver.try_recv() {
+            emitted.push(event);
+        }
+        (result, emitted, transport.reads.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn failed_baseline_recovers_as_partial_without_reporting_old_errors() {
+        let (result, events, reads) = observe_after(FirstRead::Unavailable).await;
+
+        assert_eq!(reads, 2);
+        assert_eq!(result.status, WatchStatus::Partial);
+        assert_eq!(result.baseline_signatures, 1);
+        assert!(result.new_errors.is_empty());
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, DeployEvent::NewLogError { .. })));
+    }
+
+    #[tokio::test]
+    async fn file_created_after_missing_baseline_is_observed_as_new() {
+        let (result, events, reads) = observe_after(FirstRead::Missing).await;
+
+        assert_eq!(reads, 2);
+        assert_eq!(result.status, WatchStatus::Complete);
+        assert_eq!(result.baseline_signatures, 0);
+        assert_eq!(result.new_errors.len(), 1);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, DeployEvent::NewLogError { .. })));
     }
 }
