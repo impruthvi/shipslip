@@ -118,8 +118,16 @@ pub enum PrepareError {
 }
 
 /// What a deploy will do, produced by [`prepare`]. Only [`prepare`] can
-/// build one, and a [`Confirmation`] can only be built from one.
-#[derive(Debug, Clone)]
+/// build one, and a [`Confirmation`] can only be built from one. Not `Clone`:
+/// [`execute`] and [`cancel`] consume it, so a running deploy's lock cannot
+/// be released through a copy.
+///
+/// ```compile_fail
+/// fn copy(preview: &shipslip::Preview) -> shipslip::Preview {
+///     preview.clone()
+/// }
+/// ```
+#[derive(Debug)]
 pub struct Preview {
     target: DeployTarget,
     from_sha: String,
@@ -207,6 +215,15 @@ pub enum ExecuteError {
     ReceiptMismatch,
     #[error("could not save the receipt: {0}")]
     Receipt(String),
+}
+
+/// [`execute`] refused to start, so nothing ran. The preview is returned so
+/// the caller can still [`cancel`] it and release its lock.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct ExecuteRejected {
+    pub error: ExecuteError,
+    pub preview: Box<Preview>,
 }
 
 /// Controls for a running deploy.
@@ -456,7 +473,7 @@ pub fn execute<T: Transport>(
     preview: Preview,
     confirmation: Confirmation,
     transport: Arc<T>,
-) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteError> {
+) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteRejected> {
     execute_inner(preview, confirmation, transport, None)
 }
 
@@ -466,7 +483,7 @@ pub fn execute_recorded<T: Transport>(
     confirmation: Confirmation,
     transport: Arc<T>,
     journal: Arc<ReceiptJournal>,
-) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteError> {
+) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteRejected> {
     execute_inner(preview, confirmation, transport, Some(journal))
 }
 
@@ -475,11 +492,25 @@ fn execute_inner<T: Transport>(
     confirmation: Confirmation,
     transport: Arc<T>,
     journal: Option<Arc<ReceiptJournal>>,
-) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteError> {
-    if !confirmation.matches(&preview) {
+) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteRejected> {
+    if let Err(error) = check_execute(&preview, &confirmation, journal.as_deref()) {
+        return Err(ExecuteRejected {
+            error,
+            preview: Box::new(preview),
+        });
+    }
+    Ok(spawn_run(preview, transport, journal, None))
+}
+
+fn check_execute(
+    preview: &Preview,
+    confirmation: &Confirmation,
+    journal: Option<&ReceiptJournal>,
+) -> Result<(), ExecuteError> {
+    if !confirmation.matches(preview) {
         return Err(ExecuteError::ConfirmationMismatch);
     }
-    if let Some(journal) = &journal {
+    if let Some(journal) = journal {
         let receipt = journal.snapshot();
         if receipt.run_id != preview.run_id
             || receipt.recipe_hash != preview.recipe_hash
@@ -498,8 +529,7 @@ fn execute_inner<T: Transport>(
             .confirm()
             .map_err(|error| ExecuteError::Receipt(error.to_string()))?;
     }
-
-    Ok(spawn_run(preview, transport, journal, None))
+    Ok(())
 }
 
 /// Starts [`run_steps`] in the background.
@@ -2307,11 +2337,19 @@ mod tests {
 
     #[tokio::test]
     async fn confirmation_for_another_preview_is_rejected() {
+        let fake = Arc::new(preflight());
         let a = prepared(&preflight(), false, &["echo a"]).await;
-        let b = prepared(&preflight(), false, &["echo b"]).await;
+        let b = prepared(&fake, false, &["echo b"]).await;
+        let run_id = b.run_id().to_string();
         let confirm_a = Confirmation::from(&a, None).unwrap();
-        let err = execute(b, confirm_a, Arc::new(preflight())).unwrap_err();
-        assert_eq!(err, ExecuteError::ConfirmationMismatch);
+        let rejected = execute(b, confirm_a, fake.clone()).unwrap_err();
+        assert_eq!(rejected.error, ExecuteError::ConfirmationMismatch);
+
+        // The rejected preview comes back, so its lock can still be released.
+        assert_eq!(rejected.preview.run_id(), run_id);
+        assert_eq!(fake.lock_owner().as_deref(), Some(run_id.as_str()));
+        cancel(*rejected.preview, &*fake).await.unwrap();
+        assert_eq!(fake.lock_owner(), None);
     }
 
     #[tokio::test]
@@ -3158,8 +3196,8 @@ mod tests {
         assert_eq!(a.recipe_hash(), b.recipe_hash());
         assert_ne!(a.run_id(), b.run_id());
         let confirm_a = Confirmation::from(&a, None).unwrap();
-        let err = execute(b, confirm_a, Arc::new(preflight())).unwrap_err();
-        assert_eq!(err, ExecuteError::ConfirmationMismatch);
+        let rejected = execute(b, confirm_a, Arc::new(preflight())).unwrap_err();
+        assert_eq!(rejected.error, ExecuteError::ConfirmationMismatch);
     }
 
     #[tokio::test]
@@ -3697,7 +3735,10 @@ mod tests {
         let confirmation = Confirmation::from(&preview, None).unwrap();
         assert!(matches!(
             execute_recorded(preview, confirmation, fake.clone(), journal),
-            Err(ExecuteError::Receipt(_))
+            Err(ExecuteRejected {
+                error: ExecuteError::Receipt(_),
+                ..
+            })
         ));
         assert_eq!(fake.launched("git merge --ff-only"), 0);
     }

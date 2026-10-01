@@ -12,7 +12,8 @@ use shipslip::transport::SshTransport;
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute_recorded, lock_status, prepare_with_plan,
     BreakLockError, BringUpError, Confirmation, DeployEvent, DeployOutcome, DeployTarget,
-    MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus, POST_DEPLOY_WATCH,
+    ExecuteRejected, MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus,
+    POST_DEPLOY_WATCH,
 };
 
 #[tokio::main(flavor = "current_thread")]
@@ -83,12 +84,11 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     else {
         return Ok(ExitCode::SUCCESS);
     };
-    let cancel_preview = preview.clone();
     let (events, _handle) =
         match execute_recorded(preview, confirmation, transport.clone(), journal.clone()) {
             Ok(run) => run,
-            Err(error) => {
-                cancel_prepared(cancel_preview, transport.as_ref(), &journal).await?;
+            Err(ExecuteRejected { error, preview }) => {
+                cancel_prepared(*preview, transport.as_ref(), &journal).await?;
                 return Err(error.into());
             }
         };
