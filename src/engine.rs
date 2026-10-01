@@ -385,8 +385,8 @@ pub enum BreakLockError {
     Failed(String),
 }
 
-/// Breaks a stale deploy lock (see [`LockInfo::is_stale`]). Check first,
-/// e.g. with `slip shell`, that no step of the old run is still running.
+/// Breaks a stale deploy lock (see [`LockInfo::is_stale`]). Check over SSH
+/// first that no step of the old run is still running.
 pub async fn break_lock<T: Transport>(
     target: &DeployTarget,
     transport: &T,
@@ -403,6 +403,22 @@ pub async fn break_lock<T: Transport>(
         Break::NotHeld => Err(BreakLockError::NotHeld),
         Break::Live(age) => Err(BreakLockError::Live(age)),
     }
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LockStatusError {
+    #[error("could not read the deploy lock: {0}")]
+    Failed(String),
+}
+
+/// Reads the deploy lock without changing it. `None` if no lock is held.
+pub async fn lock_status<T: Transport>(
+    target: &DeployTarget,
+    transport: &T,
+) -> Result<Option<LockInfo>, LockStatusError> {
+    lock::status(transport, &target.path)
+        .await
+        .map_err(LockStatusError::Failed)
 }
 
 /// Runs the confirmed deploy in the background. Events arrive on the
@@ -1701,6 +1717,7 @@ mod tests {
         rules: Vec<Rule>,
         ran: Mutex<Vec<String>>,
         launched: Mutex<HashMap<String, usize>>,
+        lose_acquire_response: AtomicBool,
         reconnect_fails: bool,
         reconnects: AtomicUsize,
         lock: Mutex<LockSim>,
@@ -1833,6 +1850,17 @@ mod tests {
         rest[..end].to_string()
     }
 
+    fn other_owner(run_id: &str) -> LockOwner {
+        LockOwner {
+            run_id: run_id.into(),
+            user: "ana".into(),
+            machine: "mac".into(),
+            pid: 1,
+            started_at: 0,
+            target_sha: TO.into(),
+        }
+    }
+
     impl Fake {
         fn rule(mut self, needle: &'static str, lines: &[&'static str], code: i32) -> Self {
             self.rules.push(Rule {
@@ -1921,15 +1949,10 @@ mod tests {
             if script.contains("echo acquired") {
                 match &lock.owner {
                     Some(other) => {
-                        let owner = LockOwner {
-                            run_id: other.clone(),
-                            user: "ana".into(),
-                            machine: "mac".into(),
-                            pid: 1,
-                            started_at: 0,
-                            target_sha: TO.into(),
-                        };
-                        format!("held 30 {}", serde_json::to_string(&owner).unwrap())
+                        format!(
+                            "held 30 {}",
+                            serde_json::to_string(&other_owner(other)).unwrap()
+                        )
                     }
                     None => {
                         lock.owner = Some(run_id.into());
@@ -1952,6 +1975,17 @@ mod tests {
                         "broken".into()
                     }
                 }
+            } else if script.contains("echo not-held") {
+                match &lock.owner {
+                    None => "not-held".into(),
+                    Some(other) => {
+                        let age = if lock.stale { 300 } else { 30 };
+                        format!(
+                            "held {age} {}",
+                            serde_json::to_string(&other_owner(other)).unwrap()
+                        )
+                    }
+                }
             } else if script.contains("heartbeat.tmp") {
                 lock.heartbeats += 1;
                 answer(owned(&lock)).into()
@@ -1966,6 +2000,11 @@ mod tests {
 
         fn unreachable_after_drop(mut self) -> Self {
             self.reconnect_fails = true;
+            self
+        }
+
+        fn lose_acquire_response(self) -> Self {
+            self.lose_acquire_response.store(true, Ordering::SeqCst);
             self
         }
 
@@ -2075,7 +2114,13 @@ mod tests {
             self.ran.lock().unwrap().push(script.to_string());
             if script.contains("shipslip.lock") {
                 let _ = output.send(self.lock_script(script));
-                Ok(0)
+                if script.contains("echo acquired")
+                    && self.lose_acquire_response.swap(false, Ordering::SeqCst)
+                {
+                    Err(lost())
+                } else {
+                    Ok(0)
+                }
             } else if script.contains("setsid") {
                 self.launch_step(script)
             } else if script.contains(runner::LOG_START) {
@@ -3137,6 +3182,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lost_acquire_response_releases_the_lock_it_just_created() {
+        let fake = preflight().lose_acquire_response();
+        let error = prepare(target(false, &[]), &fake).await.unwrap_err();
+
+        assert!(matches!(
+            error,
+            PrepareError::Lock(reason) if reason.contains("released the orphaned lock")
+        ));
+        assert_eq!(fake.lock_owner(), None);
+        assert_eq!(fake.reconnects.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn lost_acquire_response_does_not_release_another_runs_lock() {
+        let fake = preflight().locked_by_other(false).lose_acquire_response();
+        let error = prepare(target(false, &[]), &fake).await.unwrap_err();
+
+        assert!(matches!(error, PrepareError::Lock(_)));
+        assert_eq!(fake.lock_owner().as_deref(), Some("other"));
+    }
+
+    #[tokio::test]
     async fn lock_lost_before_step_0_aborts_before_changes() {
         let fake = Arc::new(
             preflight()
@@ -3280,6 +3347,18 @@ mod tests {
         let stale = preflight().locked_by_other(true);
         assert_eq!(break_lock(&t, &stale, "staging").await, Ok(()));
         assert_eq!(stale.lock_owner(), None);
+    }
+
+    #[tokio::test]
+    async fn lock_status_reports_the_holder_without_changing_the_lock() {
+        let t = target(false, &[]);
+        assert_eq!(lock_status(&t, &preflight()).await, Ok(None));
+
+        let stale = preflight().locked_by_other(true);
+        let info = lock_status(&t, &stale).await.unwrap().unwrap();
+        assert!(info.is_stale());
+        assert_eq!(info.owner, Some(other_owner("other")));
+        assert_eq!(stale.lock_owner().as_deref(), Some("other"));
     }
 
     #[tokio::test]
