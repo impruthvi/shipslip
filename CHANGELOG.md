@@ -4,7 +4,7 @@ All notable changes to Shipslip are listed here. Shipslip follows
 [Semantic Versioning](https://semver.org/); before 1.0, a minor release may
 change the library API.
 
-## [0.1.1] - Unreleased
+## [0.1.1] - 2026-10-01
 
 ### Added
 
