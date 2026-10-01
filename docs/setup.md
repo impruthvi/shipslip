@@ -8,24 +8,42 @@ with staging; configure production separately after the staging flow works.
 
 You need a local Git checkout of the Laravel project, SSH access to its
 staging server, and permission for the server to fetch the project's Git
-repository. The server must already have the project checked out.
+repository. The server must already have the project checked out, in one
+directory updated in place (not `releases/` folders with a `current`
+symlink).
 
-Install Rust 1.88 or newer, Git, and OpenSSH on your computer. Install `curl`
-if you plan to use a smoke URL. Then install the Shipslip CLI from
-[crates.io](https://crates.io/crates/shipslip):
+On the server:
+
+- `bash` is installed.
+- You SSH in as the user who owns the app directory and can run
+  `php artisan` there.
+- Laravel writes its log to a file under `storage/logs` that this user can
+  read.
+
+On your computer, you need macOS or Linux with Git, OpenSSH, `bash`, and
+`curl`. Windows is not supported yet. Install the Shipslip CLI:
 
 ```sh
-cargo install shipslip --locked
-slip --help
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/impruthvi/shipslip/releases/latest/download/shipslip-installer.sh | sh
 ```
 
-Run the same command with `--force` to upgrade to a newer release. To try
-unreleased changes, install from the
-[source repository](https://github.com/impruthvi/shipslip) instead:
-`cargo install --git https://github.com/impruthvi/shipslip.git --branch main --locked --bin slip`.
+Open a new terminal, then check the install:
 
-If your shell cannot find `slip`, add `~/.cargo/bin` to your `PATH` or restart
-the shell after installing Rust.
+```sh
+slip --version
+```
+
+The installer puts `slip` in `~/.local/bin` and adds that directory to your
+`PATH` in your shell's startup files. If a new terminal still cannot find
+`slip`, add `~/.local/bin` to your `PATH` yourself. Run the installer again to
+upgrade.
+
+If you have Rust 1.88 or newer, you can install from
+[crates.io](https://crates.io/crates/shipslip) instead with
+`cargo install shipslip --locked` (add `--force` to upgrade). To try
+unreleased changes, install from the
+[source repository](https://github.com/impruthvi/shipslip):
+`cargo install --git https://github.com/impruthvi/shipslip.git --branch main --locked --bin slip`.
 
 ## 2. Configure SSH
 

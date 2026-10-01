@@ -20,7 +20,18 @@ SSH access, project configuration, deployment, and recovery.
 
 ## Quick start
 
-Install the CLI with `cargo install shipslip --locked` (Rust 1.88 or newer).
+Install the CLI:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/impruthvi/shipslip/releases/latest/download/shipslip-installer.sh | sh
+```
+
+Open a new terminal, then check it with `slip --version`. The installer puts
+`slip` in `~/.local/bin`. With Rust 1.88 or newer, `cargo install shipslip
+--locked` also works.
+
+Shipslip runs on macOS (primary) and Linux (supported, less tested). Windows
+is not supported yet.
 
 From your Laravel project's Git repository, run `slip init`. It asks for the
 environment name, SSH host alias, server path, branch, whether the environment
