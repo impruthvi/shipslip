@@ -199,34 +199,54 @@ impl LoadedConfig {
         self.envs.keys().map(String::as_str)
     }
 
+    // Both destructure `Environment` without `..`, so a new setting must be
+    // added to the deploy target and to the approved snapshot.
     pub fn target(&self, name: &str) -> Option<DeployTarget> {
-        let env = self.envs.get(name)?;
+        let Environment {
+            ssh_alias,
+            path,
+            branch,
+            production,
+            log,
+            log_daily,
+            smoke_url,
+            maintenance,
+        } = self.envs.get(name)?.clone();
         Some(DeployTarget {
             env: name.to_string(),
-            production: env.production,
-            ssh_alias: env.ssh_alias.clone(),
-            path: env.path.clone(),
-            branch: env.branch.clone(),
+            production,
+            ssh_alias,
+            path,
+            branch,
             steps: self.steps.clone(),
-            maintenance: env.maintenance,
+            maintenance,
             watch_log: true,
-            log: env.log.clone(),
-            log_daily: env.log_daily,
-            smoke_url: env.smoke_url.clone(),
+            log,
+            log_daily,
+            smoke_url,
         })
     }
 
     pub fn trust_snapshot(&self, name: &str) -> Option<TrustSnapshot> {
-        let env = self.envs.get(name)?;
+        let Environment {
+            ssh_alias,
+            path,
+            branch,
+            production,
+            log,
+            log_daily,
+            smoke_url,
+            maintenance,
+        } = self.envs.get(name)?.clone();
         Some(TrustSnapshot {
-            ssh_alias: env.ssh_alias.clone(),
-            path: env.path.clone(),
-            branch: env.branch.clone(),
-            production: env.production,
-            maintenance: env.maintenance,
-            log: env.log.clone(),
-            log_daily: env.log_daily,
-            smoke_url: env.smoke_url.clone(),
+            ssh_alias,
+            path,
+            branch,
+            production,
+            maintenance,
+            log,
+            log_daily,
+            smoke_url,
             steps: self.steps.clone(),
         })
     }
@@ -356,9 +376,10 @@ fn check_step_syntax(env: &str, step: usize, path: &str, body: &str) -> Result<(
 }
 
 /// The settings approved for one environment. A stored copy enables `slip trust`
-/// to show what changed since the last approval.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// to show what changed since the last approval. Trust is decided by the
+/// stored hash, so stored copies from other versions load leniently.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TrustSnapshot {
     pub ssh_alias: String,
     pub path: String,
@@ -378,14 +399,12 @@ pub enum TrustStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct TrustRecord {
     hash: String,
     snapshot: TrustSnapshot,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct TrustStore {
     version: u32,
     repositories: BTreeMap<String, BTreeMap<String, TrustRecord>>,
@@ -594,6 +613,46 @@ mod tests {
         // Valid on the server's bash even where local bash is 3.2.
         fixture.write_config("", "staging-host", "echo ok |& cat");
         assert!(fixture.load().is_ok());
+    }
+
+    #[test]
+    fn trust_store_written_by_another_version_still_loads() {
+        let fixture = Fixture::new();
+        let store = fixture.root.join("trust.json");
+        fixture.write_config("", "staging-host", "echo ok");
+        let config = fixture.load().unwrap();
+        let snapshot = config.trust_snapshot("staging").unwrap();
+        let mut stored = serde_json::to_value(&snapshot).unwrap();
+        stored.as_object_mut().unwrap().remove("smoke_url");
+        stored["future_setting"] = serde_json::json!(true);
+        let repo = config.repo_root().to_string_lossy().into_owned();
+        let record = serde_json::json!({
+            "hash": snapshot_hash(&snapshot).unwrap(),
+            "snapshot": stored,
+            "approved_by": "a later version",
+        });
+        let json = serde_json::json!({
+            "version": 1,
+            "repositories": { repo: { "staging": record } },
+        });
+        fs::write(&store, serde_json::to_vec(&json).unwrap()).unwrap();
+
+        let status = |snapshot: &TrustSnapshot| {
+            trust_status(&store, config.repo_root(), "staging", snapshot).unwrap()
+        };
+        assert_eq!(status(&snapshot), TrustStatus::Trusted);
+        let mut changed = snapshot.clone();
+        changed.branch = "release".into();
+        let TrustStatus::Untrusted {
+            previous: Some(previous),
+        } = status(&changed)
+        else {
+            panic!("changed branch should need approval");
+        };
+        assert_eq!(previous.branch, snapshot.branch);
+        assert_eq!(previous.smoke_url, None);
+        approve_trust(&store, config.repo_root(), "staging", changed.clone()).unwrap();
+        assert_eq!(status(&changed), TrustStatus::Trusted);
     }
 
     #[test]

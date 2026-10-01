@@ -3740,6 +3740,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn find_open_skips_finished_and_foreign_files_but_not_unreadable_open_runs() {
+        let fake = preflight();
+        let preview = prepared(&fake, false, &[]).await;
+        let dir = TempReceipts::new();
+        let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        let receipts = journal.path().parent().unwrap().to_path_buf();
+        let mut old: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(journal.path()).unwrap()).unwrap();
+        old["version"] = 99.into();
+        old["status"] = "Final".into();
+        old["run_id"] = "older-run".into();
+        std::fs::write(receipts.join("1-older-run.json"), old.to_string()).unwrap();
+        std::fs::write(receipts.join("notes.json"), "not a receipt").unwrap();
+        let find =
+            || crate::receipt::find_open(&dir.0, "app", &preview.target.env, Path::new("/repo"));
+
+        assert_eq!(find().unwrap().as_deref(), Some(journal.path()));
+
+        old["status"] = "InProgress".into();
+        std::fs::write(receipts.join("1-older-run.json"), old.to_string()).unwrap();
+        let error = find().unwrap_err().to_string();
+        assert!(
+            error.contains("1-older-run.json") && error.contains("cannot be resumed"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
     async fn receipt_claim_allows_only_one_local_owner() {
         let fake = preflight();
         let preview = prepared(&fake, false, &[]).await;

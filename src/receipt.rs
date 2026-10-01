@@ -452,6 +452,13 @@ pub fn default_receipts_root() -> Result<PathBuf, ReceiptError> {
     Ok(path)
 }
 
+/// The fields [`find_open`] needs, readable from any receipt version.
+#[derive(Deserialize)]
+struct ReceiptSummary {
+    status: ReceiptStatus,
+    repo_root: String,
+}
+
 pub fn find_open(
     root: &Path,
     project: &str,
@@ -471,12 +478,24 @@ pub fn find_open(
         if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
             continue;
         }
-        let receipt = ReceiptJournal::load(&path)?.snapshot();
-        if receipt.status == ReceiptStatus::InProgress
-            && receipt.repo_root == repo_root.to_string_lossy()
+        // Only the summary must parse, so finished receipts from other
+        // versions and stray files do not block attach.
+        let bytes = fs::read(&path).map_err(|source| io_error(&path, source))?;
+        let Ok(summary) = serde_json::from_slice::<ReceiptSummary>(&bytes) else {
+            continue;
+        };
+        if summary.status != ReceiptStatus::InProgress
+            || summary.repo_root != repo_root.to_string_lossy()
         {
-            open.push(path);
+            continue;
         }
+        read_receipt(&path).map_err(|error| {
+            ReceiptError::Invalid(format!(
+                "unfinished receipt `{}` cannot be resumed: {error}",
+                path.display()
+            ))
+        })?;
+        open.push(path);
     }
     match open.len() {
         0 => Ok(None),
