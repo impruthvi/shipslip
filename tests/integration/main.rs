@@ -11,10 +11,10 @@ use std::time::Duration;
 use shipslip::receipt::{ReceiptJournal, ReceiptStatus};
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{
-    attach, break_lock, bring_app_up, cancel, execute, execute_recorded, prepare,
+    attach, break_lock, bring_app_up, cancel, execute, execute_recorded, lock_status, prepare,
     prepare_with_plan, AbortReason, BlockReason, BreakLockError, BringUpError, Confirmation,
     DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle, MaintenancePhase, PrepareError,
-    RunPlan, StepStatus, StopReason,
+    RunPlan, SmokeResult, StepStatus, StopReason, WatchStatus,
 };
 use tokio::sync::mpsc;
 
@@ -1179,4 +1179,165 @@ async fn from_step_starts_at_the_selected_recipe_step() {
         events.last(),
         Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
     );
+}
+
+#[tokio::test]
+async fn log_watch_reports_only_errors_written_during_the_deploy() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    server.exec(
+        &format!(
+            "mkdir -p {path}/storage/logs && printf '%s\\n' \
+             '[2026-09-30 10:00:00] production.ERROR: OldException: already broken' \
+             '[2026-09-30 11:00:00] production.ERROR: OtherException: also old' \
+             > {path}/storage/logs/laravel.log"
+        ),
+        "",
+    );
+    let step = format!(
+        "printf '%s\\n' '[2026-10-01 10:00:00] production.ERROR: NewException: broke at \
+         {path}/app/Http/Kernel.php:12' >> storage/logs/laravel.log"
+    );
+    let t = DeployTarget {
+        watch_log: true,
+        ..target(&path, &[&step])
+    };
+
+    let (events, running) =
+        deploy_until(ssh, t, |e| matches!(e, DeployEvent::NewLogError { .. })).await;
+    // The watch would otherwise continue for its full post-deploy window.
+    running.handle.cancel_watch();
+    let events = running.rest(events).await;
+
+    let new_errors: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            DeployEvent::NewLogError {
+                message, file_line, ..
+            } => Some((message.as_str(), file_line.as_deref())),
+            _ => None,
+        })
+        .collect();
+    let kernel = format!("{path}/app/Http/Kernel.php:12");
+    assert_eq!(
+        new_errors,
+        [(
+            &*format!("NewException: broke at {kernel}"),
+            Some(kernel.as_str())
+        )],
+        "{events:#?}"
+    );
+    let watch = events
+        .iter()
+        .find_map(|e| match e {
+            DeployEvent::WatchFinished(result) => Some(result),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(watch.status, WatchStatus::Cancelled);
+    assert_eq!(watch.baseline_signatures, 2);
+    assert_eq!(watch.new_errors.len(), 1);
+    assert_eq!(watch.new_errors[0].exception, "NewException");
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+}
+
+/// Answers one HTTP request with 204 on a local port.
+fn http_204() -> String {
+    use std::io::{Read, Write};
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/health", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0; 1024];
+        let _ = stream.read(&mut request);
+        let _ = stream.write_all(
+            b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        );
+    });
+    url
+}
+
+#[tokio::test]
+async fn smoke_check_runs_after_a_successful_deploy() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let smoke = |events: &[DeployEvent]| {
+        events
+            .iter()
+            .find_map(|e| match e {
+                DeployEvent::SmokeFinished(result) => Some(result.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+
+    let passing = DeployTarget {
+        smoke_url: Some(http_204()),
+        ..target(&server.app("app"), &["true"])
+    };
+    let events = deploy(ssh.clone(), passing).await;
+    assert!(
+        matches!(smoke(&events), SmokeResult::Passed { status: 204, .. }),
+        "{events:#?}"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+
+    let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/health", closed.local_addr().unwrap());
+    drop(closed);
+    let failing = DeployTarget {
+        smoke_url: Some(url),
+        ..target(&server.app("other"), &["true"])
+    };
+    let events = deploy(ssh, failing).await;
+    // No HTTP response: no status, and the deploy itself still succeeded.
+    assert!(
+        matches!(smoke(&events), SmokeResult::Failed { status: None, .. }),
+        "{events:#?}"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+}
+
+#[tokio::test]
+async fn stale_lock_recovery_shows_the_holder_then_breaks_and_brings_the_app_up() {
+    let server = Server::start().await;
+    let ssh = server.connect().await;
+    let path = server.app("app");
+    let t = target(&path, &[]);
+    assert_eq!(lock_status(&t, &ssh).await, Ok(None));
+
+    // An abandoned run: it holds the lock, left the app down and stopped heartbeating.
+    let held = prepare(t.clone(), &ssh).await.unwrap();
+    server.exec(&format!("cd {path} && php artisan down"), "");
+    server.exec(&format!("echo 0 > {path}/.git/shipslip.lock/heartbeat"), "");
+
+    let info = lock_status(&t, &ssh).await.unwrap().unwrap();
+    assert!(info.is_stale());
+    assert_eq!(info.owner.unwrap().run_id, held.run_id());
+    assert!(matches!(
+        bring_app_up(&t, &ssh).await,
+        Err(BringUpError::LockHeld(_))
+    ));
+
+    assert_eq!(break_lock(&t, &ssh, "staging").await, Ok(()));
+    assert_eq!(lock_status(&t, &ssh).await, Ok(None));
+    assert_eq!(bring_app_up(&t, &ssh).await.unwrap(), ["up"]);
+    assert_eq!(
+        server.exec(
+            &format!("test -e {path}/storage/framework/down && echo down || echo up"),
+            ""
+        ),
+        "up"
+    );
+    assert!(!server.lock_exists(&path));
 }
