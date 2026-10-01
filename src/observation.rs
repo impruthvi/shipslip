@@ -26,6 +26,7 @@ const MAX_GROUPS: usize = 500;
 const MAX_VARIANTS: usize = 50;
 const POLL_EVERY: Duration = Duration::from_millis(500);
 const MAX_HISTORY_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_HISTORY: usize = 5_000;
 static HISTORY_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,8 +133,8 @@ impl LogObserver {
         let spec = LogSpec::from_target(target);
         let (history, history_error) = match history_path.as_deref().map(read_history) {
             Some(Ok(history)) => (history, None),
-            Some(Err(error)) => (HashSet::new(), Some(error)),
-            None => (HashSet::new(), None),
+            Some(Err(error)) => (Vec::new(), Some(error)),
+            None => (Vec::new(), None),
         };
         let mut state = LogState::new(history);
         if let Some(error) = history_error {
@@ -357,6 +358,8 @@ async fn fetch<T: Transport>(
 struct LogState {
     result: WatchResult,
     known: HashSet<String>,
+    /// Signature history, most recently seen first.
+    history: Vec<String>,
     baseline: HashSet<String>,
     seen: HashSet<String>,
     group_index: HashMap<(String, Option<String>), usize>,
@@ -373,6 +376,8 @@ struct LogState {
     saw_file: bool,
     partial: bool,
     unavailable: bool,
+    /// The last read stopped before the end of the file.
+    behind: bool,
     started: Instant,
 }
 
@@ -384,12 +389,14 @@ impl LogState {
         }
     }
 
-    fn new(history: HashSet<String>) -> Self {
+    fn new(history: Vec<String>) -> Self {
         let mut result = WatchResult::not_run();
-        result.history_signatures = history.len();
+        let known: HashSet<String> = history.iter().cloned().collect();
+        result.history_signatures = known.len();
         Self {
             result,
-            known: history,
+            known,
+            history,
             baseline: HashSet::new(),
             seen: HashSet::new(),
             group_index: HashMap::new(),
@@ -406,6 +413,7 @@ impl LogState {
             saw_file: false,
             partial: false,
             unavailable: false,
+            behind: false,
             started: Instant::now(),
         }
     }
@@ -559,11 +567,15 @@ impl LogState {
         mut self,
         requested: WatchStatus,
         events: &mpsc::UnboundedSender<DeployEvent>,
-    ) -> (WatchResult, HashSet<String>) {
+    ) -> (WatchResult, Vec<String>) {
         if requested == WatchStatus::NotRun {
-            return (WatchResult::not_run(), HashSet::new());
+            return (WatchResult::not_run(), Vec::new());
         }
         self.flush(LogPhase::After, false, events);
+        if self.behind {
+            self.partial = true;
+            self.warn("Log grew faster than it could be read; later entries were not checked");
+        }
         self.result.duration_ms = self.started.elapsed().as_millis() as u64;
         self.result.baseline_signatures = self.baseline.len();
         self.result.status = match requested {
@@ -589,10 +601,22 @@ impl LogState {
         {
             self.warn("Log format not recognized; errors may be missed");
         }
-        let mut signatures = self.known;
-        signatures.extend(self.seen);
-        (self.result, signatures)
+        let current = self.seen.into_iter().chain(self.baseline);
+        (self.result, recent_first(current, self.history))
     }
+}
+
+/// Signatures seen in this run, then older history, without duplicates.
+fn recent_first(current: impl IntoIterator<Item = String>, previous: Vec<String>) -> Vec<String> {
+    let mut current: Vec<String> = current.into_iter().collect();
+    current.sort();
+    let mut added = HashSet::new();
+    current
+        .into_iter()
+        .chain(previous)
+        .filter(|signature| added.insert(signature.clone()))
+        .take(MAX_HISTORY)
+        .collect()
 }
 
 #[derive(Clone)]
@@ -625,7 +649,11 @@ fn patterns() -> &'static (Regex, Regex, Regex, Regex, Regex, Regex) {
     RE.get_or_init(|| {
         (
             Regex::new(r"(?i)([A-Za-z_\\][A-Za-z0-9_\\]*(?:Exception|Error))").unwrap(),
-            Regex::new(r"([A-Za-z0-9_./-]*app/[A-Za-z0-9_./-]+\.php):(\d+)").unwrap(),
+            // `app/` must be a whole path segment: `/srv/my-app/vendor/...` is not an app file.
+            Regex::new(
+                r"(?:^|[^A-Za-z0-9_.-])((?:/?[A-Za-z0-9_.-]+/)*?app/[A-Za-z0-9_./-]+\.php)(?::(\d+)|\((\d+)\))",
+            )
+            .unwrap(),
             Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}").unwrap(),
             Regex::new(r"0x[0-9a-fA-F]+|\b\d+\b").unwrap(),
             Regex::new(r"'[^']{65,}'|'[^']*\s[^']*'").unwrap(),
@@ -640,11 +668,17 @@ fn signature(level: &str, entry: &str) -> (String, String, Option<String>, Optio
         .find(entry)
         .map(|m| clip_utf8(m.as_str(), 256))
         .unwrap_or_else(|| "Error".into());
-    let frame = frame_re.captures(entry);
+    let frame = frame_re
+        .captures_iter(entry)
+        .find(|m| !m[1].contains("vendor/"));
     let file = frame.as_ref().map(|m| clip_utf8(&m[1], 512));
-    let display = frame
-        .as_ref()
-        .map(|m| format!("{}:{}", clip_utf8(&m[1], 512), &m[2]));
+    let display = frame.as_ref().map(|m| {
+        let line = m
+            .get(2)
+            .or_else(|| m.get(3))
+            .map_or("", |line| line.as_str());
+        format!("{}:{line}", clip_utf8(&m[1], 512))
+    });
     let first_line = clip_utf8(entry.lines().next().unwrap_or(entry), 2048);
     let normalized = single_quote_re.replace_all(&first_line, "<quoted>");
     let normalized = double_quote_re.replace_all(&normalized, "<quoted>");
@@ -713,7 +747,7 @@ async fn watch_loop<T: Transport>(
         } else {
             false
         };
-        if !catch_up {
+        if !catch_up && !state.behind {
             tokio::select! {
                 _ = tokio::time::sleep(POLL_EVERY) => {},
                 changed = control.changed() => {
@@ -755,6 +789,7 @@ async fn watch_loop<T: Transport>(
                 }
                 state.saw_file = true;
                 state.unavailable = false;
+                state.behind = !recovering_baseline && start + (bytes.len() as u64) < size;
                 state.result.log_path = Some(path.clone());
                 state.cursor = Cursor {
                     path,
@@ -777,10 +812,15 @@ async fn watch_loop<T: Transport>(
                     state.flush(phase, false, &events);
                 }
             }
-            Fetch::Missing => {}
+            // The log directory was readable, so a file created later is new.
+            Fetch::Missing => {
+                state.unavailable = false;
+                state.behind = false;
+            }
             Fetch::Unavailable(reason) => {
                 state.partial = true;
                 state.unavailable = true;
+                state.behind = false;
                 state.warn(reason);
                 let _ = transport.reconnect().await;
             }
@@ -812,7 +852,7 @@ fn finalize_watch(
     result
 }
 
-fn read_history(path: &Path) -> Result<HashSet<String>, std::io::Error> {
+fn read_history(path: &Path) -> Result<Vec<String>, std::io::Error> {
     match std::fs::File::open(path) {
         Ok(mut file) => {
             use std::io::Read;
@@ -827,14 +867,14 @@ fn read_history(path: &Path) -> Result<HashSet<String>, std::io::Error> {
                 return Err(std::io::Error::other("signature history is too large"));
             }
             let values: Vec<String> = serde_json::from_slice(&bytes)?;
-            Ok(values.into_iter().take(5_000).collect())
+            Ok(values.into_iter().take(MAX_HISTORY).collect())
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(HashSet::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(error),
     }
 }
 
-fn write_history(path: &Path, signatures: &HashSet<String>) -> Result<(), std::io::Error> {
+fn write_history(path: &Path, signatures: &[String]) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]
@@ -845,10 +885,7 @@ fn write_history(path: &Path, signatures: &HashSet<String>) -> Result<(), std::i
             }
         }
     }
-    let mut values: Vec<_> = signatures.iter().collect();
-    values.sort();
-    values.truncate(5_000);
-    let bytes = serde_json::to_vec(&values)?;
+    let bytes = serde_json::to_vec(signatures)?;
     let temp = path.with_extension(format!(
         "tmp.{}.{}",
         std::process::id(),
@@ -881,6 +918,8 @@ pub async fn smoke_check(url: Option<&str>) -> SmokeResult {
     };
     let command = tokio::process::Command::new("curl")
         .args([
+            // Must come first: ignore ~/.curlrc, which could turn off TLS checks.
+            "--disable",
             "--silent",
             "--show-error",
             "--location",
@@ -903,19 +942,7 @@ pub async fn smoke_check(url: Option<&str>) -> SmokeResult {
         .output();
     match tokio::time::timeout(Duration::from_secs(11), command).await {
         Ok(Ok(output)) => {
-            let text = String::from_utf8_lossy(&output.stdout);
-            let parts: Vec<_> = text
-                .trim()
-                .strip_prefix("shipslip:")
-                .unwrap_or("")
-                .split_whitespace()
-                .collect();
-            let status = parts.first().and_then(|code| code.parse::<u16>().ok());
-            let latency_ms = parts
-                .get(1)
-                .and_then(|seconds| seconds.parse::<f64>().ok())
-                .map(|seconds| (seconds * 1000.0) as u64)
-                .unwrap_or(0);
+            let (status, latency_ms) = parse_write_out(&String::from_utf8_lossy(&output.stdout));
             if output.status.success() && status.is_some_and(|code| (200..300).contains(&code)) {
                 SmokeResult::Passed {
                     status: status.unwrap(),
@@ -923,7 +950,7 @@ pub async fn smoke_check(url: Option<&str>) -> SmokeResult {
                 }
             } else {
                 let reason = if output.status.success() {
-                    format!("HTTP {}", status.unwrap_or(0))
+                    status.map_or_else(|| "no HTTP response".into(), |code| format!("HTTP {code}"))
                 } else {
                     String::from_utf8_lossy(&output.stderr).trim().to_string()
                 };
@@ -941,21 +968,69 @@ pub async fn smoke_check(url: Option<&str>) -> SmokeResult {
     }
 }
 
+/// Parses curl's `shipslip:%{http_code} %{time_total}` output.
+fn parse_write_out(text: &str) -> (Option<u16>, u64) {
+    let parts: Vec<_> = text
+        .trim()
+        .strip_prefix("shipslip:")
+        .unwrap_or("")
+        .split_whitespace()
+        .collect();
+    // curl reports 000 when no HTTP response arrived.
+    let status = parts
+        .first()
+        .and_then(|code| code.parse::<u16>().ok())
+        .filter(|code| *code != 0);
+    let latency_ms = parts
+        .get(1)
+        .and_then(|seconds| seconds.parse::<f64>().ok())
+        .map(|seconds| (seconds * 1000.0) as u64)
+        .unwrap_or(0);
+    (status, latency_ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transport::TransportError;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::Mutex;
 
-    #[derive(Clone, Copy)]
-    enum FirstRead {
-        Unavailable,
+    const OLD_ERROR: &[u8] = b"[2026-09-01 00:00:00] production.ERROR: OldException: old failure\n";
+    const NEW_ERROR: &[u8] = b"[2026-09-01 00:00:00] production.ERROR: NewException: new failure\n";
+
+    #[derive(Clone)]
+    enum Read {
+        Lost,
         Missing,
+        File {
+            size: usize,
+            start: usize,
+            bytes: &'static [u8],
+        },
     }
 
+    /// Answers log reads in order, repeating the last answer.
     struct LogTransport {
-        first_read: FirstRead,
-        reads: AtomicUsize,
+        reads: Mutex<Vec<Read>>,
+        scripts: Mutex<Vec<String>>,
+    }
+
+    impl LogTransport {
+        fn new(reads: Vec<Read>) -> Arc<Self> {
+            Arc::new(Self {
+                reads: Mutex::new(reads),
+                scripts: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn baseline_reads(&self) -> Vec<bool> {
+            self.scripts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|script| script.contains("if [ 1 -eq 1 ]"))
+                .collect()
+        }
     }
 
     impl Transport for LogTransport {
@@ -964,28 +1039,33 @@ mod tests {
             script: &str,
             output: mpsc::UnboundedSender<String>,
         ) -> Result<i32, TransportError> {
-            let read = self.reads.fetch_add(1, Ordering::SeqCst);
-            let baseline = script.contains("if [ 1 -eq 1 ]");
-            if read == 0 {
-                assert!(baseline);
-                return match self.first_read {
-                    FirstRead::Unavailable => {
-                        Err(TransportError::ConnectionLost("baseline lost".into()))
-                    }
-                    FirstRead::Missing => {
-                        let _ = output.send("@missing".into());
-                        Ok(0)
-                    }
-                };
+            self.scripts.lock().unwrap().push(script.into());
+            let read = {
+                let mut reads = self.reads.lock().unwrap();
+                if reads.len() > 1 {
+                    reads.remove(0)
+                } else {
+                    reads[0].clone()
+                }
+            };
+            match read {
+                Read::Lost => Err(TransportError::ConnectionLost("lost".into())),
+                Read::Missing => {
+                    let _ = output.send("@missing".into());
+                    Ok(0)
+                }
+                Read::File { size, start, bytes } => {
+                    let engine = base64::engine::general_purpose::STANDARD;
+                    let _ = output.send(format!(
+                        "@file 42 {size} {start} {} {}",
+                        bytes.len(),
+                        u8::from(start == 0)
+                    ));
+                    let _ = output.send(engine.encode("storage/logs/laravel.log"));
+                    let _ = output.send(engine.encode(bytes));
+                    Ok(0)
+                }
             }
-            assert_eq!(read, 1);
-            assert_eq!(baseline, matches!(self.first_read, FirstRead::Unavailable));
-            let bytes = b"[2026-09-01 00:00:00] production.ERROR: OldException: old failure\n";
-            let engine = base64::engine::general_purpose::STANDARD;
-            let _ = output.send(format!("@file 42 {} 0 {} 0", bytes.len(), bytes.len()));
-            let _ = output.send(engine.encode("storage/logs/laravel.log"));
-            let _ = output.send(engine.encode(bytes));
-            Ok(0)
         }
 
         async fn reconnect(&self) -> Result<(), TransportError> {
@@ -993,11 +1073,10 @@ mod tests {
         }
     }
 
-    async fn observe_after(first_read: FirstRead) -> (WatchResult, Vec<DeployEvent>, usize) {
-        let transport = Arc::new(LogTransport {
-            first_read,
-            reads: AtomicUsize::new(0),
-        });
+    async fn observe(
+        transport: &Arc<LogTransport>,
+        post_window: Duration,
+    ) -> (WatchResult, Vec<DeployEvent>) {
         let target = DeployTarget {
             env: "staging".into(),
             production: false,
@@ -1021,37 +1100,132 @@ mod tests {
         )
         .await;
         observer.begin();
-        let result = observer.finish(WatchStatus::Complete, Duration::ZERO).await;
+        let result = observer.finish(WatchStatus::Complete, post_window).await;
         let mut emitted = Vec::new();
         while let Ok(event) = receiver.try_recv() {
             emitted.push(event);
         }
-        (result, emitted, transport.reads.load(Ordering::SeqCst))
+        (result, emitted)
+    }
+
+    fn new_error_events(events: &[DeployEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| matches!(event, DeployEvent::NewLogError { .. }))
+            .count()
+    }
+
+    fn whole(bytes: &'static [u8]) -> Read {
+        Read::File {
+            size: bytes.len(),
+            start: 0,
+            bytes,
+        }
     }
 
     #[tokio::test]
     async fn failed_baseline_recovers_as_partial_without_reporting_old_errors() {
-        let (result, events, reads) = observe_after(FirstRead::Unavailable).await;
+        let transport = LogTransport::new(vec![Read::Lost, whole(OLD_ERROR)]);
+        let (result, events) = observe(&transport, Duration::ZERO).await;
 
-        assert_eq!(reads, 2);
+        assert_eq!(transport.baseline_reads(), [true, true]);
         assert_eq!(result.status, WatchStatus::Partial);
         assert_eq!(result.baseline_signatures, 1);
         assert!(result.new_errors.is_empty());
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, DeployEvent::NewLogError { .. })));
+        assert_eq!(new_error_events(&events), 0);
     }
 
     #[tokio::test]
     async fn file_created_after_missing_baseline_is_observed_as_new() {
-        let (result, events, reads) = observe_after(FirstRead::Missing).await;
+        let transport = LogTransport::new(vec![Read::Missing, whole(OLD_ERROR)]);
+        let (result, events) = observe(&transport, Duration::ZERO).await;
 
-        assert_eq!(reads, 2);
+        assert_eq!(transport.baseline_reads(), [true, false]);
         assert_eq!(result.status, WatchStatus::Complete);
         assert_eq!(result.baseline_signatures, 0);
         assert_eq!(result.new_errors.len(), 1);
-        assert!(events
+        assert_eq!(new_error_events(&events), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn file_created_after_failed_baseline_and_missing_read_is_new() {
+        let caught_up = Read::File {
+            size: NEW_ERROR.len(),
+            start: NEW_ERROR.len(),
+            bytes: b"",
+        };
+        let transport =
+            LogTransport::new(vec![Read::Lost, Read::Missing, whole(NEW_ERROR), caught_up]);
+        let (result, events) = observe(&transport, Duration::from_millis(100)).await;
+
+        assert_eq!(&transport.baseline_reads()[..3], [true, true, false]);
+        assert_eq!(result.status, WatchStatus::Partial);
+        assert_eq!(result.new_errors.len(), 1);
+        assert_eq!(result.new_errors[0].exception, "NewException");
+        assert_eq!(new_error_events(&events), 1);
+    }
+
+    #[tokio::test]
+    async fn watch_that_falls_behind_the_log_is_partial() {
+        let behind = Read::File {
+            size: 10 * NEW_ERROR.len(),
+            start: 0,
+            bytes: NEW_ERROR,
+        };
+        let transport = LogTransport::new(vec![Read::Missing, behind]);
+        let (result, _) = observe(&transport, Duration::ZERO).await;
+
+        assert_eq!(result.status, WatchStatus::Partial);
+        assert!(result
+            .warnings
             .iter()
-            .any(|event| matches!(event, DeployEvent::NewLogError { .. })));
+            .any(|warning| warning.contains("faster than it could be read")));
+    }
+
+    #[test]
+    fn app_file_is_a_whole_path_segment_outside_vendor() {
+        let file = |entry: &str| signature("ERROR", entry).2;
+        assert_eq!(
+            file("RuntimeException at /var/www/html/app/Http/Kernel.php:10"),
+            Some("/var/www/html/app/Http/Kernel.php".into())
+        );
+        assert_eq!(
+            file(
+                "QueryException at /srv/my-app/vendor/laravel/framework/src/Connection.php:822\n\
+                 #0 /srv/my-app/vendor/laravel/framework/src/Builder.php(25): run()\n\
+                 #1 /srv/my-app/app/Http/Controllers/UserController.php(42): get()"
+            ),
+            Some("/srv/my-app/app/Http/Controllers/UserController.php".into())
+        );
+        assert_eq!(
+            file("RuntimeException at /var/www/html/vendor/acme/pkg/app/Thing.php:5"),
+            None
+        );
+        assert_eq!(
+            signature(
+                "ERROR",
+                "RuntimeException at /srv/app/app/Models/User.php(7): x"
+            )
+            .3,
+            Some("/srv/app/app/Models/User.php:7".into())
+        );
+    }
+
+    #[test]
+    fn history_keeps_recent_signatures_first() {
+        let previous: Vec<String> = (0..MAX_HISTORY).map(|i| format!("a-{i:04}")).collect();
+        let kept = recent_first(["z-recent".to_string(), "a-0003".to_string()], previous);
+
+        assert_eq!(kept.len(), MAX_HISTORY);
+        assert_eq!(&kept[..2], ["a-0003", "z-recent"]);
+        assert_eq!(kept.iter().filter(|s| *s == "a-0003").count(), 1);
+        assert!(kept.contains(&"a-4997".to_string()));
+        assert!(!kept.contains(&"a-4999".to_string()));
+    }
+
+    #[test]
+    fn curl_status_000_is_no_status() {
+        assert_eq!(parse_write_out("shipslip:000 0.012"), (None, 12));
+        assert_eq!(parse_write_out("shipslip:204 0.5"), (Some(204), 500));
     }
 }
