@@ -13,7 +13,7 @@
 //! entry at or after the window start is seen, every later entry counts, which
 //! keeps the repeated hour of a DST fall-back.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Read as _;
 
 use base64::Engine as _;
@@ -27,14 +27,18 @@ use crate::script::shell_quote;
 use crate::transport::{Transport, TransportError};
 use crate::DeployTarget;
 
+mod anchor;
+mod baseline;
 mod discovery;
-use discovery::discover;
 
 const DEFAULT_WINDOW: u64 = 24 * 3600;
 const MAX_WINDOW: u64 = 30 * 24 * 3600;
 const CHANNEL_BYTES: u64 = 4 * 1024 * 1024;
 const TOTAL_BYTES: u64 = 12 * 1024 * 1024;
 const FLOOR_BYTES: u64 = 256 * 1024;
+const BASELINE_CHANNEL_BYTES: u64 = 2 * 1024 * 1024;
+const BASELINE_TOTAL_BYTES: u64 = 6 * 1024 * 1024;
+const BASELINE_FLOOR_BYTES: u64 = 128 * 1024;
 const MESSAGE_BYTES: usize = 512;
 const DEFAULT_ROWS: usize = 20;
 const ID_LEN: usize = 5;
@@ -227,6 +231,20 @@ pub struct Channel {
     pub last_write: Option<String>,
     pub format: Format,
     pub omitted_files: usize,
+    pub baseline: Baseline,
+}
+
+/// The bounded comparison immediately before this snapshot's window.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Baseline {
+    pub budget: u64,
+    pub bytes_read: u64,
+    pub available: bool,
+    pub complete: bool,
+    pub covered_from: Option<String>,
+    pub covered_to: Option<String>,
+    pub files: Vec<String>,
+    pub format: Option<Format>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +331,8 @@ pub struct Snapshot {
     pub entries: Vec<Entry>,
     /// Bounded file samples whose format was not fully recognized.
     pub raw_blocks: Vec<RawBlock>,
+    pub baseline_entries: Vec<Entry>,
+    pub baseline_enabled: bool,
     /// The zone's UTC offset at the window start differs from now.
     pub clock_changed: bool,
     pub warnings: Vec<String>,
@@ -343,7 +363,7 @@ pub async fn snapshot<T: Transport>(
     )
     .await;
     let code = code?;
-    let probe = parse_probe(code, &lines)?;
+    let mut probe = parse_probe(code, &lines)?;
     let time = match probe.time {
         ProbeTime::ZoneMissing => return Err(LogsError::ZoneMissing(zone)),
         ProbeTime::BadSince => {
@@ -354,10 +374,47 @@ pub async fn snapshot<T: Transport>(
         }
         ProbeTime::Known(time) => time,
     };
-    if time.now.saturating_sub(time.start) > MAX_WINDOW {
+    if request.since.is_some() && time.now.saturating_sub(time.start) > MAX_WINDOW {
         return Err(LogsError::TooOld);
     }
-    let (sources, mut warnings) = discover(target, &probe.files, &time.start_date);
+    let choice = if request.since.is_none() {
+        probe.anchor.choose(time)
+    } else {
+        anchor::Choice {
+            label: since.label(),
+            time,
+            marker: None,
+            warnings: Vec::new(),
+        }
+    };
+    let time = choice.time;
+    for file in &mut probe.files {
+        if let Some(recorded) = choice.marker.as_ref().and_then(|marker| {
+            marker
+                .files
+                .iter()
+                .find(|recorded| recorded.path == file.path)
+        }) {
+            if recorded.inode == file.inode
+                && file.size >= recorded.size
+                && probe
+                    .anchor
+                    .splits
+                    .get(&file.path)
+                    .is_some_and(|(size, sum)| *size == recorded.size && sum == &recorded.checksum)
+            {
+                file.anchor_check = Some((recorded.size, recorded.checksum.clone()));
+            }
+        }
+    }
+    let recorded: Vec<_> = choice
+        .marker
+        .as_ref()
+        .map(|marker| marker.files.iter().map(|file| file.path.clone()).collect())
+        .unwrap_or_default();
+    let (sources, mut warnings) =
+        discovery::discover_for_anchor(target, &probe.files, &time.start_date, &recorded);
+    warnings.extend(choice.warnings);
     for file in sources.iter().flat_map(|source| &source.files) {
         if !file.inside && !request.allow_outside {
             return Err(LogsError::Outside {
@@ -369,39 +426,59 @@ pub async fn snapshot<T: Transport>(
     if !probe.files.iter().any(|file| file.mtime >= time.start) {
         warnings.push(format!("No file in storage/logs was written since {}. If LOG_CHANNEL is stderr, syslog, or a service, slip can't see it.", time.start_local));
     }
-    let needs: Vec<u64> = sources
+    let cuts: Vec<_> = sources
         .iter()
         .map(|source| {
-            source
-                .files
-                .iter()
-                .fold(0u64, |sum, file| sum.saturating_add(file.size))
+            baseline::cuts(
+                &source.files,
+                &time.start_date,
+                choice.marker.as_ref(),
+                &probe.anchor,
+                &mut warnings,
+            )
         })
         .collect();
+    let needs: Vec<_> = sources
+        .iter()
+        .zip(&cuts)
+        .map(|(source, cuts)| baseline::needs(&source.files, cuts))
+        .collect();
     let budgets = water_fill(
-        &needs,
+        &needs.iter().map(|need| need.0).collect::<Vec<_>>(),
         request.max_bytes.unwrap_or(TOTAL_BYTES),
         request.max_bytes.unwrap_or(CHANNEL_BYTES),
         FLOOR_BYTES,
     );
+    let base_budgets = water_fill(
+        &needs.iter().map(|need| need.1).collect::<Vec<_>>(),
+        BASELINE_TOTAL_BYTES,
+        BASELINE_CHANNEL_BYTES,
+        BASELINE_FLOOR_BYTES,
+    );
     let plans: Vec<_> = sources
         .iter()
+        .zip(cuts)
         .zip(&budgets)
-        .map(|(source, budget)| plan_reads(&source.files, *budget))
+        .zip(&base_budgets)
+        .map(|(((source, cuts), window), baseline)| {
+            baseline::plan(&source.files, cuts, *window, *baseline, &time.start_date)
+        })
         .collect();
-    let plan: Vec<_> = plans.iter().flatten().cloned().collect();
+    let plan: Vec<_> = plans
+        .iter()
+        .flat_map(|plan| plan.window.iter().chain(&plan.baseline))
+        .cloned()
+        .collect();
     let mut snapshot = Snapshot {
         env: target.env.clone(),
         zone,
-        since_label: request
-            .since
-            .as_ref()
-            .map(Since::label)
-            .unwrap_or_else(|| "since 24h (default)".into()),
+        since_label: choice.label,
         start: time.start_local.clone(),
         channels: Vec::new(),
         entries: Vec::new(),
         raw_blocks: Vec::new(),
+        baseline_entries: Vec::new(),
+        baseline_enabled: true,
         clock_changed: time.offset_start != time.offset_now,
         warnings,
         bytes_transferred: 0,
@@ -422,7 +499,13 @@ pub async fn snapshot<T: Transport>(
     };
     let mut reads = reads.into_iter();
     let mut newest_entry: Option<(String, &ProbeFile)> = None;
-    for (index, ((source, budget), plan)) in sources.iter().zip(budgets).zip(plans).enumerate() {
+    for (index, (((source, budget), base_budget), plan)) in sources
+        .iter()
+        .zip(budgets)
+        .zip(base_budgets)
+        .zip(plans)
+        .enumerate()
+    {
         let mut channel = Channel {
             name: source.name.clone(),
             key: source.key.clone(),
@@ -431,59 +514,188 @@ pub async fn snapshot<T: Transport>(
             files: source.files.iter().map(|file| file.path.clone()).collect(),
             budget,
             bytes_read: 0,
-            complete: source.omitted_files == 0 && plan.len() == source.files.len(),
+            complete: source.omitted_window_files == 0 && plan.window.len() == plan.expected_window,
             covered_from: None,
             changed: Vec::new(),
             size: source.size,
             last_write: source.last_write.clone(),
             format: Format::NotRead,
             omitted_files: source.omitted_files,
+            baseline: Baseline {
+                budget: base_budget,
+                complete: source.omitted_files == 0,
+                ..Baseline::default()
+            },
         };
-        let data: Vec<_> = reads.by_ref().take(plan.len()).collect();
+        let mut chunks = Vec::new();
         let mut stats = FormatStats::default();
-        for (read, data) in plan.iter().zip(data).rev() {
+        let mut window_successful = false;
+        let data: Vec<_> = reads
+            .by_ref()
+            .take(plan.window.len() + plan.baseline.len())
+            .collect();
+        for (slot, (read, data)) in plan
+            .window
+            .iter()
+            .chain(&plan.baseline)
+            .zip(data)
+            .enumerate()
+        {
+            let window = slot < plan.window.len();
             let Some(data) = data else {
-                channel.changed.push(read.file.path.clone());
-                channel.complete = false;
+                if !channel.changed.contains(&read.file.path) {
+                    channel.changed.push(read.file.path.clone());
+                }
+                if window {
+                    channel.complete = false;
+                }
+                channel.baseline.complete = false;
                 continue;
             };
             snapshot.bytes_transferred += data.transferred;
-            channel.bytes_read += data.bytes.len() as u64;
-            let sample = FormatStats::of(&data.bytes);
-            if sample.format().has_unknown_content() {
-                snapshot.raw_blocks.push(RawBlock {
-                    channel: index,
-                    file: read.file.path.clone(),
-                    text: String::from_utf8_lossy(&data.bytes).into_owned(),
-                });
+            let mut entries = parse_entries(&data.bytes, read.start, index, &read.file.path);
+            let split = if let Some(cut) = plan.cuts.get(&read.file.path) {
+                entries
+                    .iter()
+                    .position(|entry| entry.offset >= *cut)
+                    .unwrap_or(entries.len())
+            } else {
+                entries
+                    .iter()
+                    .position(|entry| {
+                        entry
+                            .time
+                            .as_deref()
+                            .is_some_and(|at| at >= time.start_local.as_str())
+                    })
+                    .unwrap_or(entries.len())
+            };
+            let before_end = plan
+                .cuts
+                .get(&read.file.path)
+                .map(|cut| cut.saturating_sub(read.start))
+                .unwrap_or_else(|| {
+                    entries
+                        .get(split)
+                        .map(|entry| entry.offset.saturating_sub(read.start))
+                        .unwrap_or(data.bytes.len() as u64)
+                })
+                .min(data.bytes.len() as u64) as usize;
+            if before_end > 0 {
+                chunks.push((read.file, read.start, data.bytes[..before_end].to_vec()));
             }
-            stats.add(sample);
-            let entries = parse_entries(&data.bytes, read.start, index, &read.file.path);
-            if newest_entry
-                .as_ref()
-                .is_none_or(|(_, file)| read.file.mtime >= file.mtime)
-            {
-                if let Some(entry_time) = entries.iter().rev().find_map(|entry| entry.time.clone())
-                {
-                    newest_entry = Some((entry_time, read.file));
+            if window {
+                window_successful = true;
+                channel.bytes_read += data.bytes.len() as u64;
+                let sample = FormatStats::of(&data.bytes);
+                if sample.format().has_unknown_content() {
+                    snapshot.raw_blocks.push(RawBlock {
+                        channel: index,
+                        file: read.file.path.clone(),
+                        text: String::from_utf8_lossy(&data.bytes).into_owned(),
+                    });
                 }
-            }
-            if read.start > 0 {
-                match entries.first().and_then(|entry| entry.time.as_deref()) {
-                    Some(first) if first < time.start_local.as_str() => {}
-                    first => {
+                stats.add(sample);
+                if newest_entry
+                    .as_ref()
+                    .is_none_or(|(_, file)| read.file.mtime >= file.mtime)
+                {
+                    if let Some(entry_time) =
+                        entries.iter().rev().find_map(|entry| entry.time.clone())
+                    {
+                        newest_entry = Some((entry_time, read.file));
+                    }
+                }
+                if read.start > 0 {
+                    let complete = match plan.cuts.get(&read.file.path) {
+                        Some(cut) => read.start <= *cut,
+                        None => entries
+                            .first()
+                            .and_then(|entry| entry.time.as_deref())
+                            .is_some_and(|first| first < time.start_local.as_str()),
+                    };
+                    if !complete {
                         channel.complete = false;
-                        channel.covered_from = first.map(str::to_string);
+                        channel.covered_from =
+                            entries.get(split).and_then(|entry| entry.time.clone());
+                    }
+                }
+                snapshot.entries.extend(entries.split_off(split));
+            }
+        }
+        if window_successful {
+            channel.format = stats.format();
+        } else if plan.expected_window == 0 && !source.files.is_empty() {
+            channel.format = Format::Empty;
+        }
+        // Newest pre-anchor chunks first, using file order and offsets rather
+        // than ambiguous wall-clock times during a DST fall-back.
+        chunks.sort_by_key(|(file, start, _)| {
+            (
+                source
+                    .files
+                    .iter()
+                    .position(|candidate| candidate.path == file.path)
+                    .unwrap_or(usize::MAX),
+                std::cmp::Reverse(*start),
+            )
+        });
+        let mut left = base_budget;
+        let mut base_stats = FormatStats::default();
+        for (file, start, bytes) in chunks {
+            if left == 0 {
+                channel.baseline.complete = false;
+                break;
+            }
+            let count = (bytes.len() as u64).min(left) as usize;
+            let at = start + bytes.len() as u64 - count as u64;
+            if count < bytes.len() || at > 0 {
+                channel.baseline.complete = false;
+            }
+            left -= count as u64;
+            base_stats.add(FormatStats::of(&bytes[bytes.len() - count..]));
+            let entries = parse_entries(&bytes[bytes.len() - count..], at, index, &file.path);
+            if !entries.is_empty() {
+                channel.baseline.available = true;
+                channel.baseline.files.push(file.path.clone());
+                for entry in &entries {
+                    if let Some(at) = &entry.time {
+                        if channel
+                            .baseline
+                            .covered_from
+                            .as_ref()
+                            .is_none_or(|first| at < first)
+                        {
+                            channel.baseline.covered_from = Some(at.clone());
+                        }
+                        if channel
+                            .baseline
+                            .covered_to
+                            .as_ref()
+                            .is_none_or(|last| at > last)
+                        {
+                            channel.baseline.covered_to = Some(at.clone());
+                        }
                     }
                 }
             }
-            snapshot
-                .entries
-                .extend(in_window(entries, &time.start_local));
+            channel.baseline.bytes_read += count as u64;
+            snapshot.baseline_entries.extend(entries);
         }
-        if !plan.is_empty() && channel.changed.len() < plan.len() {
-            channel.format = stats.format();
+        if plan
+            .cuts
+            .values()
+            .fold(0u64, |sum, size| sum.saturating_add(*size))
+            > channel.baseline.bytes_read
+        {
+            channel.baseline.complete = false;
         }
+        let format = base_stats.format();
+        if format.has_unknown_content() {
+            channel.baseline.available = false;
+            channel.baseline.complete = false;
+        }
+        channel.baseline.format = Some(format);
         snapshot.channels.push(channel);
     }
     if let Some((entry_time, file)) = newest_entry {
@@ -566,6 +778,7 @@ struct ProbeFile {
     inside: bool,
     /// Hash of up to 256 bytes at the probe-time end, to detect copytruncate.
     checksum: String,
+    anchor_check: Option<(u64, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -589,6 +802,7 @@ enum ProbeTime {
 struct Probe {
     time: ProbeTime,
     files: Vec<ProbeFile>,
+    anchor: anchor::Probe,
 }
 
 #[derive(Default)]
@@ -645,21 +859,14 @@ impl FormatStats {
     }
 }
 
-fn probe_script(
-    app: &str,
-    zone: &str,
-    since: &Since,
+pub(crate) fn marker_candidates(target: &DeployTarget) -> (String, String) {
+    candidate_commands(&ChannelSource::from_target(target), &target.logs)
+}
+
+fn candidate_commands(
     source: &ChannelSource,
-    allow_outside: bool,
     settings: &std::collections::BTreeMap<String, crate::LogChannel>,
-) -> String {
-    let start = match since {
-        Since::Ago(seconds) => format!("start=$((now - {seconds}))"),
-        Since::At(at) => format!(
-            "start=$(TZ=\"$tz\" date -d {} +%s 2>/dev/null) || {{ echo @bad-since; exit 0; }}",
-            shell_quote(at)
-        ),
-    };
+) -> (String, String) {
     let mut files = String::new();
     for (key, settings) in settings {
         if let Some(path) = &settings.path {
@@ -672,7 +879,7 @@ fn probe_script(
     }
     files.push_str(&if source.daily {
         format!(
-            "for f in {}-*.log; do if [ -e \"$f\" ]; then emit \"$f\" {} || exit 1; fi; done",
+            r#"prefix={}; for f in "$prefix"-*.log; do suffix=${{f#"$prefix"-}}; if [[ "$suffix" =~ ^[0-9]{{4}}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])\.log$ ]] && [ -e "$f" ]; then emit "$f" {} || exit 1; fi; done"#,
             shell_quote(&source.path),
             shell_quote(&source.name)
         )
@@ -698,6 +905,25 @@ fn probe_script(
             ));
         }
     }
+    (files, overrides)
+}
+
+fn probe_script(
+    app: &str,
+    zone: &str,
+    since: &Since,
+    source: &ChannelSource,
+    allow_outside: bool,
+    settings: &std::collections::BTreeMap<String, crate::LogChannel>,
+) -> String {
+    let start = match since {
+        Since::Ago(seconds) => format!("start=$((now - {seconds}))"),
+        Since::At(at) => format!(
+            "start=$(TZ=\"$tz\" date -d {} +%s 2>/dev/null) || {{ echo @bad-since; exit 0; }}",
+            shell_quote(at)
+        ),
+    };
+    let (files, overrides) = candidate_commands(source, settings);
     format!(
         r#"cd {app} || {{ echo "@unavailable cannot enter the app path"; exit 0; }}
 for utility in date stat realpath dd sha256sum gzip base64; do
@@ -708,6 +934,7 @@ if [ ! -f "/usr/share/zoneinfo/$tz" ]; then echo @zone-missing; exit 0; fi
 now=$(date +%s)
 {start}
 echo "@time $now $start $(TZ="$tz" date -d "@$start" '+%F %T %F %z') $(TZ="$tz" date +%z)"
+{anchor_script}
 root=$(realpath -e storage/logs 2>/dev/null)
 set -o pipefail
 seen=' '
@@ -736,7 +963,14 @@ emit() {{
   fi
   resolved=$(printf '%s' "$rp" | base64 -w0)
   echo "@file $2 $3 $4 $inside $(TZ="$tz" date -d "@$4" '+%F %T') ${{checksum%% *}} $resolved"
-  printf '%s' "$1" | base64 -w0; echo
+  encoded_path=$(printf '%s' "$1" | base64 -w0)
+  echo "$encoded_path"
+  old_size=${{marker_offsets[$encoded_path]}}
+  if [[ "$old_size" =~ ^[0-9]{{1,18}}$ ]] && [ "$2" = "${{marker_inodes[$encoded_path]}}" ] && [ "$3" -ge "$old_size" ] && {{ [ "$inside" -eq 1 ] || [ {allow_outside} -eq 1 ]; }}; then
+    old_start=$(( old_size > 256 ? old_size - 256 : 0 ))
+    old_sum=$(dd if="$fd" iflag=skip_bytes,count_bytes skip="$old_start" count="$(( old_size - old_start ))" status=none | sha256sum) || return 1
+    echo "@split $encoded_path $old_size ${{old_sum%% *}}"
+  fi
   exec 3<&-
 }}
 {files}
@@ -744,6 +978,7 @@ echo @end
 "#,
         app = shell_quote(app),
         zone = shell_quote(zone),
+        anchor_script = anchor::SCRIPT,
         allow_outside = u8::from(allow_outside),
     )
 }
@@ -755,6 +990,7 @@ fn parse_probe(code: i32, lines: &[String]) -> Result<Probe, LogsError> {
     let engine = base64::engine::general_purpose::STANDARD;
     let mut time = None;
     let mut files = Vec::new();
+    let mut anchor = anchor::Probe::default();
     let mut ended = false;
     let mut lines = lines.iter();
     let number = |value: &str| {
@@ -763,6 +999,11 @@ fn parse_probe(code: i32, lines: &[String]) -> Result<Probe, LogsError> {
             .map_err(|_| LogsError::Unavailable("invalid numeric metadata in probe".into()))
     };
     while let Some(line) = lines.next() {
+        if let Some(ProbeTime::Known(time)) = &time {
+            if anchor.line(line, time) {
+                continue;
+            }
+        }
         let mut fields = line.split(' ');
         match fields.next() {
             Some("@unavailable") => {
@@ -816,6 +1057,7 @@ fn parse_probe(code: i32, lines: &[String]) -> Result<Probe, LogsError> {
                     mtime_local: format!("{date} {clock}"),
                     inside: inside == "1",
                     checksum: checksum.into(),
+                    anchor_check: None,
                 });
             }
             Some("@end") => ended = true,
@@ -826,7 +1068,11 @@ fn parse_probe(code: i32, lines: &[String]) -> Result<Probe, LogsError> {
         Some(ProbeTime::Known(_)) if !ended => {
             Err(LogsError::Unavailable("probe output ended early".into()))
         }
-        Some(time) => Ok(Probe { time, files }),
+        Some(time) => Ok(Probe {
+            time,
+            files,
+            anchor,
+        }),
         None => Err(LogsError::Unavailable("probe printed no time".into())),
     }
 }
@@ -872,6 +1118,7 @@ struct ReadPlan<'a> {
 }
 
 /// Newest files first, each read from its end, until `budget` runs out.
+#[cfg(test)]
 fn plan_reads<'a>(files: &[&'a ProbeFile], budget: u64) -> Vec<ReadPlan<'a>> {
     let mut left = budget;
     let mut plan = Vec::new();
@@ -901,6 +1148,7 @@ fn read_script(app: &str, plan: &[ReadPlan], allow_outside: bool) -> String {
         shell_quote(app)
     );
     for (index, read) in plan.iter().enumerate() {
+        let anchor_check = read.file.anchor_check.as_ref().map(|(offset, checksum)| format!("sum=$(dd if=\"$fd\" iflag=skip_bytes,count_bytes skip={} count={} status=none | sha256sum) || return 1\n  [ \"${{sum%% *}}\" = {} ]", offset.saturating_sub(256), (*offset).min(256), shell_quote(checksum))).unwrap_or_else(|| ":".into());
         script.push_str(&format!(
             r#"f={path}
 ok=1
@@ -911,7 +1159,8 @@ meta=$(stat -Lc '%i %s' -- "$fd" 2>/dev/null) || ok=0
 if [ $ok -eq 1 ]; then set -- $meta; [ "$1" = {inode} ] && [ "$2" -ge {size} ] || ok=0; fi
 check_end() {{
   sum=$(dd if="$fd" iflag=skip_bytes,count_bytes skip={check_start} count={check_count} status=none | sha256sum) || return 1
-  [ "${{sum%% *}}" = {checksum} ]
+  [ "${{sum%% *}}" = {checksum} ] || return 1
+  {anchor_check}
 }}
 if [ $ok -eq 1 ]; then check_end || ok=0; fi
 if [ $ok -eq 1 ]; then
@@ -1061,6 +1310,7 @@ fn normalize_time(raw: &str) -> Option<String> {
 
 /// Drops entries before the first one at or after `start`. Later entries count
 /// whatever their time says, so a repeated DST hour is kept.
+#[cfg(test)]
 fn in_window(entries: Vec<Entry>, start: &str) -> Vec<Entry> {
     let first = entries
         .iter()
@@ -1101,8 +1351,27 @@ fn naive_seconds(time: &str) -> Option<i64> {
     Some(days * 86_400 + number(11..13)? * 3600 + number(14..16)? * 60 + number(17..19)?)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Badge {
+    New,
+    Unknown,
+    Seen,
+}
+impl Badge {
+    fn label(self) -> &'static str {
+        match self {
+            Self::New => "NEW",
+            Self::Unknown => "?",
+            Self::Seen => "",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Variant {
+    pub badge: Badge,
+    signature: String,
+    channels: Vec<usize>,
     pub message: String,
     pub file_line: Option<String>,
     pub count: u64,
@@ -1111,6 +1380,7 @@ pub struct Variant {
 /// Entries that share an exception class and app file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
+    pub badge: Badge,
     pub id: String,
     full_id: String,
     pub class: String,
@@ -1158,6 +1428,7 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
                 index.insert(key, groups.len());
                 variant_index.push(HashMap::new());
                 groups.push(Group {
+                    badge: Badge::Seen,
                     id: String::new(),
                     full_id: group_id(&class, file.as_deref()),
                     class,
@@ -1212,10 +1483,18 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
         }
         let first_line = entry.message().lines().next().unwrap_or("");
         match variant_index[slot].get(&signature) {
-            Some(variant) => group.variants[*variant].count += 1,
+            Some(variant) => {
+                group.variants[*variant].count += 1;
+                if !group.variants[*variant].channels.contains(&entry.channel) {
+                    group.variants[*variant].channels.push(entry.channel);
+                }
+            }
             None if group.variants.len() < MAX_VARIANTS => {
-                variant_index[slot].insert(signature, group.variants.len());
+                variant_index[slot].insert(signature.clone(), group.variants.len());
                 group.variants.push(Variant {
+                    badge: Badge::Seen,
+                    signature,
+                    channels: vec![entry.channel],
                     message: clip_utf8(first_line, MESSAGE_BYTES),
                     file_line: display,
                     count: 1,
@@ -1224,7 +1503,37 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
             None => group.overflow_variants += 1,
         }
     }
+    let mut baseline_keys = HashSet::new();
+    let mut baseline_signatures = HashSet::new();
+    for entry in &snapshot.baseline_entries {
+        let (signature, class, file, _) =
+            signature(&entry.level.name().to_ascii_uppercase(), entry.message());
+        baseline_keys.insert((class, file));
+        baseline_signatures.insert(signature);
+    }
+    let badge = |seen: bool, channels: &[usize]| {
+        if !snapshot.baseline_enabled || seen {
+            Badge::Seen
+        } else if channels
+            .iter()
+            .any(|channel| snapshot.channels[*channel].baseline.available)
+        {
+            Badge::New
+        } else {
+            Badge::Unknown
+        }
+    };
     for group in &mut groups {
+        group.badge = badge(
+            baseline_keys.contains(&(group.class.clone(), group.file.clone())),
+            &group.channels,
+        );
+        for variant in &mut group.variants {
+            variant.badge = badge(
+                baseline_signatures.contains(&variant.signature),
+                &variant.channels,
+            );
+        }
         let latest = &snapshot.entries[group.latest];
         group.message = clip_utf8(latest.message().lines().next().unwrap_or(""), MESSAGE_BYTES);
         group
@@ -1232,8 +1541,9 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
             .sort_by_key(|variant| std::cmp::Reverse(variant.count));
     }
     groups.sort_by(|a, b| {
-        b.count
-            .cmp(&a.count)
+        a.badge
+            .cmp(&b.badge)
+            .then_with(|| b.count.cmp(&a.count))
             .then_with(|| b.last_seen.cmp(&a.last_seen))
             .then_with(|| a.full_id.cmp(&b.full_id))
     });
@@ -1383,6 +1693,45 @@ pub fn render_header(snapshot: &Snapshot) -> String {
             ));
         }
     }
+    if snapshot.baseline_enabled {
+        let limiting = snapshot
+            .channels
+            .iter()
+            .filter(|channel| channel.baseline.available)
+            .max_by_key(|channel| channel.baseline.covered_from.as_deref());
+        if let Some(channel) = limiting {
+            out.push_str(&format!(
+                "baseline: {} to {} before the window ({}; {}); NEW = not seen in that baseline\n",
+                channel
+                    .baseline
+                    .covered_from
+                    .as_deref()
+                    .unwrap_or("time unknown"),
+                channel
+                    .baseline
+                    .covered_to
+                    .as_deref()
+                    .unwrap_or("time unknown"),
+                escape_field(&channel.name),
+                if channel.baseline.complete {
+                    "full read"
+                } else {
+                    "partial read"
+                }
+            ));
+        } else {
+            out.push_str("baseline: unavailable; ? = no readable comparison\n");
+        }
+        let missing: Vec<_> = snapshot
+            .channels
+            .iter()
+            .filter(|channel| !channel.baseline.available)
+            .map(|channel| escape_field(&channel.name))
+            .collect();
+        if !missing.is_empty() {
+            out.push_str(&format!("no baseline: {}\n", missing.join(", ")));
+        }
+    }
     for channel in &snapshot.channels {
         if channel.files.is_empty() {
             out.push_str(&format!(
@@ -1390,6 +1739,15 @@ pub fn render_header(snapshot: &Snapshot) -> String {
                 escape_field(&channel.name),
                 escape_field(&channel.source)
             ));
+        }
+        if let Some(format) = &channel.baseline.format {
+            if format.has_unknown_content() {
+                out.push_str(&format!(
+                    "{}: baseline {} — NEW unavailable for this channel\n",
+                    escape_field(&channel.name),
+                    format.label()
+                ));
+            }
         }
         if matches!(channel.format, Format::Partial(_) | Format::Unrecognized) {
             out.push_str(&format!(
@@ -1441,7 +1799,7 @@ pub fn render_summary(snapshot: &Snapshot, groups: &Groups, min_level: Level, al
             .map(|file| file.strip_prefix(&app).unwrap_or(file))
             .unwrap_or("-");
         out.push_str(&format!(
-            "{:>3}  {}  {:>6}  {}  {}  {}\n       {}\n",
+            "{:>3}  {}  {:>6}  {}  {}  {}  {}\n       {}\n",
             row + 1,
             group.id,
             count_label(group),
@@ -1453,6 +1811,7 @@ pub fn render_summary(snapshot: &Snapshot, groups: &Groups, min_level: Level, al
                 .map(|index| escape_field(&snapshot.channels[*index].name))
                 .collect::<Vec<_>>()
                 .join(", "),
+            group.badge.label(),
             escape(&clip_utf8(&group.message, 120)),
         ));
     }
@@ -1492,21 +1851,27 @@ pub fn render_detail(snapshot: &Snapshot, group: &Group) -> String {
         .map(|channel| snapshot.channels[*channel].name.as_str())
         .collect();
     let mut out = format!(
-        "{}  {}\nFile:       {}\nCount:      {}\nFirst seen: {}\nLast seen:  {}\nChannels:   {}\n",
+        "{}  {}  {}\nFile:       {}\nCount:      {}\nFirst seen: {}\nLast seen:  {}\nChannels:   {}\n",
         group.id,
         escape(&group.class),
+        group.badge.label(),
         escape(group.file.as_deref().unwrap_or("-")),
         count_label(group),
-        group.first_seen.as_deref().unwrap_or("-"),
+        if group.partial { "—" } else { group.first_seen.as_deref().unwrap_or("-") },
         group.last_seen.as_deref().unwrap_or("-"),
         escape_field(&channels.join(", "))
     );
-    if group.variants.len() > 1 || group.overflow_variants > 0 {
+    if snapshot.baseline_enabled || group.variants.len() > 1 || group.overflow_variants > 0 {
         out.push_str("Variants:\n");
         for variant in &group.variants {
             out.push_str(&format!(
-                "  ×{}  {}{}\n",
+                "  ×{}  {}  {}{}\n",
                 variant.count,
+                if variant.badge == Badge::Seen {
+                    "seen"
+                } else {
+                    variant.badge.label()
+                },
                 escape(&clip_utf8(&variant.message, 160)),
                 variant
                     .file_line
@@ -1618,7 +1983,7 @@ pub fn render_raw(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> 
 /// The discovery/coverage view uses the same bounded snapshot as the summary.
 pub fn render_channels(snapshot: &Snapshot) -> String {
     let mut out = render_header(snapshot);
-    out.push_str("CHANNEL  KIND  FILES  SIZE  LAST WRITE  FORMAT  COVERAGE\n");
+    out.push_str("CHANNEL  KIND  FILES  SIZE  LAST WRITE  FORMAT  COVERAGE  BASELINE\n");
     for channel in &snapshot.channels {
         let label = if channel.key == channel.name {
             escape_field(&channel.name)
@@ -1656,8 +2021,32 @@ pub fn render_channels(snapshot: &Snapshot) -> String {
                     .unwrap_or_default()
             )
         };
+        let baseline = if !channel.baseline.available {
+            channel
+                .baseline
+                .format
+                .as_ref()
+                .filter(|format| format.has_unknown_content())
+                .map(|format| format!("none ({})", format.label()))
+                .unwrap_or_else(|| "none".into())
+        } else {
+            format!(
+                "{} bytes, since {} ({})",
+                channel.baseline.bytes_read,
+                channel
+                    .baseline
+                    .covered_from
+                    .as_deref()
+                    .unwrap_or("time unknown"),
+                if channel.baseline.complete {
+                    "full read"
+                } else {
+                    "partial read"
+                }
+            )
+        };
         out.push_str(&format!(
-            "{label}  {}  {files}  {} B  {}  {}  {coverage}\n",
+            "{label}  {}  {files}  {} B  {}  {}  {coverage}  {baseline}\n",
             channel.kind.label(),
             channel.size,
             channel.last_write.as_deref().unwrap_or("-"),
@@ -1670,6 +2059,46 @@ pub fn render_channels(snapshot: &Snapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_badges_use_global_baselines_and_variant_channel_coverage() {
+        let mut snapshot = snapshot_of("[2026-10-02 12:00:00] production.ERROR: KnownException: changed\n[2026-10-02 12:00:01] production.ERROR: NewException: new\n", true);
+        snapshot.baseline_enabled = true;
+        snapshot.channels[0].baseline.available = true;
+        let mut missing = snapshot.channels[0].clone();
+        missing.name = "queue".into();
+        missing.baseline.available = false;
+        snapshot.channels.push(missing);
+        snapshot.entries.extend(parse_entries(
+            b"[2026-10-02 12:00:02] production.ERROR: MissingException: no baseline\n",
+            0,
+            1,
+            "queue.log",
+        ));
+        snapshot.baseline_entries = parse_entries(
+            b"[2026-10-01 12:00:00] production.ERROR: KnownException: previous\n",
+            0,
+            1,
+            "queue.log",
+        );
+        let groups = group(&snapshot, Level::Error, None);
+        assert_eq!(
+            groups
+                .groups
+                .iter()
+                .map(|group| group.badge)
+                .collect::<Vec<_>>(),
+            [Badge::New, Badge::Unknown, Badge::Seen]
+        );
+        let known = groups
+            .groups
+            .iter()
+            .find(|group| group.class == "KnownException")
+            .unwrap();
+        assert_eq!(known.badge, Badge::Seen);
+        assert_eq!(known.variants[0].badge, Badge::New);
+        assert!(render_header(&snapshot).contains("no baseline: queue"));
+    }
 
     #[test]
     fn a_group_merges_channels_and_retains_first_and_latest_times() {
@@ -1756,7 +2185,7 @@ mod tests {
         let mut snapshot = snapshot_of("", true);
         snapshot.channels[0].name = "app".into();
         snapshot.channels[0].format = Format::Empty;
-        let expected = "production · app · since 24h (2026-10-01 00:00:00) · times UTC\nCHANNEL  KIND  FILES  SIZE  LAST WRITE  FORMAT  COVERAGE\napp (laravel)  single  1  0 B  2026-10-01 10:00:00  empty  full\n";
+        let expected = "production · app · since 24h (2026-10-01 00:00:00) · times UTC\nCHANNEL  KIND  FILES  SIZE  LAST WRITE  FORMAT  COVERAGE  BASELINE\napp (laravel)  single  1  0 B  2026-10-01 10:00:00  empty  full  none\n";
         assert_eq!(render_channels(&snapshot), expected);
     }
 
@@ -1770,6 +2199,7 @@ mod tests {
             mtime_local: "2026-10-01 10:00:00".into(),
             inside: true,
             checksum: "unused".into(),
+            anchor_check: None,
         }
     }
 
@@ -1798,9 +2228,12 @@ mod tests {
                 last_write: Some("2026-10-01 10:00:00".into()),
                 format: Format::Recognized,
                 omitted_files: 0,
+                baseline: Baseline::default(),
             }],
             entries: parse_entries(text.as_bytes(), 0, 0, "/srv/app/storage/logs/laravel.log"),
             raw_blocks: Vec::new(),
+            baseline_entries: Vec::new(),
+            baseline_enabled: false,
             clock_changed: false,
             warnings: Vec::new(),
             bytes_transferred: 0,
@@ -2058,6 +2491,7 @@ mod tests {
             ("C", "xyzabxyzabxyzabx"),
         ] {
             groups.groups.push(Group {
+                badge: Badge::Seen,
                 id: String::new(),
                 full_id: full.into(),
                 class: class.into(),
@@ -2300,6 +2734,7 @@ mod tests {
         );
         assert!(probe.contains("tz='Asia/Kolkata'"));
         assert!(probe.contains("date -d '2026-10-01 14:00' +%s"));
-        assert!(probe.contains("for f in 'storage/logs/laravel'-*.log"));
+        assert!(probe.contains("prefix='storage/logs/laravel'"));
+        assert!(probe.contains(r#"for f in "$prefix"-*.log"#));
     }
 }

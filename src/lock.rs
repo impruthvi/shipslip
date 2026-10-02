@@ -95,7 +95,7 @@ pub(crate) enum Break {
 
 /// Runs `body` in the app's git dir context with `$l` set to the lock path
 /// and `$r` to this run's id.
-fn script(path: &str, run_id: &str, body: &str) -> String {
+pub(crate) fn script(path: &str, run_id: &str, body: &str) -> String {
     format!(
         "cd {} || exit $?\n\
          l=\"$(git rev-parse --absolute-git-dir)/shipslip.lock\" || exit $?\n\
@@ -163,10 +163,19 @@ fi
 }
 
 pub(crate) fn release_script(path: &str, run_id: &str) -> String {
+    release_marker_script(path, run_id, None)
+}
+
+fn release_marker_script(path: &str, run_id: &str, outcome: Option<&str>) -> String {
+    let finish = outcome
+        .map(|outcome| crate::marker::finish_body(run_id, outcome))
+        .unwrap_or_default();
     script(
         path,
         run_id,
-        r#"owned "$l" && mv -T "$l" "$l.released-$r" 2>/dev/null || { echo not-owner; exit 0; }
+        &format!(
+            r#"{finish}
+owned "$l" && mv -T "$l" "$l.released-$r" 2>/dev/null || {{ echo not-owner; exit 0; }}
 if owned "$l.released-$r"; then
   rm -rf "$l.released-$r"
   echo released
@@ -174,7 +183,8 @@ else
   mv -T "$l.released-$r" "$l" 2>/dev/null
   echo not-owner
 fi
-"#,
+"#
+        ),
     )
 }
 
@@ -308,6 +318,21 @@ pub(crate) async fn release<T: Transport>(
     }
 }
 
+pub(crate) async fn release_after_run<T: Transport>(
+    transport: &T,
+    path: &str,
+    run_id: &str,
+    outcome: &str,
+) -> Result<Vec<String>, TransportError> {
+    let (code, lines) = run_collect(
+        transport,
+        &release_marker_script(path, run_id, Some(outcome)),
+    )
+    .await;
+    code?;
+    Ok(crate::marker::warnings(&lines))
+}
+
 /// Reads the lock without changing it. `None` if no lock is held.
 pub(crate) async fn status<T: Transport>(
     transport: &T,
@@ -339,6 +364,15 @@ mod tests {
             started_at: 1,
             target_sha: "abc".into(),
         }
+    }
+
+    #[test]
+    fn marker_update_is_inside_the_owner_guard_and_before_the_release_move() {
+        let script = release_marker_script("/app", "r-one", Some("succeeded"));
+        let update = script.find("finish_marker() ").unwrap();
+        assert!(script.find("if owned \"$l\"").unwrap() < update);
+        assert!(update < script.find("mv -T \"$l\" \"$l.released-$r\"").unwrap());
+        assert!(!release_script("/app", "r-one").contains("finish_marker"));
     }
 
     #[test]

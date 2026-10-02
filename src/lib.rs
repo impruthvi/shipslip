@@ -15,6 +15,7 @@ mod engine;
 mod event;
 mod lock;
 pub mod logs;
+mod marker;
 pub mod observation;
 mod preflight;
 mod private_file;

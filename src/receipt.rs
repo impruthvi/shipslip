@@ -117,6 +117,8 @@ pub struct Receipt {
     pub server_head_at_end: Option<String>,
     pub tree_dirty: Option<bool>,
     pub last_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     #[serde(default)]
     pub watch: Option<WatchResult>,
     #[serde(default)]
@@ -172,6 +174,7 @@ impl Receipt {
             server_head_at_end: None,
             tree_dirty: None,
             last_message: None,
+            warnings: Vec::new(),
             watch: None,
             smoke: None,
         }
@@ -284,6 +287,14 @@ impl ReceiptJournal {
 
     pub fn confirm(&self) -> Result<(), ReceiptError> {
         self.update(|receipt| receipt.confirmed = true)
+    }
+
+    pub fn warning(&self, message: String) -> Result<(), ReceiptError> {
+        self.update(|receipt| {
+            if receipt.warnings.len() < 20 {
+                receipt.warnings.push(message);
+            }
+        })
     }
 
     pub fn begin_step(&self, index: usize) -> Result<(), ReceiptError> {

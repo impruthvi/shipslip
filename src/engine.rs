@@ -884,14 +884,28 @@ async fn run_steps<T: Transport>(
             // After an unknown outcome the server's state needs checking
             // first, so the lock is kept and goes stale.
             if !matches!(outcome, DeployOutcome::Unknown { .. }) {
-                if let Err(error) = lock::release(&*transport, path, run_id).await {
-                    if journal.is_some() {
-                        send_run_error(
-                            &events,
-                            journal,
-                            format!("could not release deploy lock: {error}"),
-                        );
-                        return;
+                let marker_outcome = match &outcome {
+                    DeployOutcome::Succeeded => "succeeded",
+                    DeployOutcome::FailedAtStep { .. } | DeployOutcome::AbortedBeforeChanges(_) => {
+                        "failed"
+                    }
+                    _ => "cancelled",
+                };
+                match lock::release_after_run(&*transport, path, run_id, marker_outcome).await {
+                    Ok(warnings) => {
+                        for warning in warnings {
+                            marker_warning(&events, journal.as_deref(), warning);
+                        }
+                    }
+                    Err(error) => {
+                        if journal.is_some() {
+                            send_run_error(
+                                &events,
+                                journal,
+                                format!("could not release deploy lock: {error}"),
+                            );
+                            return;
+                        }
                     }
                 }
             }
@@ -1010,6 +1024,21 @@ fn merge_previous_watch(current: &mut WatchResult, previous: &WatchResult) {
             current.warnings.push(warning.clone());
         }
     }
+}
+
+fn marker_warning(
+    events: &mpsc::UnboundedSender<DeployEvent>,
+    journal: Option<&ReceiptJournal>,
+    reason: String,
+) {
+    if let Some(journal) = journal {
+        if let Err(error) = journal.warning(reason.clone()) {
+            let _ = events.send(DeployEvent::Warning {
+                reason: format!("could not save marker warning: {error}"),
+            });
+        }
+    }
+    let _ = events.send(DeployEvent::Warning { reason });
 }
 
 fn post_window() -> Duration {
@@ -1212,6 +1241,19 @@ async fn run_steps_locked<T: Transport>(
                 };
                 if let Some(reason) = changed {
                     return End::Finished(DeployOutcome::AbortedBeforeChanges(reason));
+                }
+            }
+            if resume.is_none() {
+                for warning in crate::marker::start(
+                    transport,
+                    &preview.target,
+                    &preview.run_id,
+                    preview.run_plan,
+                    &preview.target_sha,
+                )
+                .await
+                {
+                    marker_warning(events, journal, warning);
                 }
             }
             if let Some(observer) = observer {
@@ -2164,7 +2206,10 @@ mod tests {
             output: mpsc::UnboundedSender<String>,
         ) -> Result<i32, TransportError> {
             self.ran.lock().unwrap().push(script.to_string());
-            if script.contains("shipslip.lock") {
+            if script.contains("# @marker-start") {
+                let _ = output.send("@marker-written".into());
+                Ok(0)
+            } else if script.contains("shipslip.lock") {
                 let _ = output.send(self.lock_script(script));
                 if script.contains("echo acquired")
                     && self.lose_acquire_response.swap(false, Ordering::SeqCst)

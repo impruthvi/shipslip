@@ -12,6 +12,7 @@ pub(super) struct DiscoveredChannel<'a> {
     pub kind: ChannelKind,
     pub files: Vec<&'a ProbeFile>,
     pub omitted_files: usize,
+    pub omitted_window_files: usize,
     pub size: u64,
     pub last_write: Option<String>,
 }
@@ -35,10 +36,30 @@ pub(super) fn filename(path: &str) -> Option<(String, Option<&str>)> {
     Some((stem.into(), None))
 }
 
+#[cfg(test)]
 pub(super) fn discover<'a>(
     target: &DeployTarget,
     files: &'a [ProbeFile],
     start_date: &str,
+) -> (Vec<DiscoveredChannel<'a>>, Vec<String>) {
+    discover_inner(target, files, start_date, false, &[])
+}
+
+pub(super) fn discover_for_anchor<'a>(
+    target: &DeployTarget,
+    files: &'a [ProbeFile],
+    start_date: &str,
+    recorded: &[String],
+) -> (Vec<DiscoveredChannel<'a>>, Vec<String>) {
+    discover_inner(target, files, start_date, true, recorded)
+}
+
+fn discover_inner<'a>(
+    target: &DeployTarget,
+    files: &'a [ProbeFile],
+    start_date: &str,
+    baseline: bool,
+    recorded: &[String],
 ) -> (Vec<DiscoveredChannel<'a>>, Vec<String>) {
     let legacy = ChannelSource::from_target(target);
     let mut channels: BTreeMap<String, DiscoveredChannel<'a>> = BTreeMap::new();
@@ -78,7 +99,7 @@ pub(super) fn discover<'a>(
         }) {
             continue;
         }
-        if date.is_some_and(|date| date < start_date) {
+        if !baseline && date.is_some_and(|date| date < start_date) {
             continue;
         }
         if !seen.insert(file.resolved.as_str()) {
@@ -100,6 +121,7 @@ pub(super) fn discover<'a>(
                 kind,
                 files: Vec::new(),
                 omitted_files: 0,
+                omitted_window_files: 0,
                 size: 0,
                 last_write: None,
             });
@@ -148,6 +170,7 @@ pub(super) fn discover<'a>(
                 kind,
                 files: Vec::new(),
                 omitted_files: 0,
+                omitted_window_files: 0,
                 size: 0,
                 last_write: None,
             });
@@ -196,6 +219,28 @@ pub(super) fn discover<'a>(
                 .then_with(|| b.path.cmp(&a.path))
         });
     }
+    if baseline {
+        for channel in &mut channels {
+            let mut earlier = 0;
+            channel.files.retain(|file| {
+                if filename(&file.path)
+                    .and_then(|(_, date)| date)
+                    .is_some_and(|date| date < start_date)
+                {
+                    earlier += 1;
+                    earlier <= 7
+                } else {
+                    true
+                }
+            });
+        }
+    }
+    for channel in &mut channels {
+        channel.size = channel
+            .files
+            .iter()
+            .fold(0u64, |sum, file| sum.saturating_add(file.size));
+    }
     // Share the file cap as well as the byte cap: each channel gets its newest
     // file before any busy daily channel takes its second.
     let mut counts = vec![0; channels.len()];
@@ -216,6 +261,15 @@ pub(super) fn discover<'a>(
     let mut omitted = 0;
     for (channel, count) in channels.iter_mut().zip(counts) {
         channel.omitted_files = channel.files.len() - count;
+        channel.omitted_window_files = channel.files[count..]
+            .iter()
+            .filter(|file| {
+                recorded.contains(&file.path)
+                    || filename(&file.path)
+                        .and_then(|(_, date)| date)
+                        .is_none_or(|date| date >= start_date)
+            })
+            .count();
         omitted += channel.omitted_files;
         channel.files.truncate(count);
     }
@@ -260,6 +314,7 @@ mod tests {
             mtime_local: "2026-10-01 01:00:00".into(),
             inside: true,
             checksum: "checksum".into(),
+            anchor_check: None,
         }
     }
 

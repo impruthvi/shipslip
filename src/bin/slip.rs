@@ -504,6 +504,7 @@ async fn follow_events(
                 eprintln!("Lost contact while observing step {index}: {reason}");
             }
             DeployEvent::RunError { reason } => eprintln!("Deploy could not finish: {reason}"),
+            DeployEvent::Warning { reason } => eprintln!("Warning: {}", logs::escape(&reason)),
             DeployEvent::Finished(outcome) => {
                 succeeded = matches!(&outcome, DeployOutcome::Succeeded);
                 show_outcome(&outcome);
@@ -819,7 +820,7 @@ fn print_help() {
          \x20 --level L          This level and more severe (default error; --raw: debug)\n\
          \x20 --grep TEXT        Only entries containing TEXT, ignoring case\n\
          \x20 --raw              Print entries instead of groups\n\
-         \x20 --channels         Show discovered files, format and coverage by channel\n\
+         \x20 --channels         Show files, format, window and baseline coverage by channel\n\
          \x20 --all              Show every group, not just the first 20\n\
          \x20 --max-bytes SIZE   Total read limit, like 20m (default 12m total, 4m/channel)\n\n\
          Config is discovered from the current directory up to the git root.\n\

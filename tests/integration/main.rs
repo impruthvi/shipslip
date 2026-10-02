@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
-use shipslip::logs::{self, ChannelKind, Format, Level, LogsError, Request, Since};
+use shipslip::logs::{self, Badge, ChannelKind, Format, Level, LogsError, Request, Since};
 use shipslip::receipt::{ReceiptJournal, ReceiptStatus};
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{
@@ -64,7 +64,14 @@ impl Drop for Server {
 impl Server {
     fn logs_app(&self, name: &str) -> String {
         let path = self.app(name);
-        self.exec(&format!("seed-logs {}", quote(&path)), "");
+        self.exec(
+            &format!(
+                "seed-logs {}; cd {}; git reflog expire --expire=now --all",
+                quote(&path),
+                quote(&path)
+            ),
+            "",
+        );
         path
     }
     /// Isolate tests of one stream from the multi-channel discovery fixture.
@@ -270,6 +277,492 @@ impl Transport for LogsTransport {
 }
 
 #[tokio::test]
+async fn logs_mixed_baselines_retain_positive_matches_without_claiming_absences_are_new() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-mixed-baseline");
+    server.keep_logs(&path, &[]);
+    server.exec(&format!("cd {path}/storage/logs; for n in $(seq 1 40); do echo stdout-$n; done > worker.log; printf '[%s] production.ERROR: OldWorkerException: known\\n' \"$(date -u -d '1 hour ago' '+%F %T')\" >> worker.log"), "");
+    let step = "now=$(date -u '+%F %T'); printf '[%s] production.ERROR: OldWorkerException: known\\n[%s] production.ERROR: NewWorkerException: unknown baseline\\n' \"$now\" \"$now\" >> storage/logs/worker.log";
+    let ssh = Arc::new(server.connect().await);
+    let target = target(&path, &[step]);
+    deploy(ssh.clone(), target.clone()).await;
+    let snapshot = logs::snapshot(&*ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    let groups = logs::group(&snapshot, Level::Error, None);
+    assert_eq!(
+        groups
+            .groups
+            .iter()
+            .find(|group| group.class == "OldWorkerException")
+            .unwrap()
+            .badge,
+        Badge::Seen
+    );
+    assert_eq!(
+        groups
+            .groups
+            .iter()
+            .find(|group| group.class == "NewWorkerException")
+            .unwrap()
+            .badge,
+        Badge::Unknown
+    );
+    assert!(!snapshot.channels[0].baseline.available);
+    assert!(logs::render_header(&snapshot).contains("baseline partly recognized"));
+    assert!(logs::render_channels(&snapshot).contains("none (partly recognized"));
+}
+
+#[tokio::test]
+async fn logs_window_and_baseline_budgets_stay_separate_and_fair_across_busy_channels() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-baseline-budget");
+    server.keep_logs(&path, &["payments.log"]);
+    server.exec(&format!("cd {path}/storage/logs; before=$(date -u -d '1 hour ago' '+%F %T'); padding=$(printf '%4096s' ''); for channel in $(seq 1 6); do for n in $(seq 1 800); do printf '[%s] production.ERROR: ExistingException: %s\\n' \"$before\" \"$padding\"; done > \"busy-$channel.log\"; done"), "");
+    let step = "now=$(date -u '+%F %T'); padding=$(printf '%4096s' ''); for channel in $(seq 1 6); do for n in $(seq 1 800); do printf '[%s] production.ERROR: ExistingException: %s\\n[%s] production.ERROR: BrandNewException: %s\\n' \"$now\" \"$padding\" \"$now\" \"$padding\"; done >> \"storage/logs/busy-$channel.log\"; done; printf '[%s] production.ERROR: QuietNewException: important\\n' \"$now\" >> storage/logs/payments.log";
+    let ssh = Arc::new(server.connect().await);
+    let target = target(&path, &[step]);
+    let events = deploy(ssh.clone(), target.clone()).await;
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    let snapshot = logs::snapshot(&*ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(
+        snapshot
+            .channels
+            .iter()
+            .map(|channel| channel.bytes_read)
+            .sum::<u64>()
+            <= 12 * 1024 * 1024
+    );
+    assert!(
+        snapshot
+            .channels
+            .iter()
+            .map(|channel| channel.baseline.bytes_read)
+            .sum::<u64>()
+            <= 6 * 1024 * 1024
+    );
+    assert!(snapshot.bytes_transferred <= 18 * 1024 * 1024);
+    assert!(snapshot
+        .channels
+        .iter()
+        .all(|channel| channel.baseline.available));
+    assert!(snapshot.baseline_entries.iter().all(|entry| {
+        !entry.text.contains("BrandNewException") && !entry.text.contains("QuietNewException")
+    }));
+    assert!(snapshot
+        .channels
+        .iter()
+        .all(|channel| channel.bytes_read <= 4 * 1024 * 1024
+            && channel.baseline.bytes_read <= 2 * 1024 * 1024));
+    let quiet = snapshot
+        .channels
+        .iter()
+        .find(|channel| channel.key == "payments")
+        .unwrap();
+    assert!(quiet.complete && quiet.baseline.complete);
+    let groups = logs::group(&snapshot, Level::Error, None);
+    let old = groups
+        .groups
+        .iter()
+        .find(|group| group.class == "ExistingException")
+        .unwrap();
+    assert_eq!(old.badge, Badge::Seen);
+    assert!(old.partial);
+    let new = groups
+        .groups
+        .iter()
+        .find(|group| group.class == "BrandNewException")
+        .unwrap();
+    assert_eq!(new.badge, Badge::New);
+    assert!(new.partial);
+    assert!(logs::render_detail(&snapshot, new).contains("First seen: —"));
+    let quiet = groups
+        .groups
+        .iter()
+        .find(|group| group.class == "QuietNewException")
+        .unwrap();
+    assert_eq!(quiet.badge, Badge::New);
+    assert!(!quiet.partial);
+}
+
+#[tokio::test]
+async fn logs_active_run_is_the_anchor_before_and_after_fast_forward() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-active");
+    // Hold maintenance down before step 0, then hold the first recipe step.
+    server.exec_as("root", r#"sed -i '/  down)/a\    echo marker-down-start; while [ ! -e "$HOME/release-down" ]; do sleep 0.1; done' /usr/local/bin/php"#, "");
+    let ssh = Arc::new(server.connect().await);
+    let step = "echo after-fast-forward; while [ ! -e ~/release-step ]; do sleep 0.1; done";
+    let mut target = target(&path, &[step]);
+    target.maintenance = true;
+    let (mut events, mut running) = deploy_until(ssh.clone(), target.clone(), |event| matches!(event, DeployEvent::MaintenanceOutput { phase: MaintenancePhase::Down, line } if line == "marker-down-start")).await;
+    let before = logs::snapshot(&*ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(before.since_label.contains("deploy in progress"));
+    assert!(before.since_label.contains(&running.run_id));
+    server.exec("touch ~/release-down", "");
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = running.rx.recv().await {
+            let done = matches!(&event, DeployEvent::Output { index: 1, line } if line == "after-fast-forward");
+            events.push(event);
+            if done { break; }
+        }
+    }).await.unwrap();
+    let after = logs::snapshot(&*ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(after.since_label.contains("deploy in progress"));
+    assert!(after.since_label.contains("step 1"));
+    assert_eq!(before.start, after.start);
+    server.exec("touch ~/release-step", "");
+    let events = running.rest(events).await;
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+}
+
+#[tokio::test]
+async fn logs_read_rechecks_the_anchor_checksum_even_when_the_file_end_is_unchanged() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-anchor-race");
+    server.keep_logs(&path, &["payments.log"]);
+    let ssh = Arc::new(server.connect().await);
+    let step = "printf '[%s] production.ERROR: LaterException: new\\n' \"$(date -u '+%F %T')\" >> storage/logs/payments.log; for n in $(seq 1 100); do echo '#0 after()'; done >> storage/logs/payments.log";
+    let target = target(&path, &[step]);
+    deploy(ssh, target.clone()).await;
+    let transport = LogsTransport { ssh: server.connect().await, calls: AtomicUsize::new(0), prefix: String::new(), before_read: format!("cd {path}; offset=$(awk '/^@file/ {{print $3; exit}}' .git/shipslip.last-run); printf 'changed old bytes!!!!' | dd of=storage/logs/payments.log bs=1 seek=$((offset - 20)) conv=notrunc status=none") };
+    let snapshot = logs::snapshot(&transport, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(snapshot.entries.is_empty());
+    assert_eq!(snapshot.channels[0].changed, ["storage/logs/payments.log"]);
+    assert!(!snapshot.channels[0].complete);
+}
+
+#[tokio::test]
+async fn logs_deploy_anchor_compares_global_groups_and_new_variants() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-run");
+    server.keep_logs(&path, &[]);
+    server.exec(&format!("cd {path}/storage/logs; before=$(date -u -d '1 hour ago' '+%F %T'); printf '[%s] production.ERROR: CommonException: old message\\n' \"$before\" > laravel.log; printf '[%s] production.ERROR: MovedException: seen in payments\\n' \"$before\" > payments.log"), "");
+    let step = "now=$(date -u '+%F %T'); printf '[%s] production.ERROR: CommonException: old message\\n[%s] production.ERROR: CommonException: changed message\\n[%s] production.ERROR: MovedException: seen in payments\\n[%s] production.ERROR: NewException: fresh\\n' \"$now\" \"$now\" \"$now\" \"$now\" >> storage/logs/laravel.log; printf '[%s] production.ERROR: CreatedException: first file\\n' \"$now\" > storage/logs/queue.log";
+    let ssh = Arc::new(server.connect().await);
+    let target = target(&path, &[step]);
+    let events = deploy(ssh.clone(), target.clone()).await;
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, DeployEvent::Warning { .. })),
+        "{events:?}"
+    );
+    let marker = server.exec(&format!("cat {path}/.git/shipslip.last-run"), "");
+    assert!(marker.contains("@plan deploy"));
+    assert!(marker.contains(" succeeded\n@reflog "));
+    assert!(!server.lock_exists(&path));
+    let snapshot = logs::snapshot(&*ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(
+        snapshot.since_label.starts_with("since slip deploy"),
+        "{} {:?}",
+        snapshot.since_label,
+        snapshot.warnings
+    );
+    assert!(snapshot.since_label.contains("succeeded"));
+    assert_eq!(snapshot.entries.len(), 5);
+    assert_eq!(
+        server.exec(&format!("cat {path}/.git/shipslip.last-run"), ""),
+        marker
+    );
+    let groups = logs::group(&snapshot, Level::Error, None);
+    let group = |class: &str| {
+        groups
+            .groups
+            .iter()
+            .find(|group| group.class == class)
+            .unwrap()
+    };
+    assert_eq!(group("NewException").badge, Badge::New);
+    assert_eq!(group("CreatedException").badge, Badge::Unknown);
+    assert_eq!(group("MovedException").badge, Badge::Seen);
+    assert_eq!(group("CommonException").badge, Badge::Seen);
+    assert_eq!(group("CommonException").count, 2);
+    assert!(group("CommonException")
+        .variants
+        .iter()
+        .any(|variant| variant.badge == Badge::New));
+    assert!(group("CommonException")
+        .variants
+        .iter()
+        .any(|variant| variant.badge == Badge::Seen));
+    assert_eq!(groups.groups[0].badge, Badge::New);
+    assert!(logs::render_header(&snapshot).contains("no baseline: queue"));
+    assert!(logs::render_channels(&snapshot).contains("BASELINE"));
+    let explicit = logs::snapshot(
+        &*ssh,
+        &target,
+        &Request {
+            since: Some(Since::Ago(2 * 3600)),
+            ..Request::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(explicit.since_label, "since 2h");
+    assert_eq!(explicit.entries.len(), 7);
+}
+
+#[tokio::test]
+async fn logs_rerun_from_step_and_failed_runs_refresh_the_marker() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-plans");
+    server.keep_logs(&path, &["payments.log"]);
+    let ssh = Arc::new(server.connect().await);
+    let target = target(&path, &["true", "true"]);
+    deploy(ssh.clone(), target.clone()).await;
+    let head = server.exec(&format!("git -C {path} rev-parse HEAD"), "");
+    let first = server.exec(&format!("cat {path}/.git/shipslip.last-run"), "");
+    for (plan, label) in [
+        (RunPlan::Rerun, "rerun"),
+        (RunPlan::FromStep(2), "from-step 2"),
+    ] {
+        let events = deploy_with_plan(ssh.clone(), target.clone(), plan).await;
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+        let marker = server.exec(&format!("cat {path}/.git/shipslip.last-run"), "");
+        assert!(marker.contains(&format!("@plan {label}")));
+        assert_ne!(marker, first);
+        let snapshot = logs::snapshot(&*ssh, &target, &Request::default())
+            .await
+            .unwrap();
+        assert!(snapshot.since_label.contains(label));
+        assert_eq!(
+            server.exec(&format!("git -C {path} rev-parse HEAD"), ""),
+            head
+        );
+    }
+    let failed = crate::target(&path, &["exit 9"]);
+    let events = deploy_with_plan(ssh.clone(), failed.clone(), RunPlan::Rerun).await;
+    assert!(matches!(
+        events.last(),
+        Some(DeployEvent::Finished(DeployOutcome::FailedAtStep {
+            step: 1,
+            ..
+        }))
+    ));
+    let snapshot = logs::snapshot(&*ssh, &failed, &Request::default())
+        .await
+        .unwrap();
+    assert!(snapshot.since_label.contains("failed"));
+}
+
+#[tokio::test]
+async fn logs_anchor_fallbacks_distinguish_corrupt_missing_and_failed_git() {
+    let server = Server::start().await;
+    let path = server.app("logs-fallbacks");
+    server.exec(&format!("seed-logs {path}"), "");
+    let ssh = Arc::new(server.connect().await);
+    let target = target(&path, &["true"]);
+    let preview = prepare(target.clone(), &*ssh).await.unwrap();
+    cancel(preview, &*ssh).await.unwrap();
+    assert_eq!(
+        server.exec(
+            &format!("test -e {path}/.git/shipslip.last-run && echo yes || echo no"),
+            ""
+        ),
+        "no"
+    );
+    let no_marker = logs::snapshot(&*ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(no_marker.since_label.starts_with("since checkout change"));
+    server.exec(
+        &format!("printf corrupt > {path}/.git/shipslip.last-run"),
+        "",
+    );
+    let corrupt = logs::snapshot(&*ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(corrupt
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("corrupt")));
+    let events = deploy(ssh.clone(), target.clone()).await;
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    let git_fails = LogsTransport {
+        ssh: server.connect().await,
+        calls: AtomicUsize::new(0),
+        before_read: String::new(),
+        prefix: "git() { echo 'fatal: dubious ownership' >&2; return 128; }".into(),
+    };
+    let unverified = logs::snapshot(&git_fails, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(unverified
+        .since_label
+        .contains("unverified: fatal: dubious ownership"));
+    server.exec(&format!("rm {path}/.git/shipslip.last-run"), "");
+    let failed = logs::snapshot(&git_fails, &target, &Request::default())
+        .await
+        .unwrap();
+    assert_eq!(failed.since_label, "since 24h (default)");
+    assert!(failed
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("reflog failed")));
+}
+
+#[tokio::test]
+async fn logs_copytruncate_regrowth_and_checkout_away_and_back_invalidate_offsets_or_anchor() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-regrowth");
+    server.keep_logs(&path, &["payments.log"]);
+    let ssh = Arc::new(server.connect().await);
+    let target = target(&path, &["true"]);
+    deploy(ssh.clone(), target.clone()).await;
+    server.exec(&format!("cd {path}/storage/logs; printf '[%s] production.ERROR: RegrownException: replaced\\n' \"$(date -u '+%F %T')\" > payments.log; for n in $(seq 1 100); do echo '#0 changed frame()'; done >> payments.log"), "");
+    let snapshot = logs::snapshot(&*ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(snapshot
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("recorded offset no longer matches")));
+    assert!(snapshot
+        .entries
+        .iter()
+        .any(|entry| entry.text.contains("RegrownException")));
+    server.exec(
+        &format!("cd {path}; git checkout -q HEAD~1; git checkout -q main"),
+        "",
+    );
+    let snapshot = logs::snapshot(&*ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(snapshot.since_label.starts_with("since checkout change"));
+    assert!(snapshot
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("checkout changed after run")));
+}
+
+#[tokio::test]
+async fn logs_marker_start_failure_warns_in_receipt_removes_old_marker_and_still_deploys() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-start-failure");
+    let target = target(&path, &["true"]);
+    let ssh = Arc::new(server.connect().await);
+    deploy(ssh, target.clone()).await;
+    let transport = Arc::new(LogsTransport { ssh: server.connect().await, calls: AtomicUsize::new(0), before_read: String::new(), prefix: "mv() { case \"${@: -1}\" in */shipslip.last-run) return 1 ;; *) command mv \"$@\" ;; esac; }".into() });
+    let preview = prepare_with_plan(target.clone(), RunPlan::Rerun, &*transport)
+        .await
+        .unwrap();
+    let journal = Arc::new(
+        ReceiptJournal::create(&server.dir.join("receipts"), "app", &server.dir, &preview).unwrap(),
+    );
+    let confirmation = Confirmation::from(&preview, None).unwrap();
+    let (mut rx, _) = execute_recorded(preview, confirmation, transport, journal.clone()).unwrap();
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, DeployEvent::Warning { .. })));
+    assert!(journal
+        .snapshot()
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("could not write last-run marker")));
+    assert!(!server.lock_exists(&path));
+    assert_eq!(
+        server.exec(
+            &format!("test -e {path}/.git/shipslip.last-run && echo yes || echo no"),
+            ""
+        ),
+        "no"
+    );
+    let snapshot = logs::snapshot(&server.connect().await, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(snapshot.since_label.starts_with("since checkout change"));
+}
+
+#[tokio::test]
+async fn logs_marker_end_failure_and_a_successor_never_break_lock_release() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-end-failure");
+    let ssh = Arc::new(server.connect().await);
+    let target = target(
+        &path,
+        &["rm .git/shipslip.last-run; mkdir .git/shipslip.last-run"],
+    );
+    let events = deploy(ssh, target).await;
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    assert!(events.iter().any(|event| matches!(event, DeployEvent::Warning { reason } if reason.contains("could not finish"))));
+    assert!(!server.lock_exists(&path));
+
+    let path = server.logs_app("logs-successor");
+    let transport = Arc::new(LogsTransport { ssh: server.connect().await, calls: AtomicUsize::new(0), before_read: String::new(), prefix: "mv() { command mv \"$@\" || return; case \"${@: -1}\" in *shipslip.lock.released-*) mkdir \"$l\"; echo r-successor > \"$l/run_id\"; echo successor > \"${l%/*}/shipslip.last-run\" ;; esac; }".into() });
+    let events =
+        deploy_with_plan(transport, crate::target(&path, &["true"]), RunPlan::Deploy).await;
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    assert_eq!(
+        server.exec(&format!("cat {path}/.git/shipslip.last-run"), ""),
+        "successor"
+    );
+    assert!(server.lock_exists(&path));
+}
+
+#[tokio::test]
+async fn logs_baseline_walks_back_three_days_for_a_midnight_or_quiet_channel() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-walkback");
+    server.keep_logs(&path, &[]);
+    server.exec(&format!("cd {path}/storage/logs; today=$(date -u +%F); old=$(date -u -d '3 days ago' +%F); printf '[%s 23:59:00] production.ERROR: ReturningException: previously seen\\n' \"$old\" > \"laravel-$old.log\"; : > \"laravel-$today.log\""), "");
+    let step = "today=$(date -u +%F); printf '[%s] production.ERROR: ReturningException: previously seen\\n' \"$(date -u '+%F %T')\" >> \"storage/logs/laravel-$today.log\"";
+    let ssh = Arc::new(server.connect().await);
+    let mut target = target(&path, &[step]);
+    target.log_daily = true;
+    deploy(ssh.clone(), target.clone()).await;
+    let snapshot = logs::snapshot(&*ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    let groups = logs::group(&snapshot, Level::Error, None);
+    assert_eq!(groups.groups[0].class, "ReturningException");
+    assert_eq!(groups.groups[0].badge, Badge::Seen);
+    assert!(snapshot.channels[0].baseline.available);
+    assert_eq!(snapshot.channels[0].baseline.files.len(), 1);
+    assert!(snapshot.channels[0].baseline.covered_from.is_some());
+}
+
+#[tokio::test]
 async fn logs_discovery_preserves_partial_entries_and_raw_unsupported_formats() {
     let server = Server::start().await;
     let path = server.logs_app("logs-formats");
@@ -420,6 +913,25 @@ async fn logs_overrides_hide_before_opening_replace_paths_and_preserve_trust() {
     assert!(logs::snapshot(&ssh, &target, &Request::default())
         .await
         .is_ok());
+    server.exec(
+        &format!("cp {path}/storage/logs/laravel.log {path}/storage/logs/laravel-worker.log"),
+        "",
+    );
+    target.log_daily = true;
+    target.logs.insert(
+        "laravel".into(),
+        LogChannel {
+            hide: true,
+            ..LogChannel::default()
+        },
+    );
+    let hidden_daily = logs::snapshot(&ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(hidden_daily
+        .channels
+        .iter()
+        .any(|channel| channel.key == "laravel-worker"));
 }
 
 #[tokio::test]
@@ -1016,8 +1528,8 @@ async fn deploy(transport: Arc<SshTransport>, target: DeployTarget) -> Vec<Deplo
     deploy_with_plan(transport, target, RunPlan::Deploy).await
 }
 
-async fn deploy_with_plan(
-    transport: Arc<SshTransport>,
+async fn deploy_with_plan<T: Transport>(
+    transport: Arc<T>,
     target: DeployTarget,
     run_plan: RunPlan,
 ) -> Vec<DeployEvent> {
@@ -1370,6 +1882,9 @@ async fn attach_recovers_a_detached_run_without_relaunching_the_step() {
         Some(DeployEvent::Finished(DeployOutcome::Succeeded))
     );
     assert_eq!(resumed.snapshot().status, ReceiptStatus::Final);
+    assert!(server
+        .exec(&format!("cat {path}/.git/shipslip.last-run"), "")
+        .contains(" succeeded\n@reflog "));
     assert_eq!(server.exec("cat ~/receipt-counter", ""), "first\nsecond");
 }
 
@@ -1534,6 +2049,10 @@ async fn lock_broken_mid_deploy_stops_after_the_step_and_spares_the_successor() 
     break_lock(&t, &other, "staging").await.unwrap();
     server.push_commit("third");
     let successor = prepare(target(&path, &[]), &other).await.unwrap();
+    server.exec(
+        &format!("printf successor > {path}/.git/shipslip.last-run"),
+        "",
+    );
 
     let events = running.rest(events).await;
     assert_eq!(
@@ -1548,6 +2067,10 @@ async fn lock_broken_mid_deploy_stops_after_the_step_and_spares_the_successor() 
     assert_eq!(
         server.exec(&format!("cat {path}/.git/shipslip.lock/run_id"), ""),
         successor.run_id()
+    );
+    assert_eq!(
+        server.exec(&format!("cat {path}/.git/shipslip.last-run"), ""),
+        "successor"
     );
     cancel(successor, &other).await.unwrap();
 }

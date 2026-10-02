@@ -109,8 +109,8 @@ starting at 1; the built-in Git fast-forward is step 0 and is not selectable.
 ## Read logs
 
 ```sh
-slip logs staging                    # grouped errors from the last 24 hours
-slip logs staging --since 7d          # includes earlier daily files
+slip logs staging                    # grouped errors since the latest run
+slip logs staging --since 7d          # override the default window
 slip logs staging --channels          # files, formats and coverage per channel
 slip logs staging qmkte               # latest full entry for a group ID
 slip logs staging --level warning --grep payment
@@ -127,6 +127,22 @@ by exception class and app file, including recurring errors. Copy a group's
 ID to open its latest entry and stack trace; row numbers also work, but can
 move between invocations. The first 20 groups are shown unless you use `--all`.
 
+The default window starts at the latest verified Shipslip run (deploy, rerun
+or from-step). During a run, the header says `deploy in progress`. If the run
+marker is missing or stale, the command uses the latest Git checkout change,
+then falls back to 24 hours when no reflog is available. The header always
+names the anchor; corrupt markers and Git failures are reported. `--since`
+selects your own window instead.
+
+`NEW` means the group was not found in the bounded logs immediately before
+that window. Comparison spans all channels, so an error moving between
+channels stays known. `?` means there is no usable comparison for that group's
+channels. New groups appear first; details also label new and seen message
+variants. Baseline coverage and channels without a baseline are disclosed;
+`NEW` is limited to that readable span, rather than the app's entire history.
+A partly recognized baseline can confirm known errors, but gives `?` for
+otherwise unseen groups because its unparsed output is not a usable comparison.
+
 `--level` includes that level and anything more severe; it defaults to `error`
 for groups and `debug` for `--raw`. `--grep` matches text without regard to
 case. `--since` accepts `30m`, `6h`, `7d`, `YYYY-MM-DD` or
@@ -138,7 +154,10 @@ clock change makes ordering across files approximate.
 The default read limits are 4 MiB of uncompressed log per channel and 12 MiB
 total. Channels share the total fairly, with unused shares redistributed;
 quiet channels get their whole file when it fits. `--max-bytes` replaces the
-total and per-channel limits (`k`, `m` and `g` use binary units). At most
+total and per-channel window limits (`k`, `m` and `g` use binary units).
+The comparison has a separate 2 MiB per-channel / 6 MiB total limit, shared
+fairly. It walks backward from the anchor through up to seven earlier daily
+files; `--channels` includes its coverage. At most
 20 channels and 50 files are selected per snapshot; omissions are reported.
 Partial coverage is printed in the header and affected counts use `≥`. Use
 `--channels` to inspect each channel's files, total size, last write, format and
@@ -148,8 +167,15 @@ are limited to 256 KiB, with a note in the detail view when truncated.
 Files resolving under `storage/logs`, including shared storage symlinks, need
 no config approval. Reading another configured path requires `slip trust ENV`.
 The server needs Linux with `/proc`, bash, GNU coreutils, gzip and tzdata.
-Log output can contain secrets; treat it as private. This snapshot command
-does not yet compare errors against a deploy.
+Log output can contain secrets; treat it as private.
+
+Deploys atomically record `<git dir>/shipslip.last-run` at run start and update
+it before releasing the owned lock. Attach completion updates the same run.
+Marker failures warn in output and receipts and never fail a deploy. The
+reader uses inode, size and checksum checks to validate recorded byte
+positions; rotation or copytruncate falls back to timestamps with a note.
+A later checkout invalidates the run anchor, even if HEAD returns to the same
+commit. An abandoned run or failed end update can show `outcome unknown`.
 
 Override channels by their original name in config:
 
