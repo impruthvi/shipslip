@@ -1741,6 +1741,61 @@ async fn deploy_runs_steps_verbatim_and_fast_forwards() {
 }
 
 #[tokio::test]
+async fn recipe_permissions_follow_the_server_umask_while_run_records_stay_private() {
+    let server = Server::start().await;
+    let path = server.app("recipe-permissions");
+    server.exec(&format!("mkdir {path}/storage"), "");
+
+    for (index, (mask, file_mode, dir_mode)) in [
+        ("002", "664", "775"),
+        ("027", "640", "750"),
+        ("022", "644", "755"),
+        ("077", "600", "700"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let ssh = Arc::new(LogsTransport {
+            ssh: server.connect().await,
+            calls: AtomicUsize::new(0),
+            before_read: String::new(),
+            prefix: format!("umask {mask}"),
+        });
+        let step = format!("printf cache > storage/cache-{mask}; mkdir storage/views-{mask}");
+        let plan = if index == 0 {
+            RunPlan::Deploy
+        } else {
+            RunPlan::Rerun
+        };
+        let events = deploy_with_plan(ssh.clone(), target(&path, &[&step]), plan).await;
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded)),
+            "{events:#?}"
+        );
+        assert_eq!(
+            server.exec(
+                &format!("stat -c '%a' {path}/storage/cache-{mask} {path}/storage/views-{mask}"),
+                ""
+            ),
+            format!("{file_mode}\n{dir_mode}"),
+            "server umask {mask}"
+        );
+    }
+    assert_eq!(
+        server.exec(
+            "find ~/.shipslip/runs -type f -printf '%m\\n' | sort -u",
+            ""
+        ),
+        "600"
+    );
+    assert_eq!(
+        server.exec("find ~/.shipslip -type d -printf '%m\\n' | sort -u", ""),
+        "700"
+    );
+}
+
+#[tokio::test]
 async fn steps_run_in_strict_mode() {
     let server = Server::start().await;
     let ssh = Arc::new(server.connect().await);
