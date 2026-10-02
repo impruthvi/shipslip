@@ -2530,6 +2530,71 @@ mod tests {
     }
 
     #[test]
+    fn exception_groups_decode_names_and_keep_raw_entries() {
+        let class = "Illuminate\\Database\\QueryException";
+        let file = "/srv/app/app/Http/Controllers/InvoiceExportController.php";
+        let context = serde_json::json!({"exception": format!("[object] ({class}(code: HY000): Missing table at {file}:16)")});
+        let encoded = entry_line(
+            "2026-10-01 02:00:00",
+            "ERROR",
+            &format!("Missing table {context}"),
+        );
+        let plain = entry_line(
+            "2026-10-01 01:00:00",
+            "ERROR",
+            &format!("{class}: Missing table at {file}:16"),
+        );
+        let mut snapshot = snapshot_of(&format!("{plain}{encoded}"), true);
+        snapshot.baseline_enabled = true;
+        snapshot.channels[0].baseline.available = true;
+        snapshot.baseline_entries = parse_entries(encoded.as_bytes(), 0, 0, "laravel.log");
+        let groups = group(&snapshot, Level::Error, None);
+        assert_eq!(groups.groups.len(), 1);
+        let g = &groups.groups[0];
+        assert_eq!(g.class, class);
+        assert_eq!(g.count, 2);
+        assert_eq!(g.badge, Badge::Seen);
+        assert_eq!(g.id, &group_id(class, Some(file))[..ID_LEN]);
+        assert!(render_detail(&snapshot, g)
+            .lines()
+            .next()
+            .unwrap()
+            .contains(class));
+        assert!(!render_detail(&snapshot, g)
+            .lines()
+            .next()
+            .unwrap()
+            .contains(r"Illuminate\\Database"));
+        assert!(render_detail(&snapshot, g).contains(encoded.trim_end()));
+        assert!(render_raw(&snapshot, Level::Error, None).contains(encoded.trim_end()));
+    }
+
+    #[test]
+    fn exception_groups_ignore_middleware_for_identity_and_baseline() {
+        let header = "Class not found {\"exception\":\"[object] (Error(code: 0): Class not found at /srv/app/app/Http/Controllers/InvoiceExportController.php:16)\n[stacktrace]\n";
+        let baseline = entry_line(
+            "2026-10-01 01:00:00",
+            "ERROR",
+            &format!("{header}#0 /srv/app/vendor/Handler.php(48): handle()\n\"}}"),
+        );
+        let current = entry_line(
+            "2026-10-01 02:00:00",
+            "ERROR",
+            &format!("{header}#0 /srv/app/vendor/ShareErrorsFromSession.php(48): handle()\n\"}}"),
+        );
+        let mut snapshot = snapshot_of(&current, true);
+        snapshot.baseline_enabled = true;
+        snapshot.channels[0].baseline.available = true;
+        snapshot.baseline_entries = parse_entries(baseline.as_bytes(), 0, 0, "laravel.log");
+        let groups = group(&snapshot, Level::Error, None);
+        let g = &groups.groups[0];
+        assert_eq!(g.class, "Error");
+        assert_eq!(g.badge, Badge::Seen);
+        assert!(g.variants.iter().all(|v| v.badge == Badge::Seen));
+        assert_eq!(g.id, "gqmkp");
+    }
+
+    #[test]
     fn since_accepts_durations_and_local_times() {
         assert_eq!(Since::parse("30m"), Ok(Since::Ago(1800)));
         assert_eq!(Since::parse("6h"), Ok(Since::Ago(21_600)));

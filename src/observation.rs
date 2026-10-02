@@ -621,11 +621,58 @@ pub(crate) fn parse_header(line: &str) -> Option<Header> {
     })
 }
 
-fn patterns() -> &'static (Regex, Regex, Regex, Regex, Regex, Regex) {
-    static RE: OnceLock<(Regex, Regex, Regex, Regex, Regex, Regex)> = OnceLock::new();
+/// Prefer Laravel's root exception object over mentions in the message or trace.
+/// Monolog may turn escaped newlines into literal line breaks, so the context
+/// string is not always valid JSON. In that case, read only its object prefix.
+fn exception_class(entry: &str) -> String {
+    static RE: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
+    let (field_re, object_re, plain_re) = RE.get_or_init(|| {
+        let class = r"(\\?[A-Za-z_][A-Za-z0-9_]*(?:\\+[A-Za-z_][A-Za-z0-9_]*)*)";
+        (
+            Regex::new(r#"(?:^|[,{])\s*"exception"\s*:\s*(")"#).unwrap(),
+            Regex::new(&format!(r"^\[object\]\s+\({class}\(code:")).unwrap(),
+            Regex::new(&format!(r"^\s*{class}(?::|\(code:|\s+at(?:\s|$))")).unwrap(),
+        )
+    });
+    let canonical = |class: &str| {
+        let class = class
+            .split('\\')
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("\\");
+        clip_utf8(&class, 256)
+    };
+    let first_line = entry.lines().next().unwrap_or(entry);
+    if let Some(field) = field_re.captures(first_line) {
+        let value = &entry[field.get(1).unwrap().start()..];
+        let decoded = serde_json::Deserializer::from_str(value)
+            .into_iter::<String>()
+            .next()
+            .and_then(Result::ok);
+        let object = decoded
+            .as_deref()
+            .unwrap_or_else(|| value.strip_prefix('"').unwrap_or(value));
+        if let Some(class) = object_re.captures(object) {
+            return canonical(&class[1]);
+        }
+    }
+    if let Some(class) = plain_re.captures(first_line) {
+        let name = class[1]
+            .rsplit('\\')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if name.ends_with("exception") || name.ends_with("error") {
+            return canonical(&class[1]);
+        }
+    }
+    "Error".into()
+}
+
+fn patterns() -> &'static (Regex, Regex, Regex, Regex, Regex) {
+    static RE: OnceLock<(Regex, Regex, Regex, Regex, Regex)> = OnceLock::new();
     RE.get_or_init(|| {
         (
-            Regex::new(r"(?i)([A-Za-z_\\][A-Za-z0-9_\\]*(?:Exception|Error))").unwrap(),
             // `app/` must be a whole path segment: `/srv/my-app/vendor/...` is not an app file.
             Regex::new(
                 r"(?:^|[^A-Za-z0-9_.-])((?:/?[A-Za-z0-9_.-]+/)*?app/[A-Za-z0-9_./-]+\.php)(?::(\d+)|\((\d+)\))",
@@ -643,11 +690,8 @@ pub(crate) fn signature(
     level: &str,
     entry: &str,
 ) -> (String, String, Option<String>, Option<String>) {
-    let (class_re, frame_re, uuid_re, number_re, single_quote_re, double_quote_re) = patterns();
-    let class = class_re
-        .find(entry)
-        .map(|m| clip_utf8(m.as_str(), 256))
-        .unwrap_or_else(|| "Error".into());
+    let (frame_re, uuid_re, number_re, single_quote_re, double_quote_re) = patterns();
+    let class = exception_class(entry);
     let frame = frame_re
         .captures_iter(entry)
         .find(|m| !m[1].contains("vendor/"));
@@ -1293,5 +1337,84 @@ mod tests {
         for (level, entry, expected) in cases {
             assert_eq!(signature(level, entry).0, *expected, "entry: {entry}");
         }
+    }
+
+    #[test]
+    fn exception_identity_comes_from_the_root_object_not_message_or_stack() {
+        let cases = [
+            ("Error", "Class not found"),
+            ("Exception", "Something failed"),
+            ("TypeError", "Invalid argument"),
+            (
+                "Illuminate\\Database\\QueryException",
+                "SQLSTATE[HY000]: no such table",
+            ),
+            (
+                "App\\Domain\\Failure",
+                "RuntimeException mentioned in the message",
+            ),
+        ];
+        for (class, message) in cases {
+            let exception = format!("[object] ({class}(code: 0): {message} at /srv/app/app/Jobs/Export.php:16)\n[stacktrace]\n#0 /srv/app/vendor/ShareErrorsFromSession.php(48): handle()\n[previous exception] [object] (LogicException(code: 0): previous)");
+            let context = serde_json::json!({"exception": exception});
+            let entry = format!("RuntimeException mentioned by user {context}");
+            assert_eq!(signature("ERROR", &entry).1, class, "{entry}");
+            // Monolog can render JSON's escaped newlines as actual line breaks.
+            let inline = entry.replace("\\n", "\n");
+            assert_eq!(signature("ERROR", &inline).1, class, "{inline}");
+        }
+        let unicode_escape = r#"Failed {"exception":"[object] (Illuminate\u005cDatabase\u005cQueryException(code: 0): x)"}"#;
+        assert_eq!(
+            signature("ERROR", unicode_escape).1,
+            "Illuminate\\Database\\QueryException"
+        );
+    }
+
+    #[test]
+    fn exception_plain_text_requires_a_complete_explicit_class() {
+        for (entry, expected) in [
+            ("Error: Class not found\n#0 /srv/app/vendor/ShareErrorsFromSession.php(48): handle()", "Error"),
+            ("Exception(code: 0): failed", "Exception"),
+            ("Illuminate\\Database\\QueryException at /srv/app/app/Jobs/Export.php:16", "Illuminate\\Database\\QueryException"),
+            (r"Illuminate\\Database\\QueryException: failed", "Illuminate\\Database\\QueryException"),
+            ("ShareErrorsFromSession: handle()", "Error"),
+            ("QueryExceptionFactory: failed", "Error"),
+            ("User mentioned QueryException in a message\n#0 /srv/app/vendor/RuntimeException.php:12", "Error"),
+        ] {
+            assert_eq!(signature("ERROR", entry).1, expected, "{entry}");
+        }
+    }
+
+    #[test]
+    fn exception_watch_preserves_baseline_when_middleware_changes() {
+        let header = "[2026-10-02 12:00:00] production.ERROR: Class not found {\"exception\":\"[object] (Error(code: 0): Class not found at /srv/app/app/Jobs/Export.php:16)\n[stacktrace]\n";
+        let baseline = format!("{header}#0 /srv/app/vendor/Handler.php(48): handle()\n\"}}\n");
+        let current =
+            format!("{header}#0 /srv/app/vendor/ShareErrorsFromSession.php(48): handle()\n\"}}\n");
+        let (events, mut receiver) = mpsc::unbounded_channel();
+        let mut state = LogState::new(Vec::new());
+        state.bytes(baseline.as_bytes(), LogPhase::During, true, &events);
+        state.flush(true, &events);
+        state.bytes(current.as_bytes(), LogPhase::After, false, &events);
+        state.flush(false, &events);
+        assert!(state.result.new_errors.is_empty());
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn exception_watch_groups_escaped_and_plain_classes_together() {
+        let exception = "[object] (Illuminate\\Database\\QueryException(code: 0): Missing table at /srv/app/app/Jobs/Export.php:16)";
+        let context = serde_json::json!({"exception": exception});
+        let entries = format!("[2026-10-02 12:00:00] production.ERROR: Missing table {context}\n[2026-10-02 12:00:01] production.ERROR: Illuminate\\Database\\QueryException: Missing table at /srv/app/app/Jobs/Export.php:16\n");
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let mut state = LogState::new(Vec::new());
+        state.bytes(entries.as_bytes(), LogPhase::After, false, &events);
+        state.flush(false, &events);
+        assert_eq!(state.result.new_errors.len(), 1);
+        assert_eq!(
+            state.result.new_errors[0].exception,
+            "Illuminate\\Database\\QueryException"
+        );
+        assert_eq!(state.result.new_errors[0].count, 2);
     }
 }
