@@ -60,8 +60,11 @@ const IDENT_FN: &str = r#"ident() { s=$(cat "/proc/$1/stat" 2>/dev/null) || retu
 const SAME_PROCESS_FN: &str = r#"same_process() { [ ! -s "$d/ident" ] || [ "$(ident "$(cat "$d/pid")")" = "$(cat "$d/ident")" ]; }"#;
 
 pub(crate) fn launch_script(run_id: &str, key: &str, script: &str) -> String {
+    // Keep run records private without imposing that mask on app files created
+    // by Composer, Artisan, or other recipe commands.
     format!(
         r#"set -e
+recipe_umask=$(umask)
 umask 077
 mkdir -p {runs}
 chmod 700 "$HOME"/.shipslip "$HOME"/.shipslip/runs
@@ -69,7 +72,7 @@ printf '%s' {script} > {runs}/{key}.sh
 mkdir {runs}/{key}
 d={runs}/{key}
 mv "$d.sh" "$d/script.sh"
-setsid nohup bash -c 'echo $$ > "$1/pid.tmp" && mv "$1/pid.tmp" "$1/pid"; bash -l -s < "$1/script.sh"; echo $? > "$1/exit.tmp"; mv "$1/exit.tmp" "$1/exit"' _ "$d" > "$d/log" 2>&1 < /dev/null &
+setsid nohup bash -c 'echo $$ > "$1/pid.tmp" && mv "$1/pid.tmp" "$1/pid"; (umask "$2"; bash -l -s < "$1/script.sh"); echo $? > "$1/exit.tmp"; mv "$1/exit.tmp" "$1/exit"' _ "$d" "$recipe_umask" > "$d/log" 2>&1 < /dev/null &
 {ident}
 for _ in $(seq 100); do
   if [ -s "$d/pid" ]; then
