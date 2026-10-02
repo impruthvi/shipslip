@@ -11,6 +11,7 @@ include = ["/src", "/docs", "/Cargo.toml", "/Cargo.lock", "/README.md", "/CHANGE
 
 [dependencies]
 base64 = "0.22"
+flate2 = "1.1.10"
 fs2 = "0.4"
 regex = "1"
 serde = { version = "1.0.229", features = ["derive"] }

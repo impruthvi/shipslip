@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends openssh-server bash git procps ca-certificates \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server bash git procps ca-certificates gzip tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /run/sshd \
     && useradd --create-home --shell /bin/bash deploy \
@@ -9,7 +9,8 @@ RUN apt-get update \
         > /etc/ssh/sshd_config.d/test.conf
 
 COPY php /usr/local/bin/php
-RUN chmod 755 /usr/local/bin/php
+COPY seed-logs /usr/local/bin/seed-logs
+RUN chmod 755 /usr/local/bin/php /usr/local/bin/seed-logs
 
 # origin.git has two commits; tests clone it and reset to the first.
 USER deploy

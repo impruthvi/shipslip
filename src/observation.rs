@@ -19,10 +19,10 @@ use crate::DeployTarget;
 
 const BASELINE_BYTES: usize = 2 * 1024 * 1024;
 const POLL_BYTES: usize = 256 * 1024;
-const ENTRY_BYTES: usize = 256 * 1024;
+pub(crate) const ENTRY_BYTES: usize = 256 * 1024;
 const MAX_SIGNATURES: usize = 10_000;
-const MAX_GROUPS: usize = 500;
-const MAX_VARIANTS: usize = 50;
+pub(crate) const MAX_GROUPS: usize = 500;
+pub(crate) const MAX_VARIANTS: usize = 50;
 const POLL_EVERY: Duration = Duration::from_millis(500);
 const MAX_HISTORY_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_HISTORY: usize = 5_000;
@@ -597,16 +597,15 @@ fn recent_first(current: impl IntoIterator<Item = String>, previous: Vec<String>
 }
 
 #[derive(Clone)]
-struct Header {
-    level: String,
-    message: String,
+pub(crate) struct Header {
+    /// The text between the leading brackets, as Laravel wrote it.
+    pub(crate) timestamp: String,
+    pub(crate) level: String,
+    pub(crate) message: String,
 }
 
-fn parse_header(line: &str) -> Option<Header> {
-    if !line.starts_with('[') {
-        return None;
-    }
-    let rest = line.split_once("] ")?.1;
+pub(crate) fn parse_header(line: &str) -> Option<Header> {
+    let (timestamp, rest) = line.strip_prefix('[')?.split_once("] ")?;
     let (level_part, message) = rest.split_once(": ")?;
     let level = level_part.rsplit('.').next()?.to_ascii_uppercase();
     if !matches!(
@@ -616,6 +615,7 @@ fn parse_header(line: &str) -> Option<Header> {
         return None;
     }
     Some(Header {
+        timestamp: timestamp.into(),
         level,
         message: message.into(),
     })
@@ -639,7 +639,10 @@ fn patterns() -> &'static (Regex, Regex, Regex, Regex, Regex, Regex) {
     })
 }
 
-fn signature(level: &str, entry: &str) -> (String, String, Option<String>, Option<String>) {
+pub(crate) fn signature(
+    level: &str,
+    entry: &str,
+) -> (String, String, Option<String>, Option<String>) {
     let (class_re, frame_re, uuid_re, number_re, single_quote_re, double_quote_re) = patterns();
     let class = class_re
         .find(entry)
@@ -672,7 +675,7 @@ fn signature(level: &str, entry: &str) -> (String, String, Option<String>, Optio
     )
 }
 
-fn clip_utf8(value: &str, limit: usize) -> String {
+pub(crate) fn clip_utf8(value: &str, limit: usize) -> String {
     let mut end = value.len().min(limit);
     while !value.is_char_boundary(end) {
         end -= 1;
@@ -1042,6 +1045,8 @@ mod tests {
             log: None,
             log_daily: false,
             smoke_url: None,
+            timezone: None,
+            logs: Default::default(),
         };
         let (events, mut receiver) = mpsc::unbounded_channel();
         let observer = LogObserver::start(
@@ -1180,5 +1185,113 @@ mod tests {
     fn curl_status_000_is_no_status() {
         assert_eq!(parse_write_out("shipslip:000 0.012"), (None, 12));
         assert_eq!(parse_write_out("shipslip:204 0.5"), (Some(204), 500));
+    }
+
+    /// Pins the deploy watch's grouping before `slip logs` starts sharing its parser.
+    #[tokio::test]
+    async fn watch_groups_new_errors_by_class_and_app_file() {
+        const LOG: &[u8] = b"[2026-09-01 00:00:00] production.ERROR: OldException: old failure\n\
+[2026-09-01 00:01:00] production.ERROR: Illuminate\\Database\\QueryException: Duplicate entry 7 at /srv/app/app/Http/Controllers/OrderController.php:42\n\
+[stacktrace]\n\
+#0 /srv/app/vendor/laravel/framework/src/Connection.php(776): run()\n\
+#1 /srv/app/app/Http/Controllers/OrderController.php(42): store()\n\
+[2026-09-01 00:02:00] production.ERROR: Illuminate\\Database\\QueryException: Duplicate entry 9 at /srv/app/app/Http/Controllers/OrderController.php:42\n\
+[2026-09-01 00:03:00] production.ERROR: Illuminate\\Database\\QueryException: Deadlock found at /srv/app/app/Http/Controllers/OrderController.php:50\n\
+[2026-09-01 00:04:00] production.INFO: Order shipped 12\n\
+[2026-09-01 00:05:00] production.WARNING: Slow query 3000ms\n";
+        let appended = Read::File {
+            size: OLD_ERROR.len() + LOG.len(),
+            start: OLD_ERROR.len(),
+            bytes: LOG,
+        };
+        let transport = LogTransport::new(vec![whole(OLD_ERROR), appended]);
+        let (result, _) = observe(&transport, Duration::ZERO).await;
+
+        let file = "/srv/app/app/Http/Controllers/OrderController.php";
+        let variant = |message: &str, normalized: &str, line: &str, count| ErrorVariant {
+            signature: format!("ERROR|Illuminate\\Database\\QueryException|{file}|{normalized}"),
+            level: "ERROR".into(),
+            message: message.into(),
+            display_file_line: Some(format!("{file}:{line}")),
+            count,
+            phase: LogPhase::During,
+        };
+        assert_eq!(result.status, WatchStatus::Complete);
+        assert_eq!(result.baseline_signatures, 1);
+        assert_eq!((result.observed_lines, result.parsed_lines), (9, 9));
+        assert_eq!(
+            result.new_errors,
+            [ErrorGroup {
+                exception: "Illuminate\\Database\\QueryException".into(),
+                file: Some(file.into()),
+                count: 3,
+                variants: vec![
+                    variant(
+                        &format!("Illuminate\\Database\\QueryException: Duplicate entry 7 at {file}:42"),
+                        &format!("Illuminate\\Database\\QueryException: Duplicate entry <num> at {file}:<num>"),
+                        "42",
+                        2,
+                    ),
+                    variant(
+                        &format!("Illuminate\\Database\\QueryException: Deadlock found at {file}:50"),
+                        &format!("Illuminate\\Database\\QueryException: Deadlock found at {file}:<num>"),
+                        "50",
+                        1,
+                    ),
+                ],
+                overflow_variants: 0,
+            }]
+        );
+    }
+
+    /// Signatures are stored in each user's `history.json`, so their bytes are
+    /// a compatibility contract: a change makes known errors look new again.
+    #[test]
+    fn signature_bytes_are_stable() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "ERROR",
+                "Illuminate\\Database\\QueryException: SQLSTATE[23000]: Integrity constraint violation: 1062 Duplicate entry 'a@b.co' for key 'users_email_unique' (Connection: mysql, SQL: insert into `users` (`email`) values (a@b.co)) at /srv/app/vendor/laravel/framework/src/Illuminate/Database/Connection.php:822\n[stacktrace]\n#0 /srv/app/vendor/laravel/framework/src/Illuminate/Database/Connection.php(776): runQueryCallback()\n#1 /srv/app/app/Http/Controllers/UserController.php(42): store()",
+                "ERROR|Illuminate\\Database\\QueryException|/srv/app/app/Http/Controllers/UserController.php|Illuminate\\Database\\QueryException: SQLSTATE[<num>]: Integrity constraint violation: <num> Duplicate entry 'a@b.co<quoted>users_email_unique' (Connection: mysql, SQL: insert into `users` (`email`) values (a@b.co)) at /srv/app/vendor/laravel/framework/src/Illuminate/Database/Connection.php:<num>",
+            ),
+            (
+                "ERROR",
+                "Order 9f1c2d3e-4b5a-6789-abcd-ef0123456789 failed after 3 retries (code 0x1F) at /srv/app/app/Jobs/ChargeOrder.php(17): handle()",
+                "ERROR|Error|/srv/app/app/Jobs/ChargeOrder.php|Order <uuid> failed after <num> retries (code <num>) at /srv/app/app/Jobs/ChargeOrder.php(<num>): handle()",
+            ),
+            (
+                "CRITICAL",
+                r#"Stripe\Exception\ApiConnectionException: Could not connect to Stripe "api.stripe.com timed out" {"exception":"[object] (Stripe\\Exception\\ApiConnectionException(code: 0): x at /srv/app/app/Services/Billing.php:88)"}"#,
+                r#"CRITICAL|Stripe\Exception\ApiConnectionException|/srv/app/app/Services/Billing.php|Stripe\Exception\ApiConnectionException: Could not connect to Stripe <quoted> {"exception":<quoted>}"#,
+            ),
+            (
+                "ERROR",
+                "Something went wrong for user 42",
+                "ERROR|Error||Something went wrong for user <num>",
+            ),
+            (
+                "WARNING",
+                "TypeError: Argument #1 ($id) must be of type int, string given, called in /var/www/html/app/Models/User.php on line 10 at /var/www/html/app/Models/User.php:10",
+                "WARNING|TypeError|/var/www/html/app/Models/User.php|TypeError: Argument #<num> ($id) must be of type int, string given, called in /var/www/html/app/Models/User.php on line <num> at /var/www/html/app/Models/User.php:<num>",
+            ),
+            (
+                "ERROR",
+                "RuntimeException: short 'id-7' value",
+                "ERROR|RuntimeException||RuntimeException: short 'id-<num>' value",
+            ),
+            (
+                "ERROR",
+                "RuntimeException: long 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' value",
+                "ERROR|RuntimeException||RuntimeException: long <quoted> value",
+            ),
+            (
+                "ERROR",
+                "LogicException: résumé ünïcödé 12",
+                "ERROR|LogicException||LogicException: résumé ünïcödé <num>",
+            ),
+        ];
+        for (level, entry, expected) in cases {
+            assert_eq!(signature(level, entry).0, *expected, "entry: {entry}");
+        }
     }
 }

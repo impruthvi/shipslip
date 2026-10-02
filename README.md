@@ -106,6 +106,44 @@ slip from-step staging 2     # run recipe steps 2 through the end
 server to already be on the clean target commit. Recipe steps are numbered
 starting at 1; the built-in Git fast-forward is step 0 and is not selectable.
 
+## Read logs
+
+```sh
+slip logs staging                    # grouped errors from the last 24 hours
+slip logs staging --since 7d          # includes earlier daily files
+slip logs staging qmkte               # latest full entry for a group ID
+slip logs staging --level warning --grep payment
+slip logs staging --raw --since 30m   # entries in timestamp order
+slip logs staging --all --max-bytes 8m
+```
+
+`logs` reads the configured `log` / `log_daily` files over SSH. It needs no
+Laravel package, runs no PHP or recipe steps, and leaves app files, deploy
+locks, receipts and signature history unchanged. The summary groups entries
+by exception class and app file, including recurring errors. Copy a group's
+ID to open its latest entry and stack trace; row numbers also work, but can
+move between invocations. The first 20 groups are shown unless you use `--all`.
+
+`--level` includes that level and anything more severe; it defaults to `error`
+for groups and `debug` for `--raw`. `--grep` matches text without regard to
+case. `--since` accepts `30m`, `6h`, `7d`, `YYYY-MM-DD` or
+`"YYYY-MM-DD HH:MM"`, up to 30 days back. Set `timezone = "Asia/Kolkata"`
+in the environment table if Laravel writes times in that zone; the default
+is UTC. Clock times are interpreted in that zone. Raw output warns when a
+clock change makes ordering across files approximate.
+
+The default read limit is 4 MiB of uncompressed log for the configured stream.
+`--max-bytes` changes that limit (`k`, `m` and `g` use binary units). Partial
+coverage is printed in the header and counts use `≥`. Files that rotate or
+are truncated during the snapshot are reported as changed. Individual entries
+are limited to 256 KiB, with a note in the detail view when truncated.
+
+Files resolving under `storage/logs`, including shared storage symlinks, need
+no config approval. Reading another configured path requires `slip trust ENV`.
+The server needs Linux with `/proc`, bash, GNU coreutils, gzip and tzdata.
+Log output can contain secrets; treat it as private. This snapshot command
+does not yet auto-discover other channels or compare errors against a deploy.
+
 ## Receipts and recovery
 
 Each CLI run saves a local receipt before it starts a remote command. On macOS,

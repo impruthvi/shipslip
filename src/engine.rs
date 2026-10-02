@@ -1,5 +1,6 @@
 //! Two-phase deploy: [`prepare`] (read-only) then [`execute`].
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -42,6 +43,23 @@ pub struct DeployTarget {
     pub log_daily: bool,
     #[serde(default)]
     pub smoke_url: Option<String>,
+    /// IANA zone Laravel writes log times in; `None` means UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// `slip logs` overrides, keyed by channel name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub logs: BTreeMap<String, LogChannel>,
+}
+
+/// How `slip logs` treats one channel under `storage/logs`, or adds one.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogChannel {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hide: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl DeployTarget {
@@ -1679,6 +1697,11 @@ fn recipe_hash(target: &DeployTarget, run_plan: RunPlan) -> String {
         field(target.log.as_deref().unwrap_or("").as_bytes());
         field(target.smoke_url.as_deref().unwrap_or("").as_bytes());
     }
+    // Same for settings added with `slip logs`.
+    if target.timezone.is_some() || !target.logs.is_empty() {
+        field(target.timezone.as_deref().unwrap_or("").as_bytes());
+        field(&serde_json::to_vec(&target.logs).expect("log channels serialize"));
+    }
     match run_plan {
         RunPlan::Deploy => field(b"deploy"),
         RunPlan::Rerun => field(b"rerun"),
@@ -2208,6 +2231,8 @@ mod tests {
             log: None,
             log_daily: false,
             smoke_url: None,
+            timezone: None,
+            logs: BTreeMap::new(),
         }
     }
 
@@ -3725,10 +3750,29 @@ mod tests {
         );
     }
 
+    /// Receipts store this hash; an interrupted deploy stays attachable after
+    /// an upgrade only if settings it never had leave the hash unchanged.
+    #[test]
+    fn recipe_hash_is_unchanged_without_log_settings() {
+        let mut t = target(true, &["php artisan migrate --force"]);
+        assert_eq!(
+            recipe_hash(&t, RunPlan::Deploy),
+            "5a58c02a283460595c32452cb8a8d4d427fe1a940f94d842521d25031ca6245d"
+        );
+        t.watch_log = true;
+        t.log = Some("storage/logs/laravel".into());
+        t.log_daily = true;
+        t.smoke_url = Some("https://example.com/health".into());
+        assert_eq!(
+            recipe_hash(&t, RunPlan::Deploy),
+            "e47eb74cf241db99e20e6fc9d417b5cab25d0bb41da4ef7cc5a6df354115ca39"
+        );
+    }
+
     #[test]
     fn recipe_hash_covers_every_field() {
         let base = target(false, &["a", "b"]);
-        let changes: [fn(&mut DeployTarget); 7] = [
+        let changes: [fn(&mut DeployTarget); 9] = [
             |t| t.env = "other".into(),
             |t| t.production = true,
             |t| t.ssh_alias = "other".into(),
@@ -3736,6 +3780,16 @@ mod tests {
             |t| t.branch = "other".into(),
             |t| t.steps = vec!["ab".into()],
             |t| t.steps = vec!["a".into(), "b".into(), "".into()],
+            |t| t.timezone = Some("Asia/Kolkata".into()),
+            |t| {
+                t.logs.insert(
+                    "worker".into(),
+                    LogChannel {
+                        hide: true,
+                        ..LogChannel::default()
+                    },
+                );
+            },
         ];
         for change in changes {
             let mut t = base.clone();

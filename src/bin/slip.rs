@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::future::Future;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -10,13 +11,14 @@ use shipslip::config::{
     approve_trust, default_trust_path, is_branch_name, is_env_name, is_smoke_url, is_ssh_alias,
     trust_status, InitAnswers, InitPlan, LoadedConfig, TrustSnapshot, TrustStatus,
 };
+use shipslip::logs::{self, Level, Lookup, Since};
 use shipslip::receipt::{default_receipts_root, find_open, ReceiptJournal};
 use shipslip::transport::SshTransport;
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute_recorded, lock_status, prepare_with_plan,
     BreakLockError, BringUpError, Confirmation, DeployEvent, DeployOutcome, DeployTarget,
-    ExecuteRejected, ExecutionHandle, MaintenancePhase, PrepareError, RunPlan, SmokeResult,
-    StepStatus, WatchResult, WatchStatus, POST_DEPLOY_WATCH,
+    ExecuteRejected, ExecutionHandle, LogChannel, MaintenancePhase, PrepareError, RunPlan,
+    SmokeResult, StepStatus, WatchResult, WatchStatus, POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -30,8 +32,19 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("slip: {error}");
-            ExitCode::FAILURE
+            eprintln!("slip: {}", logs::escape(&error.to_string()));
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(|error| error.kind() == io::ErrorKind::InvalidInput)
+                || matches!(
+                    error.downcast_ref::<logs::LogsError>(),
+                    Some(logs::LogsError::BadSince(_) | logs::LogsError::TooOld)
+                )
+            {
+                ExitCode::from(2)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
 }
@@ -51,6 +64,13 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         action => action,
     };
     let config = LoadedConfig::load(&std::env::current_dir()?, command.config.as_deref())?;
+    if let Action::Logs {
+        environment,
+        options,
+    } = action
+    {
+        return logs_command(&config, &default_trust_path()?, &environment, options).await;
+    }
     if config.uses_default_recipe() {
         eprintln!("Using the default Laravel deploy recipe; add [recipe.deploy] to customize it.");
     }
@@ -70,6 +90,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
         Action::Up { environment } => {
             return up_command(&config, &trust_path, &environment).await;
         }
+        Action::Logs { .. } => unreachable!("logs runs before deploy setup"),
         Action::Run { environment, plan } => (environment, plan),
     };
     let target = trusted_target(&config, &trust_path, &environment)?;
@@ -554,6 +575,20 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
             action: Action::Trust { environment },
         }));
     }
+    if action == "logs" {
+        let environment = args
+            .get(index)
+            .ok_or_else(|| invalid_input("logs requires an environment name"))?
+            .clone();
+        let options = parse_logs_options(&args[index + 1..])?;
+        return Ok(Some(Command {
+            config,
+            action: Action::Logs {
+                environment,
+                options,
+            },
+        }));
+    }
     if matches!(action.as_str(), "attach" | "break-lock" | "up") {
         let environment = args
             .get(index)
@@ -609,6 +644,138 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
     }))
 }
 
+#[derive(Debug, Default)]
+struct LogsOptions {
+    /// A group ID prefix or row number to show in detail.
+    query: Option<String>,
+    since: Option<Since>,
+    level: Option<Level>,
+    grep: Option<String>,
+    raw: bool,
+    all: bool,
+    max_bytes: Option<u64>,
+}
+
+fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
+    let mut options = LogsOptions::default();
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        let mut value = |flag: &str| {
+            args.next()
+                .cloned()
+                .ok_or_else(|| invalid_input(format!("{flag} requires a value")))
+        };
+        match arg.as_str() {
+            "--since" => {
+                options.since = Some(Since::parse(&value("--since")?).map_err(invalid_input)?)
+            }
+            "--level" => {
+                let name = value("--level")?;
+                options.level = Some(Level::parse(&name).ok_or_else(|| {
+                    invalid_input(format!(
+                        "unknown level `{name}`; use one of {}",
+                        Level::names()
+                    ))
+                })?);
+            }
+            "--grep" => options.grep = Some(value("--grep")?),
+            "--max-bytes" => {
+                let size = value("--max-bytes")?;
+                options.max_bytes = Some(parse_size(&size).ok_or_else(|| {
+                    invalid_input(format!(
+                        "`--max-bytes {size}` must be a size like 500k or 20m"
+                    ))
+                })?);
+            }
+            "--raw" => options.raw = true,
+            "--all" => options.all = true,
+            flag if flag.starts_with("--") => {
+                return Err(invalid_input(format!(
+                    "unknown logs option `{flag}`; run `slip --help` for usage"
+                ))
+                .into())
+            }
+            query if options.query.is_none() => options.query = Some(query.to_string()),
+            _ => return Err(invalid_input("logs accepts one group ID or row number").into()),
+        }
+    }
+    if options.raw && options.query.is_some() {
+        return Err(invalid_input("--raw shows entries, not a group; drop the group ID").into());
+    }
+    Ok(options)
+}
+
+/// Bytes, or a number with a `k`, `m` or `g` suffix (binary units).
+fn parse_size(size: &str) -> Option<u64> {
+    let lower = size.to_ascii_lowercase();
+    let (number, unit) = match lower.chars().last()? {
+        'k' => (&lower[..lower.len() - 1], 1024),
+        'm' => (&lower[..lower.len() - 1], 1024 * 1024),
+        'g' => (&lower[..lower.len() - 1], 1024 * 1024 * 1024),
+        _ => (lower.as_str(), 1),
+    };
+    number
+        .parse::<u64>()
+        .ok()
+        .and_then(|n| n.checked_mul(unit))
+        .filter(|bytes| *bytes > 0)
+}
+
+async fn logs_command(
+    config: &LoadedConfig,
+    trust_path: &Path,
+    environment: &str,
+    options: LogsOptions,
+) -> Result<ExitCode, Box<dyn Error>> {
+    let target = config.target(environment).ok_or_else(|| {
+        invalid_input(format!("environment `{environment}` is not in the config"))
+    })?;
+    // Reading storage/logs needs no approval; other configured paths do.
+    let snapshot = config
+        .trust_snapshot(environment)
+        .expect("target has an environment");
+    let trusted = matches!(
+        trust_status(trust_path, config.repo_root(), environment, &snapshot)?,
+        TrustStatus::Trusted
+    );
+    let transport = SshTransport::connect(&target.ssh_alias).await?;
+    let request = logs::Request {
+        since: options.since,
+        max_bytes: options.max_bytes,
+        allow_outside: trusted,
+    };
+    let snapshot = logs::snapshot(&transport, &target, &request).await?;
+    let grep = options.grep.as_deref();
+    if options.raw {
+        let level = options.level.unwrap_or(Level::Debug);
+        print!("{}", logs::render_raw(&snapshot, level, grep));
+        return Ok(ExitCode::SUCCESS);
+    }
+    let level = options.level.unwrap_or(Level::Error);
+    let groups = logs::group(&snapshot, level, grep);
+    let Some(query) = options.query else {
+        print!(
+            "{}",
+            logs::render_summary(&snapshot, &groups, level, options.all)
+        );
+        return Ok(ExitCode::SUCCESS);
+    };
+    match logs::find(&groups, &query) {
+        Lookup::Found(group) => {
+            print!("{}", logs::render_detail(&snapshot, group));
+            Ok(ExitCode::SUCCESS)
+        }
+        Lookup::Ambiguous(matches) => {
+            eprint!("{}", logs::render_ambiguous(&matches));
+            Ok(ExitCode::from(2))
+        }
+        Lookup::Missing => {
+            eprint!("{}", logs::render_miss(&snapshot, &query));
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
 fn print_help() {
     println!(
         "Shipslip deploy runner\n\n\
@@ -619,6 +786,7 @@ fn print_help() {
          \x20 slip [--config FILE] attach ENV\n\
          \x20 slip [--config FILE] break-lock ENV\n\
          \x20 slip [--config FILE] up ENV\n\
+         \x20 slip [--config FILE] logs ENV [ID|ROW] [OPTIONS]\n\
          \x20 slip --version\n\n\
          Commands:\n\
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\
@@ -628,7 +796,16 @@ fn print_help() {
          \x20 trust [ENV]        Review and approve config changes\n\
          \x20 attach ENV         Resume an unfinished run without relaunching its active step\n\
          \x20 break-lock ENV     Clear a stale deploy lock after checking the old run\n\
-         \x20 up ENV             Run `php artisan up` under a new deploy lock\n\n\
+         \x20 up ENV             Run `php artisan up` under a new deploy lock\n\
+         \x20 logs ENV           Group recent log errors; read-only\n\n\
+         Logs options:\n\
+         \x20 ID|ROW             Show one group's latest entry and variants\n\
+         \x20 --since S          30m, 6h, 7d, 2026-10-01 or \"2026-10-01 14:00\" (default 24h)\n\
+         \x20 --level L          This level and more severe (default error; --raw: debug)\n\
+         \x20 --grep TEXT        Only entries containing TEXT, ignoring case\n\
+         \x20 --raw              Print entries instead of groups\n\
+         \x20 --all              Show every group, not just the first 20\n\
+         \x20 --max-bytes SIZE   Read up to SIZE of log, like 20m (default 4m)\n\n\
          Config is discovered from the current directory up to the git root.\n\
          SHIPSLIP_CONFIG can select a different file."
     );
@@ -1056,11 +1233,15 @@ fn saved_target_matches_current(saved: &DeployTarget, current: &DeployTarget) ->
         log,
         log_daily,
         smoke_url,
+        timezone,
+        logs,
     } = saved;
     !watch_log
         && log.is_none()
         && !log_daily
         && smoke_url.is_none()
+        && timezone.is_none()
+        && logs.is_empty()
         && *env == current.env
         && *production == current.production
         && *ssh_alias == current.ssh_alias
@@ -1081,6 +1262,8 @@ fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot)
         log,
         log_daily,
         smoke_url,
+        timezone,
+        logs,
         steps,
     } = current;
     show_change(
@@ -1119,6 +1302,16 @@ fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot)
         previous.map(|old| format!("{:?}", old.smoke_url)),
         format!("{smoke_url:?}"),
     );
+    show_change(
+        "timezone",
+        previous.map(|old| format!("{:?}", old.timezone)),
+        format!("{timezone:?}"),
+    );
+    show_change(
+        "logs",
+        previous.map(|old| describe_log_channels(&old.logs)),
+        describe_log_channels(logs),
+    );
     if previous.is_none_or(|old| old.steps != *steps) {
         if let Some(old) = previous {
             println!("  recipe steps before:");
@@ -1131,6 +1324,29 @@ fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot)
             println!("    {}. {step}", index + 1);
         }
     }
+}
+
+fn describe_log_channels(channels: &BTreeMap<String, LogChannel>) -> String {
+    if channels.is_empty() {
+        return "none".into();
+    }
+    channels
+        .iter()
+        .map(|(name, LogChannel { hide, rename, path })| {
+            let mut parts = Vec::new();
+            if *hide {
+                parts.push("hidden".to_string());
+            }
+            if let Some(rename) = rename {
+                parts.push(format!("shown as {rename}"));
+            }
+            if let Some(path) = path {
+                parts.push(format!("path {path}"));
+            }
+            format!("{name} ({})", parts.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 fn show_change(label: &str, previous: Option<String>, current: String) {
@@ -1289,11 +1505,26 @@ struct Command {
 
 enum Action {
     Init,
-    Run { environment: String, plan: RunPlan },
-    Trust { environment: Option<String> },
-    Attach { environment: String },
-    BreakLock { environment: String },
-    Up { environment: String },
+    Run {
+        environment: String,
+        plan: RunPlan,
+    },
+    Trust {
+        environment: Option<String>,
+    },
+    Attach {
+        environment: String,
+    },
+    BreakLock {
+        environment: String,
+    },
+    Up {
+        environment: String,
+    },
+    Logs {
+        environment: String,
+        options: LogsOptions,
+    },
 }
 
 #[cfg(test)]
@@ -1302,6 +1533,64 @@ mod tests {
     use std::io::BufReader;
 
     use super::*;
+
+    #[test]
+    fn logs_arguments_preserve_filters_and_reject_invalid_combinations() {
+        let args = [
+            "slip",
+            "logs",
+            "production",
+            "qmkte",
+            "--since",
+            "6h",
+            "--level",
+            "WARNING",
+            "--grep",
+            "payment",
+            "--max-bytes",
+            "20m",
+            "--all",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let command = parse_args_from(args.into_iter().skip(1).collect())
+            .unwrap()
+            .unwrap();
+        let Action::Logs {
+            environment,
+            options,
+        } = command.action
+        else {
+            panic!("expected logs command")
+        };
+        assert_eq!(environment, "production");
+        assert_eq!(options.query.as_deref(), Some("qmkte"));
+        assert_eq!(options.since, Some(Since::Ago(21600)));
+        assert_eq!(options.level, Some(Level::Warning));
+        assert_eq!(options.grep.as_deref(), Some("payment"));
+        assert_eq!(options.max_bytes, Some(20 * 1024 * 1024));
+        assert!(options.all);
+        for args in [
+            vec!["slip", "logs"],
+            vec!["slip", "logs", "production", "--since"],
+            vec!["slip", "logs", "production", "--level", "fatal"],
+            vec!["slip", "logs", "production", "--max-bytes", "0"],
+            vec![
+                "slip",
+                "logs",
+                "production",
+                "--max-bytes",
+                "18446744073709551615g",
+            ],
+            vec!["slip", "logs", "production", "--raw", "1"],
+            vec!["slip", "logs", "production", "1", "2"],
+            vec!["slip", "logs", "production", "--follow"],
+        ] {
+            assert!(
+                parse_args_from(args.into_iter().skip(1).map(str::to_string).collect()).is_err()
+            );
+        }
+    }
 
     #[derive(Default)]
     struct Controls {
