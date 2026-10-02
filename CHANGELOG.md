@@ -4,6 +4,25 @@ All notable changes to Shipslip are listed here. Shipslip follows
 [Semantic Versioning](https://semver.org/); before 1.0, a minor release may
 change the library API.
 
+## [0.2.1] - 2026-10-02
+
+### Fixed
+
+- Log snapshots and deployment monitoring identify the root Laravel exception,
+  including plain PHP `Error` and `Exception`, instead of picking up names
+  from messages, middleware filenames, or previous exceptions in stack traces.
+- Exception class names decode JSON escaping and use single namespace
+  separators, so escaped and plain versions group together and detail headers
+  remain readable. Original raw log entries remain unchanged.
+- Middleware-only stack changes no longer make the same plain PHP error appear
+  new relative to its baseline.
+
+### Upgrade notes
+
+- Corrected exception identities receive corrected group IDs. Deployment watch
+  history saved under an incorrectly parsed class may report that error as new
+  once after upgrading. Signatures for already-correct entries are preserved.
+
 ## [0.2.0] - 2026-10-02
 
 ### Added
