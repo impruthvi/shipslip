@@ -66,6 +66,13 @@ The server's deploy user needs permission to run the recipe commands and read
 Laravel's log. Its Git checkout must be clean, on the configured branch, and
 able to `git fetch origin` without an interactive prompt.
 
+Recipe commands use the server's permission mask. Choose ownership, group
+access, and a mask that let PHP-FPM read the files Composer and Artisan create.
+Shipslip 0.2.0 fixes earlier versions imposing `077` on recipe commands; the
+upgrade does not repair existing file permissions. If an earlier deploy left
+unreadable files, review access to `vendor`, `bootstrap/cache`, and
+`storage/framework`, then regenerate Laravel's caches with your recipe.
+
 ## 3. Add the project config
 
 From the **Laravel project's Git checkout**, run:
