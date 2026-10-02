@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
+use shipslip::logs::{self, Level, LogsError, Request, Since};
 use shipslip::receipt::{ReceiptJournal, ReceiptStatus};
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{
@@ -61,6 +62,11 @@ impl Drop for Server {
 }
 
 impl Server {
+    fn logs_app(&self, name: &str) -> String {
+        let path = self.app(name);
+        self.exec(&format!("seed-logs {}", quote(&path)), "");
+        path
+    }
     async fn start() -> Self {
         static BUILD: Once = Once::new();
         BUILD.call_once(|| {
@@ -214,6 +220,421 @@ impl Server {
     }
 }
 
+fn quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Change the server after the probe, or supply a deterministic clock, while
+/// still running both reader scripts against a real sshd.
+struct LogsTransport {
+    ssh: SshTransport,
+    calls: AtomicUsize,
+    before_read: String,
+    prefix: String,
+}
+
+impl Transport for LogsTransport {
+    async fn run(
+        &self,
+        script: &str,
+        output: mpsc::UnboundedSender<String>,
+    ) -> Result<i32, TransportError> {
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 1 && !self.before_read.is_empty() {
+            let (code, _) = run(&self.ssh, &self.before_read).await;
+            assert_eq!(code, Ok(0));
+        }
+        self.ssh
+            .run(&format!("{}\n{script}", self.prefix), output)
+            .await
+    }
+
+    async fn reconnect(&self) -> Result<(), TransportError> {
+        self.ssh.reconnect().await
+    }
+}
+
+#[tokio::test]
+async fn logs_snapshot_merges_daily_files_and_changes_no_app_or_run_files() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-daily");
+    // Include existing lock/history state: logs must not alter or take it.
+    server.exec(&format!("mkdir -p {path}/.git/shipslip.lock ~/.shipslip; printf held > {path}/.git/shipslip.lock/owner; printf known > ~/.shipslip/history.json"), "");
+    let inspect = "find /home/deploy -type f -print0 | sort -z | xargs -0 sha256sum; find /home/deploy -printf '%p %s %i %T@ %C@\\n' | sort";
+    let before = server.exec(inspect, "");
+    let ssh = server.connect().await;
+    let mut target = target(&path, &[]);
+    target.log_daily = true;
+    let snapshot = logs::snapshot(
+        &ssh,
+        &target,
+        &Request {
+            since: Some(Since::Ago(2 * 86400)),
+            ..Request::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot.channels[0].files.len(), 2);
+    assert!(snapshot.channels[0].complete);
+    let groups = logs::group(&snapshot, Level::Error, None);
+    let query = groups
+        .groups
+        .iter()
+        .find(|g| g.class == "QueryException")
+        .unwrap();
+    assert_eq!(query.count, 2);
+    let detail = logs::render_detail(&snapshot, query);
+    assert!(detail.contains("[stacktrace]"));
+    assert!(detail.contains("Checkout.php(3)"));
+    let raw = logs::render_raw(&snapshot, Level::Debug, None);
+    assert!(raw.contains("Slow query"));
+    assert!(!raw.contains('\x1b'));
+    assert!(raw.contains("\\x1b]0;title\\x07"));
+    assert!(raw.find("Duplicate entry 7").unwrap() < raw.find("Duplicate entry 9").unwrap());
+    assert_eq!(
+        logs::group(&snapshot, Level::Critical, None).groups.len(),
+        1
+    );
+    assert_eq!(
+        logs::group(&snapshot, Level::Error, Some("DUPLICATE")).groups[0].count,
+        2
+    );
+    assert!(snapshot.channels[0].bytes_read <= snapshot.channels[0].budget);
+    // Tiny individual files can grow when gzip/base64 framing is added.
+    assert!(snapshot.bytes_transferred <= 4 * 1024 * 1024);
+    assert_eq!(
+        server.exec(inspect, ""),
+        before,
+        "log snapshots must be read-only"
+    );
+}
+
+#[tokio::test]
+async fn logs_paths_require_trust_outside_storage_and_allow_shared_storage() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-paths");
+    let ssh = server.connect().await;
+    let mut target = target(&path, &[]);
+    target.log = Some("storage/logs/pay ments.log".into());
+    let snapshot = logs::snapshot(&ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        logs::group(&snapshot, Level::Error, None).groups[0].class,
+        "PaymentException"
+    );
+    server.exec(&format!("cp {path}/storage/logs/payments.log /home/deploy/secret.log; ln -s /home/deploy/secret.log {path}/storage/logs/secret.log"), "");
+    for log in ["../secret.log", "storage/logs/secret.log"] {
+        target.log = Some(log.into());
+        assert!(matches!(
+            logs::snapshot(&ssh, &target, &Request::default()).await,
+            Err(LogsError::Outside { .. })
+        ));
+        let allowed = logs::snapshot(
+            &ssh,
+            &target,
+            &Request {
+                allow_outside: true,
+                ..Request::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(allowed.entries.len(), 1);
+    }
+    server.exec(&format!("rm {path}/storage/logs/secret.log; mv {path}/storage/logs /home/deploy/shared-logs; ln -s /home/deploy/shared-logs {path}/storage/logs"), "");
+    target.log = Some("storage/logs/payments.log".into());
+    assert!(
+        logs::snapshot(&ssh, &target, &Request::default())
+            .await
+            .unwrap()
+            .channels[0]
+            .complete
+    );
+}
+
+#[tokio::test]
+async fn logs_byte_limit_and_partial_lookup_are_honest() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-budget");
+    server.exec(&format!("cd {path}/storage/logs; for n in $(seq 1 1000); do printf '[%s] production.ERROR: RuntimeException: row %s\\n' \"$(date -u '+%F %T')\" \"$n\"; done > laravel.log"), "");
+    let ssh = server.connect().await;
+    for limit in [16, 4096] {
+        let snapshot = logs::snapshot(
+            &ssh,
+            &target(&path, &[]),
+            &Request {
+                max_bytes: Some(limit),
+                ..Request::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot.channels[0].bytes_read, limit);
+        assert!(!snapshot.channels[0].complete);
+        assert!(logs::render_miss(&snapshot, "zz").contains("not found in what was read"));
+        let groups = logs::group(&snapshot, Level::Error, None);
+        let summary = logs::render_summary(&snapshot, &groups, Level::Error, false);
+        assert!(summary.contains("≥") || summary.contains("coverage is incomplete"));
+    }
+}
+
+#[tokio::test]
+async fn logs_read_refuses_symlink_swaps_rotation_and_copytruncate() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-races");
+    let setup = format!("cd {path}/storage/logs; cp payments.log original.log; cp payments.log /home/deploy/secret.log");
+    server.exec(&setup, "");
+    for mutation in [
+        "rm payments.log; ln -s /home/deploy/secret.log payments.log",
+        "mv payments.log rotated.log; cp original.log payments.log",
+        ": > payments.log; printf 'replaced content\\n' > payments.log; cat original.log >> payments.log",
+    ] {
+        server.exec(&format!("cd {path}/storage/logs; rm -f payments.log; cp original.log payments.log"), "");
+        let transport = LogsTransport { ssh: server.connect().await, calls: AtomicUsize::new(0), before_read: format!("cd {path}/storage/logs; {mutation}"), prefix: String::new() };
+        let mut target = target(&path, &[]);
+        target.log = Some("storage/logs/payments.log".into());
+        let snapshot = logs::snapshot(&transport, &target, &Request::default()).await.unwrap();
+        assert_eq!(transport.calls.load(Ordering::Relaxed), 2);
+        assert!(snapshot.entries.is_empty(), "{mutation}");
+        assert!(!snapshot.channels[0].complete);
+        assert_eq!(snapshot.channels[0].changed.len(), 1);
+        assert!(logs::render_header(&snapshot).contains("changed during read"));
+    }
+}
+
+#[tokio::test]
+async fn logs_append_after_probe_is_excluded_from_the_snapshot() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-append");
+    let transport = LogsTransport { ssh: server.connect().await, calls: AtomicUsize::new(0), before_read: format!("printf '[%s] production.ERROR: LateException: appended\\n' \"$(date -u '+%F %T')\" >> {path}/storage/logs/payments.log"), prefix: String::new() };
+    let mut target = target(&path, &[]);
+    target.log = Some("storage/logs/payments.log".into());
+    let snapshot = logs::snapshot(&transport, &target, &Request::default())
+        .await
+        .unwrap();
+    assert_eq!(snapshot.entries.len(), 1);
+    assert!(snapshot.channels[0].complete);
+    assert!(!logs::render_raw(&snapshot, Level::Debug, None).contains("LateException"));
+}
+
+#[tokio::test]
+async fn logs_timezone_absolute_windows_and_missing_server_zone() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-zone");
+    let ssh = server.connect().await;
+    let mut target = target(&path, &[]);
+    target.log = Some("storage/logs/payments.log".into());
+    target.timezone = Some("Asia/Kolkata".into());
+    let wrong = logs::snapshot(&ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert_eq!(wrong.warnings.len(), 1);
+    server.exec(&format!("printf '[%s] production.ERROR: RuntimeException: local time\\n' \"$(TZ=Asia/Kolkata date '+%F %T')\" > {path}/storage/logs/payments.log"), "");
+    let today = server.exec("TZ=Asia/Kolkata date +%F", "");
+    for since in [today.clone(), format!("{today} 00:00")] {
+        let snapshot = logs::snapshot(
+            &ssh,
+            &target,
+            &Request {
+                since: Some(Since::parse(&since).unwrap()),
+                ..Request::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot.entries.len(), 1);
+        assert!(snapshot.warnings.is_empty());
+    }
+    assert!(matches!(
+        logs::snapshot(
+            &ssh,
+            &target,
+            &Request {
+                since: Some(Since::At("2026-02-30".into())),
+                ..Request::default()
+            }
+        )
+        .await,
+        Err(LogsError::BadSince(_))
+    ));
+    let old = server.exec("date -u -d '31 days ago' +%F", "");
+    assert!(matches!(
+        logs::snapshot(
+            &ssh,
+            &target,
+            &Request {
+                since: Some(Since::At(old)),
+                ..Request::default()
+            }
+        )
+        .await,
+        Err(LogsError::TooOld)
+    ));
+    server.exec_as("root", "rm /usr/share/zoneinfo/Asia/Kolkata", "");
+    assert!(matches!(
+        logs::snapshot(&ssh, &target, &Request::default()).await,
+        Err(LogsError::ZoneMissing(_))
+    ));
+}
+
+#[tokio::test]
+async fn logs_dst_keeps_second_pass_entries_and_warns_in_raw_mode() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-dst");
+    let now = server.exec("TZ=America/New_York date -d '2026-11-01 03:00:00' +%s", "");
+    let transport = LogsTransport { ssh: server.connect().await, calls: AtomicUsize::new(0), before_read: String::new(), prefix: format!("date() {{ if [ \"$*\" = +%s ]; then echo {now}; elif [ \"$*\" = +%z ]; then command date -d @{now} +%z; else command date \"$@\"; fi; }}") };
+    let mut target = target(&path, &[]);
+    target.timezone = Some("America/New_York".into());
+    target.log = Some("storage/logs/dst.log".into());
+    let snapshot = logs::snapshot(
+        &transport,
+        &target,
+        &Request {
+            since: Some(Since::At("2026-11-01 01:45".into())),
+            ..Request::default()
+        },
+    )
+    .await
+    .unwrap();
+    let groups = logs::group(&snapshot, Level::Error, None);
+    assert_eq!(groups.groups.len(), 1);
+    assert_eq!(groups.groups[0].count, 2);
+    assert!(logs::render_detail(&snapshot, &groups.groups[0]).contains("second pass"));
+    assert!(
+        logs::render_raw(&snapshot, Level::Debug, None).contains("clock changed in this window")
+    );
+}
+
+#[tokio::test]
+async fn logs_missing_or_unreadable_files_do_not_report_all_clear() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-missing");
+    let ssh = server.connect().await;
+    let mut target = target(&path, &[]);
+    target.log = Some("storage/logs/missing.log".into());
+    let snapshot = logs::snapshot(&ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    let summary = logs::render_summary(
+        &snapshot,
+        &logs::group(&snapshot, Level::Error, None),
+        Level::Error,
+        false,
+    );
+    assert!(summary.contains("no log file found"));
+    assert!(summary.contains("coverage is incomplete"));
+    target.log = Some("storage/logs/payments.log".into());
+    server.exec(&format!("chmod 000 {path}/storage/logs/payments.log"), "");
+    assert!(matches!(
+        logs::snapshot(&ssh, &target, &Request::default()).await,
+        Err(LogsError::Unavailable(_))
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn logs_cli_summary_detail_filters_and_exit_codes() {
+    use std::os::unix::fs::PermissionsExt;
+    let server = Server::start().await;
+    let path = server.logs_app("logs-cli");
+    let repo = server.dir.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .arg(&repo)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(repo.join(".shipslip.toml"), format!("[project]\nname = 'fixture'\nstack = 'laravel'\n[env.staging]\nssh = 'server'\npath = '{path}'\nbranch = 'main'\nproduction = false\n")).unwrap();
+    let bin = server.dir.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let wrapper = bin.join("ssh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec /usr/bin/ssh -F {} \"$@\"\n",
+            quote(server.config().to_str().unwrap())
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let run_cli = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_slip"))
+            .current_dir(&repo)
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env_remove("SHIPSLIP_CONFIG")
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    let summary = run_cli(&["logs", "staging"]);
+    assert!(
+        summary.status.success(),
+        "{}",
+        String::from_utf8_lossy(&summary.stderr)
+    );
+    assert!(summary.stderr.is_empty());
+    let text = String::from_utf8(summary.stdout).unwrap();
+    assert!(text.contains("since 24h (default)"));
+    let id = text
+        .lines()
+        .find(|line| line.trim_start().starts_with("1  "))
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap();
+    let detail = run_cli(&["logs", "staging", &id.to_uppercase()]);
+    assert!(detail.status.success());
+    assert!(String::from_utf8_lossy(&detail.stdout).contains("[stacktrace]"));
+    let raw = run_cli(&["logs", "staging", "--raw", "--grep", "SLOW"]);
+    assert!(raw.status.success());
+    assert!(String::from_utf8_lossy(&raw.stdout).contains("Slow query"));
+    for (args, code) in [
+        (vec!["logs", "staging", "zzzzzzzz"], 1),
+        (vec!["logs", "staging", "--level", "fatal"], 2),
+        (vec!["logs", "staging", "--since", "31d"], 2),
+        (vec!["logs", "staging", "--since", "2026-02-30"], 2),
+        (vec!["logs", "staging", "--raw", "1"], 2),
+        (vec!["logs", "staging", "--follow"], 2),
+    ] {
+        let output = run_cli(&args);
+        assert_eq!(
+            output.status.code(),
+            Some(code),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let now = server.exec("date -u '+%F %T'", "");
+    let noisy: String = (0..30)
+        .map(|i| format!("[{now}] production.ERROR: E{i}Exception: boom\n"))
+        .collect();
+    server.exec(&format!("cat > {path}/storage/logs/laravel.log"), &noisy);
+    let top = run_cli(&["logs", "staging"]);
+    assert!(String::from_utf8_lossy(&top.stdout).contains("+10 more groups (--all)"));
+    let all = run_cli(&["logs", "staging", "--all"]);
+    let all = String::from_utf8(all.stdout).unwrap();
+    let mut prefixes = std::collections::HashSet::new();
+    let prefix = all
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next()?.parse::<usize>().ok()?;
+            fields.next()?.get(..1)
+        })
+        .find(|prefix| !prefixes.insert(*prefix))
+        .unwrap();
+    let ambiguous = run_cli(&["logs", "staging", prefix]);
+    assert_eq!(ambiguous.status.code(), Some(2));
+    assert!(ambiguous.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("matches several groups"));
+}
+
 async fn run(transport: &SshTransport, script: &str) -> (Result<i32, TransportError>, Vec<String>) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let result = transport.run(script, tx).await;
@@ -237,6 +658,8 @@ fn target(path: &str, steps: &[&str]) -> DeployTarget {
         log: None,
         log_daily: false,
         smoke_url: None,
+        timezone: None,
+        logs: Default::default(),
     }
 }
 

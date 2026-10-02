@@ -1,0 +1,31 @@
+#!/bin/bash
+# Seed only apps used by the log tests, leaving existing deploy fixtures alone.
+set -euo pipefail
+mkdir -p "$1/storage/logs"
+cd "$1/storage/logs"
+today=$(date -u +%F)
+yesterday=$(date -u -d yesterday +%F)
+cat > "laravel-$yesterday.log" <<EOF
+[$yesterday 23:59:00] production.ERROR: QueryException: Duplicate entry 7 at /srv/app/app/Http/Controllers/OrderController.php:42
+[stacktrace]
+#0 /srv/app/app/Jobs/Checkout.php(3): go()
+EOF
+cat > "laravel-$today.log" <<EOF
+[$today 00:01:00] production.ERROR: QueryException: Duplicate entry 9 at /srv/app/app/Http/Controllers/OrderController.php:42
+[stacktrace]
+#0 /srv/app/app/Jobs/Checkout.php(3): go()
+[$today 00:02:00] production.WARNING: Slow query 3000ms
+EOF
+printf '[%s] production.CRITICAL: RuntimeException: \033[2Jboom\033]0;title\007\n[stacktrace]\n#0 /srv/app/app/Services/Billing.php(8): charge()\n' "$(date -u '+%F %T')" >> "laravel-$today.log"
+cat "laravel-$yesterday.log" "laravel-$today.log" > laravel.log
+printf '[%s] production.EMERGENCY: PaymentException: declined\n[stacktrace]\n' "$(date -u '+%F %T')" > payments.log
+for n in $(seq 0 12); do printf '#%s /srv/app/vendor/frame.php(3): go()\n' "$n" >> payments.log; done
+cp payments.log 'pay ments.log'
+printf 'worker starting\nplain stdout\n' > worker.log
+cat payments.log >> worker.log
+printf 'worker finished\n' >> worker.log
+cat > dst.log <<'EOF'
+[2026-11-01 01:30:00] production.ERROR: OldException: before
+[2026-11-01 01:45:00] production.ERROR: ClockException: first pass
+[2026-11-01 01:15:00] production.ERROR: ClockException: second pass
+EOF

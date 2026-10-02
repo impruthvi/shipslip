@@ -147,6 +147,29 @@ Shipslip saves a receipt on your computer. On macOS, look under
 `~/.local/share/shipslip/receipts/`. Receipts can contain command output and
 should be treated as private.
 
+## 5. Read logs
+
+From the same local project checkout, inspect logs without deploying:
+
+```sh
+slip logs staging
+slip logs staging --since 7d
+slip logs staging --raw --grep payment
+```
+
+The command reads the configured log, including daily files when
+`log_daily = true`. It shows grouped errors from the last 24 hours by default;
+copy a group ID into `slip logs staging ID` to see its latest stack trace.
+Set `timezone` in `[env.staging]` to Laravel's log timezone, for example
+`timezone = "Asia/Kolkata"`; it defaults to UTC. The server must have Linux
+`/proc`, bash, GNU coreutils, gzip and tzdata installed.
+
+Check coverage warnings: `≥` means only part of the window was read. Use
+`--max-bytes 8m` to increase the default 4 MiB limit. Files outside
+`storage/logs` require config approval through `slip trust staging`.
+Reading logs runs no deploy steps and writes no receipts or signature history.
+Log output can contain secrets.
+
 ## If the command is interrupted
 
 Ctrl-C at the confirmation prompt cancels cleanly. During the steps, it stops

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::script::{is_safe_branch, wrap_step};
-use crate::DeployTarget;
+use crate::{DeployTarget, LogChannel};
 
 const DEFAULT_STEPS: [&str; 4] = [
     "composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader",
@@ -86,6 +86,25 @@ struct Environment {
     smoke_url: Option<String>,
     #[serde(default)]
     maintenance: bool,
+    timezone: Option<String>,
+    #[serde(default)]
+    logs: BTreeMap<String, ChannelSettings>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ChannelSettings {
+    #[serde(default)]
+    hide: bool,
+    rename: Option<String>,
+    path: Option<String>,
+}
+
+impl From<ChannelSettings> for LogChannel {
+    fn from(settings: ChannelSettings) -> Self {
+        let ChannelSettings { hide, rename, path } = settings;
+        Self { hide, rename, path }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -217,6 +236,8 @@ impl LoadedConfig {
             log_daily,
             smoke_url,
             maintenance,
+            timezone,
+            logs,
         } = self.envs.get(name)?.clone();
         Some(DeployTarget {
             env: name.to_string(),
@@ -230,6 +251,8 @@ impl LoadedConfig {
             log,
             log_daily,
             smoke_url,
+            timezone,
+            logs: log_channels(logs),
         })
     }
 
@@ -243,6 +266,8 @@ impl LoadedConfig {
             log_daily,
             smoke_url,
             maintenance,
+            timezone,
+            logs,
         } = self.envs.get(name)?.clone();
         Some(TrustSnapshot {
             ssh_alias,
@@ -253,9 +278,18 @@ impl LoadedConfig {
             log,
             log_daily,
             smoke_url,
+            timezone,
+            logs: log_channels(logs),
             steps: self.steps.clone(),
         })
     }
+}
+
+fn log_channels(settings: BTreeMap<String, ChannelSettings>) -> BTreeMap<String, LogChannel> {
+    settings
+        .into_iter()
+        .map(|(name, settings)| (name, settings.into()))
+        .collect()
 }
 
 fn git_root(start: &Path) -> Option<PathBuf> {
@@ -313,7 +347,69 @@ fn validate_environment(name: &str, env: &Environment) -> Result<(), ConfigError
             "env.{name}.smoke_url must be an HTTP or HTTPS URL without whitespace"
         )));
     }
+    if let Some(timezone) = &env.timezone {
+        if !is_known_timezone(timezone) {
+            return Err(ConfigError::Invalid(format!(
+                "env.{name}.timezone `{timezone}` is not a known IANA timezone"
+            )));
+        }
+    }
+    for (channel, settings) in &env.logs {
+        validate_channel(name, channel, settings)?;
+    }
     Ok(())
+}
+
+fn validate_channel(
+    env: &str,
+    channel: &str,
+    settings: &ChannelSettings,
+) -> Result<(), ConfigError> {
+    let invalid = |message: &str| {
+        Err(ConfigError::Invalid(format!(
+            "env.{env}.logs.{channel} {message}"
+        )))
+    };
+    if !is_channel_name(channel) {
+        return invalid("must be named with letters, digits, `.`, `_` or `-`");
+    }
+    let ChannelSettings { hide, rename, path } = settings;
+    if rename
+        .as_deref()
+        .is_some_and(|rename| !is_channel_name(rename))
+    {
+        return invalid("rename must use letters, digits, `.`, `_` or `-`");
+    }
+    if path.as_deref().is_some_and(|path| path.trim().is_empty()) {
+        return invalid("path must not be empty");
+    }
+    match (hide, rename, path) {
+        (true, None, None) | (false, Some(_), _) | (false, None, Some(_)) => Ok(()),
+        (true, _, _) => invalid("cannot both hide and rename or add a path"),
+        (false, None, None) => invalid("must set hide, rename or path"),
+    }
+}
+
+fn is_channel_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// A zone with a file in the local tz database. GNU `date` on the server
+/// silently treats an unknown zone as UTC, so names are checked here.
+fn is_known_timezone(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('/')
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-' | '+'))
+        && Path::new("/usr/share/zoneinfo").join(name).is_file()
 }
 
 /// An OpenSSH host alias that cannot be read as an option.
@@ -537,6 +633,11 @@ pub struct TrustSnapshot {
     pub log: Option<String>,
     pub log_daily: bool,
     pub smoke_url: Option<String>,
+    // Left out when unset so approvals made before `slip logs` keep their hash.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub logs: BTreeMap<String, LogChannel>,
     pub steps: Vec<String>,
 }
 
@@ -922,6 +1023,123 @@ mod tests {
         // Valid on the server's bash even where local bash is 3.2.
         fixture.write_config("", "staging-host", "echo ok |& cat");
         assert!(fixture.load().is_ok());
+    }
+
+    /// Approvals are stored as this hash; settings a config never used must
+    /// not change it, or every user would have to re-trust after upgrading.
+    #[test]
+    fn trust_hash_is_unchanged_without_log_settings() {
+        let snapshot = TrustSnapshot {
+            ssh_alias: "app-production".into(),
+            path: "/srv/app".into(),
+            branch: "main".into(),
+            production: true,
+            maintenance: true,
+            log: Some("storage/logs/laravel".into()),
+            log_daily: true,
+            smoke_url: Some("https://example.com/health".into()),
+            timezone: None,
+            logs: BTreeMap::new(),
+            steps: vec!["php artisan migrate --force".into()],
+        };
+        assert_eq!(
+            snapshot_hash(&snapshot).unwrap(),
+            "8fe0bb8f3eede4f205d430b192c1ab9777ea4ba639c849e55fa7b19d32a43779"
+        );
+
+        let mut with_timezone = snapshot.clone();
+        with_timezone.timezone = Some("Asia/Kolkata".into());
+        let mut with_logs = snapshot.clone();
+        with_logs.logs.insert(
+            "worker".into(),
+            LogChannel {
+                hide: true,
+                ..LogChannel::default()
+            },
+        );
+        for changed in [with_timezone, with_logs] {
+            assert_ne!(
+                snapshot_hash(&changed).unwrap(),
+                snapshot_hash(&snapshot).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn log_settings_load_into_the_target_and_snapshot() {
+        let fixture = Fixture::new();
+        fixture.write_config(
+            "timezone = \"Asia/Kolkata\"\n\
+             [env.staging.logs.worker]\nhide = true\n\
+             [env.staging.logs.payments]\nrename = \"billing\"\n\
+             [env.staging.logs.queue]\npath = \"/var/log/queue.log\"\n",
+            "staging-host",
+            "echo ok",
+        );
+        let config = fixture.load().unwrap();
+        let target = config.target("staging").unwrap();
+        assert_eq!(target.timezone.as_deref(), Some("Asia/Kolkata"));
+        assert_eq!(
+            target.logs.keys().collect::<Vec<_>>(),
+            ["payments", "queue", "worker"]
+        );
+        assert!(target.logs["worker"].hide);
+        assert_eq!(target.logs["payments"].rename.as_deref(), Some("billing"));
+        assert_eq!(
+            target.logs["queue"].path.as_deref(),
+            Some("/var/log/queue.log")
+        );
+        let snapshot = config.trust_snapshot("staging").unwrap();
+        assert_eq!(snapshot.timezone, target.timezone);
+        assert_eq!(snapshot.logs, target.logs);
+    }
+
+    #[test]
+    fn invalid_log_settings_are_rejected() {
+        let fixture = Fixture::new();
+        let invalid = [
+            (
+                "timezone = \"Asia/Kolkatta\"\n",
+                "not a known IANA timezone",
+            ),
+            (
+                "timezone = \"../../etc/passwd\"\n",
+                "not a known IANA timezone",
+            ),
+            ("timezone = \"\"\n", "not a known IANA timezone"),
+            (
+                "[env.staging.logs.worker]\n",
+                "must set hide, rename or path",
+            ),
+            (
+                "[env.staging.logs.worker]\nhide = true\nrename = \"jobs\"\n",
+                "cannot both hide",
+            ),
+            (
+                "[env.staging.logs.worker]\nrename = \"a b\"\n",
+                "rename must use",
+            ),
+            (
+                "[env.staging.logs.worker]\npath = \" \"\n",
+                "path must not be empty",
+            ),
+            (
+                "[env.staging.logs.\".hidden\"]\nhide = true\n",
+                "must be named",
+            ),
+        ];
+        for (extra, message) in invalid {
+            fixture.write_config(extra, "staging-host", "echo ok");
+            let error = fixture.load().unwrap_err().to_string();
+            assert!(error.contains(message), "{extra:?}: {error}");
+        }
+
+        fixture.write_config(
+            "[env.staging.logs.worker]\nhide = true\nlevel = \"error\"\n",
+            "staging-host",
+            "echo ok",
+        );
+        assert!(matches!(fixture.load(), Err(ConfigError::Parse { .. })));
     }
 
     #[test]
