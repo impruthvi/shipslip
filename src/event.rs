@@ -106,6 +106,10 @@ pub enum DeployEvent {
     RunError {
         reason: String,
     },
+    /// A nonfatal ancillary operation failed; the deploy continues.
+    Warning {
+        reason: String,
+    },
     MaintenanceStarted {
         phase: MaintenancePhase,
     },

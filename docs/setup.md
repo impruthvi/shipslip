@@ -160,21 +160,28 @@ slip logs staging --raw --grep payment
 
 The command discovers `storage/logs/*.log` channels and also reads configured
 `log` / `log_daily` paths. Single and daily files with the same channel name
-merge. It shows grouped errors from the last 24 hours by default;
-copy a group ID into `slip logs staging ID` to see its latest stack trace.
+merge. It shows grouped errors since the latest verified run by default,
+falling back to the latest checkout change or 24 hours. Use `--since` to choose
+a window. `NEW` means absent from the bounded comparison before that window;
+`?` means no usable baseline. The header discloses that coverage. Copy a group
+ID into `slip logs staging ID` to see its latest stack trace.
 Set `timezone` in `[env.staging]` to Laravel's log timezone, for example
 `timezone = "Asia/Kolkata"`; it defaults to UTC. The server must have Linux
 `/proc`, bash, GNU coreutils, gzip and tzdata installed.
 
 Check coverage warnings: `≥` means only part of the window was read. Use
 `--channels` to inspect each channel's files, format and coverage. The default
-read limits are 4 MiB per channel and 12 MiB total, shared fairly.
-`--max-bytes 20m` changes those limits. Mixed or unsupported formats stay
+window read limits are 4 MiB per channel and 12 MiB total, shared fairly.
+A separate comparison budget allows 2 MiB per channel and 6 MiB total.
+`--channels` shows both coverages.
+`--max-bytes 20m` changes the window limits. Mixed or unsupported formats stay
 visible through `--raw`, where their file blocks bypass timestamp and level
 filtering. Configure `hide`, `rename` or `path` under
 `[env.staging.logs.CHANNEL]` to override discovery (see the README). Files outside
 `storage/logs` require config approval through `slip trust staging`.
 Reading logs runs no deploy steps and writes no receipts or signature history.
+Deploys record the run anchor in `<git dir>/shipslip.last-run`; failures to write
+it are warnings, and deployment and lock release continue.
 Log output can contain secrets.
 
 ## If the command is interrupted
