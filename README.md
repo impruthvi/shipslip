@@ -138,7 +138,9 @@ selects your own window instead.
 that window. Comparison spans all channels, so an error moving between
 channels stays known. `?` means there is no usable comparison for that group's
 channels. New groups appear first; details also label new and seen message
-variants. Baseline coverage and channels without a baseline are disclosed;
+variants. The summary aligns IDs, counts and status (`NEW`, `seen` or `?`),
+with the application file, channels and message on separate lines. Baseline
+coverage and channels without a baseline are disclosed;
 `NEW` is limited to that readable span, rather than the app's entire history.
 A partly recognized baseline can confirm known errors, but gives `?` for
 otherwise unseen groups because its unparsed output is not a usable comparison.
