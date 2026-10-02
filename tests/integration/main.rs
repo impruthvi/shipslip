@@ -869,8 +869,10 @@ async fn logs_overrides_hide_before_opening_replace_paths_and_preserve_trust() {
         .unwrap();
     assert_eq!(payments.name, "billing");
     assert_eq!(payments.files, ["storage/logs/custom output.txt"]);
-    assert!(logs::render_channels(&snapshot).contains("app (laravel)  single+daily"));
-    assert!(logs::render_channels(&snapshot).contains("audit  single  0"));
+    let table = logs::render_channels(&snapshot);
+    let fields = table.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(fields.contains("app (laravel) single+daily"));
+    assert!(fields.contains("audit single 0"));
     assert!(snapshot
         .entries
         .iter()
@@ -1438,9 +1440,14 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
     let channels = run_cli(&["logs", "staging", "--channels"]);
     assert!(channels.status.success());
     let table = String::from_utf8(channels.stdout).unwrap();
-    assert!(table.contains("CHANNEL  KIND  FILES  SIZE  LAST WRITE  FORMAT  COVERAGE"));
-    assert!(table.contains("laravel  single+daily  3"));
-    assert!(table.contains("payments  single  1"));
+    let fields = table.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(fields.contains("CHANNEL KIND FILES SIZE"));
+    assert!(fields.contains("laravel single+daily 3"));
+    assert!(fields.contains("payments single 1"));
+    for label in ["LAST WRITE:", "FORMAT:", "COVERAGE:", "BASELINE:"] {
+        assert!(table.contains(label));
+    }
+    assert!(table.lines().all(|line| line.chars().count() <= 96));
     let raw = run_cli(&["logs", "staging", "--raw", "--grep", "SLOW"]);
     assert!(raw.status.success());
     assert!(String::from_utf8_lossy(&raw.stdout).contains("Slow query"));

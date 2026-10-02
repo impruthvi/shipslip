@@ -816,13 +816,15 @@ fn print_help() {
          \x20 logs ENV           Group recent log errors; read-only\n\n\
          Logs options:\n\
          \x20 ID|ROW             Show one group's latest entry and variants\n\
-         \x20 --since S          30m, 6h, 7d, 2026-10-01 or \"2026-10-01 14:00\" (default 24h)\n\
+         \x20 --since S          30m, 6h, 7d, 2026-10-01 or \"2026-10-01 14:00\"\n\
+         \x20                    Default: latest run, then checkout change, then 24h\n\
          \x20 --level L          This level and more severe (default error; --raw: debug)\n\
          \x20 --grep TEXT        Only entries containing TEXT, ignoring case\n\
          \x20 --raw              Print entries instead of groups\n\
          \x20 --channels         Show files, format, window and baseline coverage by channel\n\
          \x20 --all              Show every group, not just the first 20\n\
-         \x20 --max-bytes SIZE   Total read limit, like 20m (default 12m total, 4m/channel)\n\n\
+         \x20 --max-bytes SIZE   Window read limit, like 20m (default 12m total, 4m/channel)\n\
+         \x20                    Baseline has a separate 6m total, 2m/channel limit\n\n\
          Config is discovered from the current directory up to the git root.\n\
          SHIPSLIP_CONFIG can select a different file."
     );
