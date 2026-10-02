@@ -154,18 +154,25 @@ From the same local project checkout, inspect logs without deploying:
 ```sh
 slip logs staging
 slip logs staging --since 7d
+slip logs staging --channels
 slip logs staging --raw --grep payment
 ```
 
-The command reads the configured log, including daily files when
-`log_daily = true`. It shows grouped errors from the last 24 hours by default;
+The command discovers `storage/logs/*.log` channels and also reads configured
+`log` / `log_daily` paths. Single and daily files with the same channel name
+merge. It shows grouped errors from the last 24 hours by default;
 copy a group ID into `slip logs staging ID` to see its latest stack trace.
 Set `timezone` in `[env.staging]` to Laravel's log timezone, for example
 `timezone = "Asia/Kolkata"`; it defaults to UTC. The server must have Linux
 `/proc`, bash, GNU coreutils, gzip and tzdata installed.
 
 Check coverage warnings: `≥` means only part of the window was read. Use
-`--max-bytes 8m` to increase the default 4 MiB limit. Files outside
+`--channels` to inspect each channel's files, format and coverage. The default
+read limits are 4 MiB per channel and 12 MiB total, shared fairly.
+`--max-bytes 20m` changes those limits. Mixed or unsupported formats stay
+visible through `--raw`, where their file blocks bypass timestamp and level
+filtering. Configure `hide`, `rename` or `path` under
+`[env.staging.logs.CHANNEL]` to override discovery (see the README). Files outside
 `storage/logs` require config approval through `slip trust staging`.
 Reading logs runs no deploy steps and writes no receipts or signature history.
 Log output can contain secrets.

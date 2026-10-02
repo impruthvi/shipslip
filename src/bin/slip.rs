@@ -652,6 +652,7 @@ struct LogsOptions {
     level: Option<Level>,
     grep: Option<String>,
     raw: bool,
+    channels: bool,
     all: bool,
     max_bytes: Option<u64>,
 }
@@ -688,6 +689,7 @@ fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
                 })?);
             }
             "--raw" => options.raw = true,
+            "--channels" => options.channels = true,
             "--all" => options.all = true,
             flag if flag.starts_with("--") => {
                 return Err(invalid_input(format!(
@@ -701,6 +703,15 @@ fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
     }
     if options.raw && options.query.is_some() {
         return Err(invalid_input("--raw shows entries, not a group; drop the group ID").into());
+    }
+    if options.channels
+        && (options.raw
+            || options.all
+            || options.query.is_some()
+            || options.level.is_some()
+            || options.grep.is_some())
+    {
+        return Err(invalid_input("--channels shows discovery and coverage; combine it with --since or --max-bytes, without entry filters or a group ID").into());
     }
     Ok(options)
 }
@@ -745,6 +756,10 @@ async fn logs_command(
         allow_outside: trusted,
     };
     let snapshot = logs::snapshot(&transport, &target, &request).await?;
+    if options.channels {
+        print!("{}", logs::render_channels(&snapshot));
+        return Ok(ExitCode::SUCCESS);
+    }
     let grep = options.grep.as_deref();
     if options.raw {
         let level = options.level.unwrap_or(Level::Debug);
@@ -804,8 +819,9 @@ fn print_help() {
          \x20 --level L          This level and more severe (default error; --raw: debug)\n\
          \x20 --grep TEXT        Only entries containing TEXT, ignoring case\n\
          \x20 --raw              Print entries instead of groups\n\
+         \x20 --channels         Show discovered files, format and coverage by channel\n\
          \x20 --all              Show every group, not just the first 20\n\
-         \x20 --max-bytes SIZE   Read up to SIZE of log, like 20m (default 4m)\n\n\
+         \x20 --max-bytes SIZE   Total read limit, like 20m (default 12m total, 4m/channel)\n\n\
          Config is discovered from the current directory up to the git root.\n\
          SHIPSLIP_CONFIG can select a different file."
     );
@@ -1570,6 +1586,16 @@ mod tests {
         assert_eq!(options.grep.as_deref(), Some("payment"));
         assert_eq!(options.max_bytes, Some(20 * 1024 * 1024));
         assert!(options.all);
+        let channels = parse_logs_options(&[
+            "--channels".into(),
+            "--since".into(),
+            "7d".into(),
+            "--max-bytes".into(),
+            "8m".into(),
+        ])
+        .unwrap();
+        assert!(channels.channels);
+        assert_eq!(channels.since, Some(Since::Ago(7 * 86400)));
         for args in [
             vec!["slip", "logs"],
             vec!["slip", "logs", "production", "--since"],
@@ -1585,6 +1611,25 @@ mod tests {
             vec!["slip", "logs", "production", "--raw", "1"],
             vec!["slip", "logs", "production", "1", "2"],
             vec!["slip", "logs", "production", "--follow"],
+            vec!["slip", "logs", "production", "--channels", "--raw"],
+            vec!["slip", "logs", "production", "--channels", "--all"],
+            vec!["slip", "logs", "production", "--channels", "qmkte"],
+            vec![
+                "slip",
+                "logs",
+                "production",
+                "--channels",
+                "--grep",
+                "error",
+            ],
+            vec![
+                "slip",
+                "logs",
+                "production",
+                "--channels",
+                "--level",
+                "error",
+            ],
         ] {
             assert!(
                 parse_args_from(args.into_iter().skip(1).map(str::to_string).collect()).is_err()
