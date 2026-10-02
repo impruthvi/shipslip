@@ -4,6 +4,43 @@ All notable changes to Shipslip are listed here. Shipslip follows
 [Semantic Versioning](https://semver.org/); before 1.0, a minor release may
 change the library API.
 
+## [0.2.0] - 2026-10-02
+
+### Added
+
+- `slip logs ENV` reads a bounded snapshot over SSH and groups errors by
+  exception class and application file. Open a group by ID or row number to
+  see its message variants, latest entry, and stack trace.
+- Filters for time, severity, and text; raw entries, channel inspection,
+  all-group output, and configurable window byte limits.
+- Automatic single-file and daily log channel discovery, with config options
+  to hide, rename, or replace channels. Channels share the read budget fairly.
+- Verified deploy, rerun, and from-step markers select the default log window,
+  including runs in progress. Missing or stale markers fall back to checkout
+  history, then 24 hours.
+- A separately bounded pre-run baseline labels groups and variants `NEW`,
+  `seen`, or `?`. Comparison spans channels; partial reads and missing or
+  unusable baselines are disclosed.
+- Timezone configuration, clock-change warnings, format recognition, and
+  rotation/truncation checks. Log output escapes terminal control characters.
+- Public `logs` library API and `LogChannel` settings.
+
+### Changed
+
+- Log summaries align IDs, counts, and status, with application paths,
+  channels, and messages on separate lines. Partial counts use `≥`.
+- Rust callers constructing `DeployTarget` must provide the new `timezone`
+  and `logs` fields (`None` and `Default::default()` preserve defaults).
+  Exhaustive `DeployEvent` matches must handle the new `Warning` variant.
+  Existing project config and receipts remain compatible.
+
+### Fixed
+
+- Recipe commands inherit the server's permission mask instead of Shipslip's
+  private `077` mask, preventing newly generated Laravel caches and compiled
+  views from becoming unreadable by PHP-FPM. Shipslip run records remain
+  private. Existing file permissions are not changed by upgrading.
+
 ## [0.1.1] - 2026-10-01
 
 ### Added
@@ -54,4 +91,6 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.2.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.2.0
+[0.1.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.1.1
 [0.1.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.1.0
