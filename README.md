@@ -111,14 +111,17 @@ starting at 1; the built-in Git fast-forward is step 0 and is not selectable.
 ```sh
 slip logs staging                    # grouped errors from the last 24 hours
 slip logs staging --since 7d          # includes earlier daily files
+slip logs staging --channels          # files, formats and coverage per channel
 slip logs staging qmkte               # latest full entry for a group ID
 slip logs staging --level warning --grep payment
 slip logs staging --raw --since 30m   # entries in timestamp order
 slip logs staging --all --max-bytes 8m
 ```
 
-`logs` reads the configured `log` / `log_daily` files over SSH. It needs no
-Laravel package, runs no PHP or recipe steps, and leaves app files, deploy
+`logs` discovers `storage/logs/*.log` and reads the configured `log` /
+`log_daily` files over SSH. A final `-YYYY-MM-DD.log` suffix identifies a daily
+channel; other `.log` files are single channels. Single and daily files with
+the same name merge into one channel. It needs no Laravel package, runs no PHP or recipe steps, and leaves app files, deploy
 locks, receipts and signature history unchanged. The summary groups entries
 by exception class and app file, including recurring errors. Copy a group's
 ID to open its latest entry and stack trace; row numbers also work, but can
@@ -132,17 +135,48 @@ in the environment table if Laravel writes times in that zone; the default
 is UTC. Clock times are interpreted in that zone. Raw output warns when a
 clock change makes ordering across files approximate.
 
-The default read limit is 4 MiB of uncompressed log for the configured stream.
-`--max-bytes` changes that limit (`k`, `m` and `g` use binary units). Partial
-coverage is printed in the header and counts use `≥`. Files that rotate or
-are truncated during the snapshot are reported as changed. Individual entries
+The default read limits are 4 MiB of uncompressed log per channel and 12 MiB
+total. Channels share the total fairly, with unused shares redistributed;
+quiet channels get their whole file when it fits. `--max-bytes` replaces the
+total and per-channel limits (`k`, `m` and `g` use binary units). At most
+20 channels and 50 files are selected per snapshot; omissions are reported.
+Partial coverage is printed in the header and affected counts use `≥`. Use
+`--channels` to inspect each channel's files, total size, last write, format and
+coverage. Files that rotate or are truncated during the snapshot are reported as changed. Individual entries
 are limited to 256 KiB, with a note in the detail view when truncated.
 
 Files resolving under `storage/logs`, including shared storage symlinks, need
 no config approval. Reading another configured path requires `slip trust ENV`.
 The server needs Linux with `/proc`, bash, GNU coreutils, gzip and tzdata.
 Log output can contain secrets; treat it as private. This snapshot command
-does not yet auto-discover other channels or compare errors against a deploy.
+does not yet compare errors against a deploy.
+
+Override channels by their original name in config:
+
+```toml
+[env.staging.logs.worker]
+hide = true
+
+[env.staging.logs.payments]
+rename = "billing"
+
+[env.staging.logs.audit]
+path = "storage/logs/audit-output.txt"
+```
+
+`hide` excludes a channel before reading; `rename` changes its display name.
+`path` adds a channel, or replaces the discovered files for that name. A missing
+pinned path remains visible in `--channels`. Hidden channels cannot also set
+`rename` or `path`.
+
+Laravel headers and stack-trace lines identify recognized formats. Small
+files need only one valid header. Mixed output keeps valid Laravel entries
+in groups and reports the percentage recognized. JSON and other unsupported
+formats are labeled and appended as file blocks by `--raw`. These blocks
+retain file order and bypass `--level` and timestamp filtering; `--grep`
+filters their lines. All output escapes terminal control characters. If no
+file was written in the window, a hint explains that stderr, syslog and
+service channels are invisible to this file reader.
 
 ## Receipts and recovery
 

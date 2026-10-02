@@ -1,4 +1,4 @@
-//! `slip logs`: a read-only snapshot of an environment's Laravel log.
+//! `slip logs`: a read-only snapshot of an environment's log channels.
 //!
 //! Two remote calls, neither of which writes anything on the server:
 //!
@@ -27,6 +27,9 @@ use crate::script::shell_quote;
 use crate::transport::{Transport, TransportError};
 use crate::DeployTarget;
 
+mod discovery;
+use discovery::discover;
+
 const DEFAULT_WINDOW: u64 = 24 * 3600;
 const MAX_WINDOW: u64 = 30 * 24 * 3600;
 const CHANNEL_BYTES: u64 = 4 * 1024 * 1024;
@@ -38,6 +41,8 @@ const ID_LEN: usize = 5;
 /// Letters only, so an ID is never mistaken for a row number; no `l` or `o`.
 const ID_ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz";
 const CLOCK_SKEW_SECS: i64 = 15 * 60;
+const MAX_FILES: usize = 50;
+const MAX_CHANNELS: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level {
@@ -204,6 +209,8 @@ pub enum LogsError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channel {
     pub name: String,
+    pub key: String,
+    pub kind: ChannelKind,
     /// What was configured or looked for, for messages when nothing is found.
     pub source: String,
     pub files: Vec<String>,
@@ -216,6 +223,59 @@ pub struct Channel {
     pub covered_from: Option<String>,
     /// Files that changed between the probe and the read and were skipped.
     pub changed: Vec<String>,
+    pub size: u64,
+    pub last_write: Option<String>,
+    pub format: Format,
+    pub omitted_files: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelKind {
+    Single,
+    Daily,
+    Mixed,
+}
+
+impl ChannelKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::Daily => "daily",
+            Self::Mixed => "single+daily",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Format {
+    Recognized,
+    Partial(u64),
+    Unrecognized,
+    Empty,
+    NotRead,
+}
+
+impl Format {
+    fn label(&self) -> String {
+        match self {
+            Self::Recognized => "Laravel".into(),
+            Self::Partial(percent) => format!("partly recognized ({percent}% of lines)"),
+            Self::Unrecognized => "format not recognized".into(),
+            Self::Empty => "empty".into(),
+            Self::NotRead => "not read".into(),
+        }
+    }
+
+    fn has_unknown_content(&self) -> bool {
+        matches!(self, Self::Partial(_) | Self::Unrecognized | Self::NotRead)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RawBlock {
+    pub channel: usize,
+    pub file: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,6 +311,8 @@ pub struct Snapshot {
     pub channels: Vec<Channel>,
     /// Entries inside the window, in file order per file.
     pub entries: Vec<Entry>,
+    /// Bounded file samples whose format was not fully recognized.
+    pub raw_blocks: Vec<RawBlock>,
     /// The zone's UTC offset at the window start differs from now.
     pub clock_changed: bool,
     pub warnings: Vec<String>,
@@ -258,7 +320,7 @@ pub struct Snapshot {
     pub bytes_transferred: u64,
 }
 
-/// Reads the configured log of `target` without changing anything on the server.
+/// Discovers and reads `target`'s log channels without changing the server.
 pub async fn snapshot<T: Transport>(
     transport: &T,
     target: &DeployTarget,
@@ -270,7 +332,14 @@ pub async fn snapshot<T: Transport>(
 
     let (code, lines) = run_collect(
         transport,
-        &probe_script(&target.path, &zone, &since, &source, request.allow_outside),
+        &probe_script(
+            &target.path,
+            &zone,
+            &since,
+            &source,
+            request.allow_outside,
+            &target.logs,
+        ),
     )
     .await;
     let code = code?;
@@ -288,49 +357,55 @@ pub async fn snapshot<T: Transport>(
     if time.now.saturating_sub(time.start) > MAX_WINDOW {
         return Err(LogsError::TooOld);
     }
-    if let Some(file) = probe
-        .files
-        .iter()
-        .find(|file| !file.inside && !request.allow_outside)
-    {
-        return Err(LogsError::Outside {
-            path: file.path.clone(),
-            env: target.env.clone(),
-        });
+    let (sources, mut warnings) = discover(target, &probe.files, &time.start_date);
+    for file in sources.iter().flat_map(|source| &source.files) {
+        if !file.inside && !request.allow_outside {
+            return Err(LogsError::Outside {
+                path: file.path.clone(),
+                env: target.env.clone(),
+            });
+        }
     }
-
-    let files = source.select(&probe.files, &time.start_date);
-    let cap = request.max_bytes.unwrap_or(CHANNEL_BYTES);
-    let total = request.max_bytes.unwrap_or(TOTAL_BYTES);
-    let need = files.iter().map(|file| file.size).sum::<u64>();
-    let budget = water_fill(&[need], total, cap, FLOOR_BYTES)[0];
-    let plan = plan_reads(&files, budget);
-
-    let mut channel = Channel {
-        name: source.name.clone(),
-        source: source.display(),
-        files: files.iter().map(|file| file.path.clone()).collect(),
-        budget,
-        bytes_read: 0,
-        complete: true,
-        covered_from: None,
-        changed: Vec::new(),
-    };
+    if !probe.files.iter().any(|file| file.mtime >= time.start) {
+        warnings.push(format!("No file in storage/logs was written since {}. If LOG_CHANNEL is stderr, syslog, or a service, slip can't see it.", time.start_local));
+    }
+    let needs: Vec<u64> = sources
+        .iter()
+        .map(|source| {
+            source
+                .files
+                .iter()
+                .fold(0u64, |sum, file| sum.saturating_add(file.size))
+        })
+        .collect();
+    let budgets = water_fill(
+        &needs,
+        request.max_bytes.unwrap_or(TOTAL_BYTES),
+        request.max_bytes.unwrap_or(CHANNEL_BYTES),
+        FLOOR_BYTES,
+    );
+    let plans: Vec<_> = sources
+        .iter()
+        .zip(&budgets)
+        .map(|(source, budget)| plan_reads(&source.files, *budget))
+        .collect();
+    let plan: Vec<_> = plans.iter().flatten().cloned().collect();
     let mut snapshot = Snapshot {
         env: target.env.clone(),
         zone,
-        since_label: match &request.since {
-            Some(since) => since.label(),
-            None => "since 24h (default)".into(),
-        },
+        since_label: request
+            .since
+            .as_ref()
+            .map(Since::label)
+            .unwrap_or_else(|| "since 24h (default)".into()),
         start: time.start_local.clone(),
         channels: Vec::new(),
         entries: Vec::new(),
+        raw_blocks: Vec::new(),
         clock_changed: time.offset_start != time.offset_now,
-        warnings: Vec::new(),
+        warnings,
         bytes_transferred: 0,
     };
-
     let reads = if plan.is_empty() {
         Vec::new()
     } else {
@@ -345,44 +420,77 @@ pub async fn snapshot<T: Transport>(
             &plan.iter().map(|read| read.count).collect::<Vec<_>>(),
         )?
     };
-
+    let mut reads = reads.into_iter();
     let mut newest_entry: Option<(String, &ProbeFile)> = None;
-    for (read, data) in plan.iter().zip(reads).rev() {
-        let Some(data) = data else {
-            channel.changed.push(read.file.path.clone());
-            channel.complete = false;
-            continue;
+    for (index, ((source, budget), plan)) in sources.iter().zip(budgets).zip(plans).enumerate() {
+        let mut channel = Channel {
+            name: source.name.clone(),
+            key: source.key.clone(),
+            kind: source.kind,
+            source: source.source.clone(),
+            files: source.files.iter().map(|file| file.path.clone()).collect(),
+            budget,
+            bytes_read: 0,
+            complete: source.omitted_files == 0 && plan.len() == source.files.len(),
+            covered_from: None,
+            changed: Vec::new(),
+            size: source.size,
+            last_write: source.last_write.clone(),
+            format: Format::NotRead,
+            omitted_files: source.omitted_files,
         };
-        snapshot.bytes_transferred += data.transferred;
-        channel.bytes_read += data.bytes.len() as u64;
-        let entries = parse_entries(&data.bytes, read.start, 0, &read.file.path);
-        if read.file.path == plan[0].file.path {
-            if let Some(time) = entries.iter().rev().find_map(|entry| entry.time.clone()) {
-                newest_entry = Some((time, read.file));
+        let data: Vec<_> = reads.by_ref().take(plan.len()).collect();
+        let mut stats = FormatStats::default();
+        for (read, data) in plan.iter().zip(data).rev() {
+            let Some(data) = data else {
+                channel.changed.push(read.file.path.clone());
+                channel.complete = false;
+                continue;
+            };
+            snapshot.bytes_transferred += data.transferred;
+            channel.bytes_read += data.bytes.len() as u64;
+            let sample = FormatStats::of(&data.bytes);
+            if sample.format().has_unknown_content() {
+                snapshot.raw_blocks.push(RawBlock {
+                    channel: index,
+                    file: read.file.path.clone(),
+                    text: String::from_utf8_lossy(&data.bytes).into_owned(),
+                });
             }
-        }
-        if read.start > 0 {
-            match entries.first().and_then(|entry| entry.time.as_deref()) {
-                Some(first) if *first < *time.start_local => {}
-                first => {
-                    channel.complete = false;
-                    channel.covered_from = first.map(str::to_string);
+            stats.add(sample);
+            let entries = parse_entries(&data.bytes, read.start, index, &read.file.path);
+            if newest_entry
+                .as_ref()
+                .is_none_or(|(_, file)| read.file.mtime >= file.mtime)
+            {
+                if let Some(entry_time) = entries.iter().rev().find_map(|entry| entry.time.clone())
+                {
+                    newest_entry = Some((entry_time, read.file));
                 }
             }
+            if read.start > 0 {
+                match entries.first().and_then(|entry| entry.time.as_deref()) {
+                    Some(first) if first < time.start_local.as_str() => {}
+                    first => {
+                        channel.complete = false;
+                        channel.covered_from = first.map(str::to_string);
+                    }
+                }
+            }
+            snapshot
+                .entries
+                .extend(in_window(entries, &time.start_local));
         }
-        snapshot
-            .entries
-            .extend(in_window(entries, &time.start_local));
-    }
-    if plan.len() < files.len() {
-        channel.complete = false;
+        if !plan.is_empty() && channel.changed.len() < plan.len() {
+            channel.format = stats.format();
+        }
+        snapshot.channels.push(channel);
     }
     if let Some((entry_time, file)) = newest_entry {
         if let Some(warning) = clock_warning(&snapshot.zone, &entry_time, file, time.now) {
             snapshot.warnings.push(warning);
         }
     }
-    snapshot.channels.push(channel);
     Ok(snapshot)
 }
 
@@ -414,10 +522,21 @@ impl ChannelSource {
         }
     }
 
+    fn matches(&self, file: &ProbeFile) -> bool {
+        if !self.daily {
+            return file.path == self.path;
+        }
+        file.path
+            .strip_prefix(&format!("{}-", self.path))
+            .and_then(|path| path.strip_suffix(".log"))
+            .is_some_and(is_date)
+    }
+
     /// The files that can hold entries since `start_date`, newest first.
+    #[cfg(test)]
     fn select<'a>(&self, files: &'a [ProbeFile], start_date: &str) -> Vec<&'a ProbeFile> {
         if !self.daily {
-            return files.iter().take(1).collect();
+            return files.iter().filter(|file| self.matches(file)).collect();
         }
         let mut dated: Vec<(&str, &ProbeFile)> = files
             .iter()
@@ -437,6 +556,7 @@ impl ChannelSource {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProbeFile {
     path: String,
+    resolved: String,
     inode: u64,
     size: u64,
     mtime: u64,
@@ -471,12 +591,67 @@ struct Probe {
     files: Vec<ProbeFile>,
 }
 
+#[derive(Default)]
+struct FormatStats {
+    lines: u64,
+    recognized: u64,
+    headers: u64,
+    unknown_file: bool,
+}
+
+impl FormatStats {
+    fn of(bytes: &[u8]) -> Self {
+        let mut stats = Self::default();
+        for line in String::from_utf8_lossy(bytes).lines() {
+            stats.lines += 1;
+            let header = parse_header(line)
+                .is_some_and(|header| normalize_time(&header.timestamp).is_some());
+            let trimmed = line.trim();
+            let frame = trimmed.strip_prefix('#').is_some_and(|rest| {
+                let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+                digits > 0 && rest[digits..].starts_with([' ', '\t'])
+            });
+            let continuation = line.starts_with([' ', '\t'])
+                || frame
+                || matches!(
+                    trimmed,
+                    "[stacktrace]" | "[previous exception]" | "\"}" | "}"
+                );
+            stats.headers += u64::from(header);
+            stats.recognized += u64::from(header || continuation);
+        }
+        stats
+    }
+
+    fn add(&mut self, other: Self) {
+        self.unknown_file |= other.format().has_unknown_content();
+        self.lines += other.lines;
+        self.recognized += other.recognized;
+        self.headers += other.headers;
+    }
+
+    fn format(&self) -> Format {
+        if self.lines == 0 {
+            return Format::Empty;
+        }
+        if self.headers == 0 {
+            return Format::Unrecognized;
+        }
+        if !self.unknown_file && (self.lines < 20 || self.recognized * 2 >= self.lines) {
+            Format::Recognized
+        } else {
+            Format::Partial(self.recognized * 100 / self.lines)
+        }
+    }
+}
+
 fn probe_script(
     app: &str,
     zone: &str,
     since: &Since,
     source: &ChannelSource,
     allow_outside: bool,
+    settings: &std::collections::BTreeMap<String, crate::LogChannel>,
 ) -> String {
     let start = match since {
         Since::Ago(seconds) => format!("start=$((now - {seconds}))"),
@@ -485,17 +660,44 @@ fn probe_script(
             shell_quote(at)
         ),
     };
-    let files = if source.daily {
+    let mut files = String::new();
+    for (key, settings) in settings {
+        if let Some(path) = &settings.path {
+            files.push_str(&format!(
+                "if [ -e {path} ]; then emit {path} {key} || exit 1; fi\n",
+                path = shell_quote(path),
+                key = shell_quote(key)
+            ));
+        }
+    }
+    files.push_str(&if source.daily {
         format!(
-            "for f in {}-*.log; do if [ -e \"$f\" ]; then emit \"$f\" || exit 1; fi; done",
-            shell_quote(&source.path)
+            "for f in {}-*.log; do if [ -e \"$f\" ]; then emit \"$f\" {} || exit 1; fi; done",
+            shell_quote(&source.path),
+            shell_quote(&source.name)
         )
     } else {
         format!(
-            "if [ -e {path} ]; then emit {path} || exit 1; fi",
-            path = shell_quote(&source.path)
+            "if [ -e {path} ]; then emit {path} {key} || exit 1; fi",
+            path = shell_quote(&source.path),
+            key = shell_quote(&source.name)
         )
-    };
+    });
+    files.push_str(
+        "\nfor f in storage/logs/*.log; do if [ -e \"$f\" ]; then emit \"$f\" || exit 1; fi; done",
+    );
+    let mut overrides = String::new();
+    for (name, settings) in settings {
+        if settings.hide {
+            overrides.push_str(&format!("  {} ) return 0 ;;\n", shell_quote(name)));
+        } else if let Some(path) = &settings.path {
+            overrides.push_str(&format!(
+                "  {} ) [ \"$1\" = {} ] || return 0 ;;\n",
+                shell_quote(name),
+                shell_quote(path)
+            ));
+        }
+    }
     format!(
         r#"cd {app} || {{ echo "@unavailable cannot enter the app path"; exit 0; }}
 for utility in date stat realpath dd sha256sum gzip base64; do
@@ -508,7 +710,16 @@ now=$(date +%s)
 echo "@time $now $start $(TZ="$tz" date -d "@$start" '+%F %T %F %z') $(TZ="$tz" date +%z)"
 root=$(realpath -e storage/logs 2>/dev/null)
 set -o pipefail
+seen=' '
 emit() {{
+  encoded=$(printf '%s' "$1" | base64 -w0)
+  case "$seen" in *" $encoded "*) return 0 ;; esac
+  seen="$seen$encoded "
+  key=${{1##*/}}; key=${{key%.log}}
+  if [[ "$key" =~ ^(.+)-[0-9]{{4}}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]]; then key=${{BASH_REMATCH[1]}}; fi
+  key=${{2:-$key}}
+  case "$key" in
+{overrides}  *) ;; esac
   [ -f "$1" ] || return 0
   exec 3< "$1" 2>/dev/null || {{ echo '@unavailable log file is not readable'; return 0; }}
   fd="/proc/$$/fd/3"
@@ -523,7 +734,8 @@ emit() {{
   if [ "$inside" -eq 1 ] || [ {allow_outside} -eq 1 ]; then
     checksum=$(dd if="$fd" iflag=skip_bytes,count_bytes skip="$skip" count="$count" status=none | sha256sum) || return 1
   fi
-  echo "@file $2 $3 $4 $inside $(TZ="$tz" date -d "@$4" '+%F %T') ${{checksum%% *}}"
+  resolved=$(printf '%s' "$rp" | base64 -w0)
+  echo "@file $2 $3 $4 $inside $(TZ="$tz" date -d "@$4" '+%F %T') ${{checksum%% *}} $resolved"
   printf '%s' "$1" | base64 -w0; echo
   exec 3<&-
 }}
@@ -582,7 +794,7 @@ fn parse_probe(code: i32, lines: &[String]) -> Result<Probe, LogsError> {
                     .next()
                     .and_then(|encoded| engine.decode(encoded).ok())
                     .and_then(|bytes| String::from_utf8(bytes).ok());
-                let (&[inode, size, mtime, inside, date, clock, checksum], Some(path)) =
+                let (&[inode, size, mtime, inside, date, clock, checksum, resolved], Some(path)) =
                     (&f[..], path)
                 else {
                     return Err(LogsError::Unavailable(
@@ -591,6 +803,13 @@ fn parse_probe(code: i32, lines: &[String]) -> Result<Probe, LogsError> {
                 };
                 files.push(ProbeFile {
                     path,
+                    resolved: engine
+                        .decode(resolved)
+                        .ok()
+                        .and_then(|bytes| String::from_utf8(bytes).ok())
+                        .ok_or_else(|| {
+                            LogsError::Unavailable("invalid resolved file path in probe".into())
+                        })?,
                     inode: number(inode)?,
                     size: number(size)?,
                     mtime: number(mtime)?,
@@ -657,8 +876,8 @@ fn plan_reads<'a>(files: &[&'a ProbeFile], budget: u64) -> Vec<ReadPlan<'a>> {
     let mut left = budget;
     let mut plan = Vec::new();
     for file in files {
-        if left == 0 {
-            break;
+        if left == 0 && file.size > 0 {
+            continue;
         }
         let count = file.size.min(left);
         left -= count;
@@ -903,6 +1122,7 @@ pub struct Group {
     pub message: String,
     /// Index of the latest entry in `Snapshot::entries`.
     pub latest: usize,
+    first: usize,
     pub channels: Vec<usize>,
     pub variants: Vec<Variant>,
     pub overflow_variants: u64,
@@ -947,6 +1167,7 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
                     last_seen: None,
                     message: String::new(),
                     latest: position,
+                    first: position,
                     channels: Vec::new(),
                     variants: Vec::new(),
                     overflow_variants: 0,
@@ -962,8 +1183,15 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
         let group = &mut groups[slot];
         group.count += 1;
         if let Some(time) = &entry.time {
-            if group.first_seen.is_none() {
+            let first = &snapshot.entries[group.first];
+            let is_first = if entry.file == first.file {
+                entry.offset <= first.offset
+            } else {
+                group.first_seen.as_ref().is_none_or(|first| time < first)
+            };
+            if is_first {
                 group.first_seen = Some(time.clone());
+                group.first = position;
             }
             let latest = &snapshot.entries[group.latest];
             let is_latest = if entry.file == latest.file {
@@ -1099,6 +1327,11 @@ pub fn escape(text: &str) -> String {
     out
 }
 
+// Names and paths occupy one table/header field, unlike multiline log text.
+fn escape_field(text: &str) -> String {
+    escape(text).replace('\n', "\\x0a").replace('\t', "\\x09")
+}
+
 fn short_class(class: &str) -> &str {
     class.rsplit('\\').next().unwrap_or(class)
 }
@@ -1120,40 +1353,61 @@ pub fn render_header(snapshot: &Snapshot) -> String {
     let mut out = format!(
         "{} · {} · {} ({}) · times {}\n",
         snapshot.env,
-        escape(&names.join(", ")),
+        escape_field(&names.join(", ")),
         snapshot.since_label,
         snapshot.start,
         snapshot.zone
     );
+    let partial: Vec<_> = snapshot
+        .channels
+        .iter()
+        .filter(|channel| !channel.complete)
+        .collect();
+    if let Some(channel) = partial.iter().max_by_key(|channel| {
+        (
+            channel.covered_from.is_none(),
+            channel.covered_from.as_deref(),
+        )
+    }) {
+        let others = if partial.len() > 1 {
+            format!("; {} other channels partial", partial.len() - 1)
+        } else {
+            "; others complete".into()
+        };
+        if let Some(from) = &channel.covered_from {
+            out.push_str(&format!("covered: since {from} only ({}: read limit reached; raise it with --max-bytes){others}\n", escape_field(&channel.name)));
+        } else {
+            out.push_str(&format!(
+                "covered: partly ({}; see --channels){others}\n",
+                escape_field(&channel.name)
+            ));
+        }
+    }
     for channel in &snapshot.channels {
         if channel.files.is_empty() {
             out.push_str(&format!(
                 "{}: no log file found ({})\n",
-                escape(&channel.name),
-                escape(&channel.source)
+                escape_field(&channel.name),
+                escape_field(&channel.source)
             ));
         }
-        if let Some(from) = &channel.covered_from {
+        if matches!(channel.format, Format::Partial(_) | Format::Unrecognized) {
             out.push_str(&format!(
-                "covered: since {from} only ({}: read limit reached; raise it with --max-bytes)\n",
-                escape(&channel.name)
-            ));
-        } else if !channel.complete && channel.changed.is_empty() {
-            out.push_str(&format!(
-                "covered: partly ({}: read limit reached; raise it with --max-bytes)\n",
-                escape(&channel.name)
+                "{}: {} — see --raw\n",
+                escape_field(&channel.name),
+                channel.format.label()
             ));
         }
         for file in &channel.changed {
             out.push_str(&format!(
                 "{}: {} changed during read and was skipped\n",
-                escape(&channel.name),
-                escape(file)
+                escape_field(&channel.name),
+                escape_field(file)
             ));
         }
     }
     for warning in &snapshot.warnings {
-        out.push_str(&format!("warning: {}\n", escape(warning)));
+        out.push_str(&format!("warning: {}\n", escape_field(warning)));
     }
     out
 }
@@ -1161,16 +1415,15 @@ pub fn render_header(snapshot: &Snapshot) -> String {
 pub fn render_summary(snapshot: &Snapshot, groups: &Groups, min_level: Level, all: bool) -> String {
     let mut out = render_header(snapshot);
     if groups.groups.is_empty() {
-        if snapshot
-            .channels
-            .iter()
-            .any(|channel| !channel.complete || channel.files.is_empty())
+        if snapshot.channels.iter().any(|channel| {
+            !channel.complete || channel.files.is_empty() || channel.format.has_unknown_content()
+        }) || snapshot.channels.is_empty()
         {
             out.push_str("No matching entries in the portion read; log coverage is incomplete.\n");
             return out;
         }
         out.push_str(&format!(
-            "No entries at {} level or above in this window.\n",
+            "No entries at {} level or above in the selected channels in this window.\n",
             min_level.name()
         ));
         return out;
@@ -1188,12 +1441,18 @@ pub fn render_summary(snapshot: &Snapshot, groups: &Groups, min_level: Level, al
             .map(|file| file.strip_prefix(&app).unwrap_or(file))
             .unwrap_or("-");
         out.push_str(&format!(
-            "{:>3}  {}  {:>6}  {}  {}\n       {}\n",
+            "{:>3}  {}  {:>6}  {}  {}  {}\n       {}\n",
             row + 1,
             group.id,
             count_label(group),
             escape(short_class(&group.class)),
-            escape(file),
+            escape_field(file),
+            group
+                .channels
+                .iter()
+                .map(|index| escape_field(&snapshot.channels[*index].name))
+                .collect::<Vec<_>>()
+                .join(", "),
             escape(&clip_utf8(&group.message, 120)),
         ));
     }
@@ -1240,7 +1499,7 @@ pub fn render_detail(snapshot: &Snapshot, group: &Group) -> String {
         count_label(group),
         group.first_seen.as_deref().unwrap_or("-"),
         group.last_seen.as_deref().unwrap_or("-"),
-        escape(&channels.join(", "))
+        escape_field(&channels.join(", "))
     );
     if group.variants.len() > 1 || group.overflow_variants > 0 {
         out.push_str("Variants:\n");
@@ -1263,7 +1522,7 @@ pub fn render_detail(snapshot: &Snapshot, group: &Group) -> String {
     out.push_str(&format!(
         "Latest entry ({}, {}):\n{}\n",
         latest.time.as_deref().unwrap_or("time unknown"),
-        escape(&latest.file),
+        escape_field(&latest.file),
         escape(&latest.text)
     ));
     if latest.truncated {
@@ -1274,10 +1533,19 @@ pub fn render_detail(snapshot: &Snapshot, group: &Group) -> String {
 
 /// What to say when a lookup finds no group.
 pub fn render_miss(snapshot: &Snapshot, query: &str) -> String {
-    let partial = snapshot
+    if snapshot.channels.is_empty() {
+        return format!("group {} not found in what was read; no visible log channels — inspect channel configuration\n", escape(query));
+    }
+    if snapshot
         .channels
         .iter()
-        .find(|channel| !channel.complete || channel.files.is_empty());
+        .any(|channel| channel.format.has_unknown_content())
+    {
+        return format!("group {} not found in what was read; some log formats are not fully recognized — inspect --raw or --channels\n", escape(query));
+    }
+    let partial = snapshot.channels.iter().find(|channel| {
+        !channel.complete || channel.files.is_empty() || channel.format.has_unknown_content()
+    });
     match partial.and_then(|channel| channel.covered_from.as_deref()) {
         Some(from) => format!(
             "group {} not found in what was read (entries since {from} of a window from {}); \
@@ -1332,6 +1600,70 @@ pub fn render_raw(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> 
             out.push('\n');
         }
     }
+    for block in &snapshot.raw_blocks {
+        out.push_str(&format!("== {} / {} (not fully parsed: shown as-is, newest last, no --level/--since filtering) ==\n", escape_field(&snapshot.channels[block.channel].name), escape_field(&block.file)));
+        for line in block.text.lines() {
+            if grep
+                .as_deref()
+                .is_none_or(|grep| line.to_lowercase().contains(grep))
+            {
+                out.push_str(&escape(line));
+                out.push('\n');
+            }
+        }
+    }
+    out
+}
+
+/// The discovery/coverage view uses the same bounded snapshot as the summary.
+pub fn render_channels(snapshot: &Snapshot) -> String {
+    let mut out = render_header(snapshot);
+    out.push_str("CHANNEL  KIND  FILES  SIZE  LAST WRITE  FORMAT  COVERAGE\n");
+    for channel in &snapshot.channels {
+        let label = if channel.key == channel.name {
+            escape_field(&channel.name)
+        } else {
+            format!(
+                "{} ({})",
+                escape_field(&channel.name),
+                escape_field(&channel.key)
+            )
+        };
+        let files = if channel.omitted_files == 0 {
+            channel.files.len().to_string()
+        } else {
+            format!(
+                "{} (+{} omitted)",
+                channel.files.len(),
+                channel.omitted_files
+            )
+        };
+        let coverage = if channel.files.is_empty() {
+            "no file".into()
+        } else if channel.complete {
+            "full".into()
+        } else if !channel.changed.is_empty() {
+            "changed during read".into()
+        } else {
+            format!(
+                "partial: {} / {} bytes{}",
+                channel.bytes_read,
+                channel.size,
+                channel
+                    .covered_from
+                    .as_ref()
+                    .map(|from| format!(", since {from}"))
+                    .unwrap_or_default()
+            )
+        };
+        out.push_str(&format!(
+            "{label}  {}  {files}  {} B  {}  {}  {coverage}\n",
+            channel.kind.label(),
+            channel.size,
+            channel.last_write.as_deref().unwrap_or("-"),
+            channel.format.label()
+        ));
+    }
     out
 }
 
@@ -1339,9 +1671,99 @@ pub fn render_raw(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> 
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_group_merges_channels_and_retains_first_and_latest_times() {
+        let mut snapshot = snapshot_of(
+            "[2026-10-02 12:00:00] production.ERROR: QueryException: newer\n",
+            true,
+        );
+        let mut second = snapshot.channels[0].clone();
+        second.name = "payments".into();
+        second.complete = false;
+        snapshot.channels.push(second);
+        snapshot.entries.extend(parse_entries(
+            b"[2026-10-01 12:00:00] production.ERROR: QueryException: older\n",
+            0,
+            1,
+            "payments.log",
+        ));
+        let groups = group(&snapshot, Level::Error, None);
+        assert_eq!(groups.groups.len(), 1);
+        let group = &groups.groups[0];
+        assert_eq!(group.count, 2);
+        assert_eq!(group.channels, [0, 1]);
+        assert_eq!(group.first_seen.as_deref(), Some("2026-10-01 12:00:00"));
+        assert_eq!(group.last_seen.as_deref(), Some("2026-10-02 12:00:00"));
+        assert!(group.partial);
+        assert!(render_detail(&snapshot, group).contains("newer"));
+        assert!(
+            render_summary(&snapshot, &groups, Level::Error, false).contains("laravel, payments")
+        );
+    }
+
+    #[test]
+    fn format_detection_handles_traces_quiet_channels_and_mixed_output() {
+        let header = entry_line("2026-10-01 01:00:00", "ERROR", "RuntimeException: boom");
+        assert_eq!(
+            FormatStats::of(header.as_bytes()).format(),
+            Format::Recognized
+        );
+        let trace = format!("{header}[stacktrace]\n{}", "#0 frame()\n".repeat(30));
+        assert_eq!(
+            FormatStats::of(trace.as_bytes()).format(),
+            Format::Recognized
+        );
+        let mixed = format!("{}{}{}", "worker stdout\n".repeat(40), header, trace);
+        assert!(matches!(
+            FormatStats::of(mixed.as_bytes()).format(),
+            Format::Partial(_)
+        ));
+        assert_eq!(
+            FormatStats::of(b"{\"message\":\"boom\",\"level_name\":\"ERROR\"}\n").format(),
+            Format::Unrecognized
+        );
+        assert_eq!(
+            FormatStats::of(b"#0 orphaned trace\n").format(),
+            Format::Unrecognized
+        );
+        assert_eq!(FormatStats::of(b"").format(), Format::Empty);
+    }
+
+    #[test]
+    fn raw_fallback_preserves_unknown_text_escapes_controls_and_applies_grep() {
+        let text = format!(
+            "plain worker stdout\n{}",
+            entry_line("2026-10-01 01:00:00", "ERROR", "RuntimeException: boom")
+        );
+        let mut snapshot = snapshot_of(&text, true);
+        snapshot.channels[0].format = Format::Partial(10);
+        snapshot.raw_blocks.push(RawBlock {
+            channel: 0,
+            file: "worker.log".into(),
+            text: "ordinary stdout\nPayment failed\x1b]0;secret\x07\n".into(),
+        });
+        assert_eq!(group(&snapshot, Level::Error, None).groups.len(), 1);
+        let raw = render_raw(&snapshot, Level::Emergency, Some("PAYMENT"));
+        assert!(raw.contains("no --level/--since filtering"));
+        assert!(raw.contains("Payment failed\\x1b]0;secret\\x07"));
+        assert!(!raw.contains("ordinary stdout"));
+        assert!(!raw.contains('\x1b'));
+        assert!(render_header(&snapshot).contains("partly recognized (10% of lines) — see --raw"));
+    }
+
+    #[test]
+    fn channels_view_has_a_stable_table_and_names_original_channel_after_rename() {
+        let mut snapshot = snapshot_of("", true);
+        snapshot.channels[0].name = "app".into();
+        snapshot.channels[0].format = Format::Empty;
+        let expected = "production · app · since 24h (2026-10-01 00:00:00) · times UTC\nCHANNEL  KIND  FILES  SIZE  LAST WRITE  FORMAT  COVERAGE\napp (laravel)  single  1  0 B  2026-10-01 10:00:00  empty  full\n";
+        assert_eq!(render_channels(&snapshot), expected);
+    }
+
     fn file(path: &str, size: u64) -> ProbeFile {
         ProbeFile {
             path: path.into(),
+            resolved: path.into(),
             inode: 7,
             size,
             mtime: 1_000,
@@ -1363,6 +1785,8 @@ mod tests {
             start: "2026-10-01 00:00:00".into(),
             channels: vec![Channel {
                 name: "laravel".into(),
+                key: "laravel".into(),
+                kind: ChannelKind::Single,
                 source: "storage/logs/laravel.log".into(),
                 files: vec!["/srv/app/storage/logs/laravel.log".into()],
                 budget: CHANNEL_BYTES,
@@ -1370,8 +1794,13 @@ mod tests {
                 complete,
                 covered_from: (!complete).then(|| "2026-10-01 09:00:00".into()),
                 changed: Vec::new(),
+                size: text.len() as u64,
+                last_write: Some("2026-10-01 10:00:00".into()),
+                format: Format::Recognized,
+                omitted_files: 0,
             }],
             entries: parse_entries(text.as_bytes(), 0, 0, "/srv/app/storage/logs/laravel.log"),
+            raw_blocks: Vec::new(),
             clock_changed: false,
             warnings: Vec::new(),
             bytes_transferred: 0,
@@ -1638,6 +2067,7 @@ mod tests {
                 last_seen: None,
                 message: String::new(),
                 latest: 0,
+                first: 0,
                 channels: vec![0],
                 variants: Vec::new(),
                 overflow_variants: 0,
@@ -1807,7 +2237,10 @@ mod tests {
         let lines: Vec<String> = [
             "Welcome to the server".to_string(),
             "@time 2000 1000 2026-10-01 00:00:00 2026-10-01 +0000 +0000".into(),
-            "@file 7 120 1990 1 2026-10-01 00:33:10 abc123".into(),
+            format!(
+                "@file 7 120 1990 1 2026-10-01 00:33:10 abc123 {}",
+                engine.encode("/srv/app/storage/logs/pay ments.log")
+            ),
             engine.encode("storage/logs/pay ments.log"),
             "@end".into(),
         ]
@@ -1863,6 +2296,7 @@ mod tests {
             &Since::At("2026-10-01 14:00".into()),
             &source,
             false,
+            &Default::default(),
         );
         assert!(probe.contains("tz='Asia/Kolkata'"));
         assert!(probe.contains("date -d '2026-10-01 14:00' +%s"));

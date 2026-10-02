@@ -8,14 +8,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
-use shipslip::logs::{self, Level, LogsError, Request, Since};
+use shipslip::logs::{self, ChannelKind, Format, Level, LogsError, Request, Since};
 use shipslip::receipt::{ReceiptJournal, ReceiptStatus};
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute, execute_recorded, lock_status, prepare,
     prepare_with_plan, AbortReason, BlockReason, BreakLockError, BringUpError, Confirmation,
-    DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle, MaintenancePhase, PrepareError,
-    RunPlan, SmokeResult, StepStatus, StopReason, WatchStatus, POST_DEPLOY_WATCH,
+    DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle, LogChannel, MaintenancePhase,
+    PrepareError, RunPlan, SmokeResult, StepStatus, StopReason, WatchStatus, POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 
@@ -66,6 +66,22 @@ impl Server {
         let path = self.app(name);
         self.exec(&format!("seed-logs {}", quote(&path)), "");
         path
+    }
+    /// Isolate tests of one stream from the multi-channel discovery fixture.
+    fn keep_logs(&self, path: &str, names: &[&str]) {
+        let cases = names
+            .iter()
+            .map(|name| quote(name))
+            .collect::<Vec<_>>()
+            .join("|");
+        let body = if cases.is_empty() {
+            "rm -f -- *.log".into()
+        } else {
+            format!(
+                "for f in *.log; do case \"$f\" in {cases}) ;; *) rm -f -- \"$f\" ;; esac; done"
+            )
+        };
+        self.exec(&format!("cd {}/storage/logs; {body}", quote(path)), "");
     }
     async fn start() -> Self {
         static BUILD: Once = Once::new();
@@ -254,6 +270,298 @@ impl Transport for LogsTransport {
 }
 
 #[tokio::test]
+async fn logs_discovery_preserves_partial_entries_and_raw_unsupported_formats() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-formats");
+    server.exec(&format!("cd {path}/storage/logs; for n in $(seq 1 40); do echo worker-stdout-$n; done > worker.log; printf '[%s] production.ERROR: WorkerException: failed\\n[%s] production.ERROR: JobException: retry\\n' \"$(date -u '+%F %T')\" \"$(date -u '+%F %T')\" >> worker.log; printf '{{\"datetime\":\"yesterday\",\"message\":\"json-secret\\033[2J\"}}\\n' > json.log; : > empty.log"), "");
+    // Names are shell data and terminal controls must never reach output.
+    let unusual = "storage/logs/quote'\n\x1b[2J.log";
+    server.exec(
+        &format!(
+            "cd {}; cp payments.log {}",
+            quote(&format!("{path}/storage/logs")),
+            quote(unusual.strip_prefix("storage/logs/").unwrap())
+        ),
+        "",
+    );
+    let transport = LogsTransport {
+        ssh: server.connect().await,
+        calls: AtomicUsize::new(0),
+        before_read: String::new(),
+        prefix: String::new(),
+    };
+    let snapshot = logs::snapshot(&transport, &target(&path, &[]), &Request::default())
+        .await
+        .unwrap();
+    assert_eq!(transport.calls.load(Ordering::Relaxed), 2);
+    let channel = |key: &str| {
+        snapshot
+            .channels
+            .iter()
+            .find(|channel| channel.key == key)
+            .unwrap()
+    };
+    assert_eq!(channel("laravel").kind, ChannelKind::Mixed);
+    assert_eq!(channel("payments").format, Format::Recognized);
+    assert!(matches!(channel("worker").format, Format::Partial(_)));
+    assert_eq!(channel("json").format, Format::Unrecognized);
+    assert_eq!(channel("empty").format, Format::Empty);
+    assert!(channel("empty").complete);
+    let groups = logs::group(&snapshot, Level::Error, None);
+    assert!(groups
+        .groups
+        .iter()
+        .any(|group| group.class == "WorkerException"));
+    assert!(groups
+        .groups
+        .iter()
+        .any(|group| group.class == "JobException"));
+    let raw = logs::render_raw(&snapshot, Level::Emergency, Some("SECRET"));
+    assert!(raw.contains("json-secret\\x1b[2J"));
+    assert!(raw.contains("no --level/--since filtering"));
+    assert!(!raw.contains("worker-stdout"));
+    assert!(!raw.contains('\x1b'));
+    let table = logs::render_channels(&snapshot);
+    assert!(table.contains("quote'\\x0a\\x1b[2J"));
+    assert!(!table.contains('\x1b'));
+}
+
+#[tokio::test]
+async fn logs_overrides_hide_before_opening_replace_paths_and_preserve_trust() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-overrides");
+    server.exec(&format!("cd {path}/storage/logs; cp payments.log /home/deploy/private.log; rm worker.log; ln -s /home/deploy/private.log worker.log; printf '[%s] production.ERROR: PinnedException: selected\\n' \"$(date -u '+%F %T')\" > 'custom output.txt'"), "");
+    let mut target = target(&path, &[]);
+    target.logs.insert(
+        "worker".into(),
+        LogChannel {
+            hide: true,
+            ..LogChannel::default()
+        },
+    );
+    target.logs.insert(
+        "laravel".into(),
+        LogChannel {
+            rename: Some("app".into()),
+            ..LogChannel::default()
+        },
+    );
+    target.logs.insert(
+        "payments".into(),
+        LogChannel {
+            rename: Some("billing".into()),
+            path: Some("storage/logs/custom output.txt".into()),
+            ..LogChannel::default()
+        },
+    );
+    target.logs.insert(
+        "audit".into(),
+        LogChannel {
+            path: Some("storage/logs/missing.txt".into()),
+            ..LogChannel::default()
+        },
+    );
+    let ssh = server.connect().await;
+    let snapshot = logs::snapshot(&ssh, &target, &Request::default())
+        .await
+        .unwrap();
+    assert!(!snapshot
+        .channels
+        .iter()
+        .any(|channel| channel.key == "worker"));
+    let payments = snapshot
+        .channels
+        .iter()
+        .find(|channel| channel.key == "payments")
+        .unwrap();
+    assert_eq!(payments.name, "billing");
+    assert_eq!(payments.files, ["storage/logs/custom output.txt"]);
+    assert!(logs::render_channels(&snapshot).contains("app (laravel)  single+daily"));
+    assert!(logs::render_channels(&snapshot).contains("audit  single  0"));
+    assert!(snapshot
+        .entries
+        .iter()
+        .any(|entry| entry.text.contains("PinnedException")));
+    target.logs.get_mut("payments").unwrap().path = Some("/home/deploy/private.log".into());
+    assert!(matches!(
+        logs::snapshot(&ssh, &target, &Request::default()).await,
+        Err(LogsError::Outside { .. })
+    ));
+    let trusted = logs::snapshot(
+        &ssh,
+        &target,
+        &Request {
+            allow_outside: true,
+            ..Request::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        trusted
+            .channels
+            .iter()
+            .find(|channel| channel.key == "payments")
+            .unwrap()
+            .files,
+        ["/home/deploy/private.log"]
+    );
+    // A hidden unreadable source must not cause an error or leak its contents.
+    server.exec(&format!("chmod 000 /home/deploy/private.log; rm {path}/storage/logs/worker.log; cp {path}/storage/logs/laravel.log {path}/storage/logs/worker.log; chmod 000 {path}/storage/logs/worker.log"), "");
+    target.logs.remove("payments");
+    target.logs.insert(
+        "worker-2026-99-99".into(),
+        LogChannel {
+            hide: true,
+            ..LogChannel::default()
+        },
+    );
+    server.exec(&format!("cp {path}/storage/logs/laravel.log {path}/storage/logs/worker-2026-99-99.log; chmod 000 {path}/storage/logs/worker-2026-99-99.log"), "");
+    assert!(logs::snapshot(&ssh, &target, &Request::default())
+        .await
+        .is_ok());
+}
+
+#[tokio::test]
+async fn logs_budget_is_fair_to_quiet_channels_and_counts_only_partial_groups_as_lower_bounds() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-shared-budget");
+    server.keep_logs(&path, &["payments.log"]);
+    server.exec(&format!("cd {path}/storage/logs; now=$(date -u '+%F %T'); padding=$(printf '%4096s' ''); for channel in $(seq 1 6); do for n in $(seq 1 1024); do printf '[%s] production.ERROR: BusyException: %s\\n' \"$now\" \"$padding\"; done > busy-$channel.log; done"), "");
+    let ssh = server.connect().await;
+    let snapshot = logs::snapshot(&ssh, &target(&path, &[]), &Request::default())
+        .await
+        .unwrap();
+    assert_eq!(snapshot.channels.len(), 7);
+    assert!(
+        snapshot
+            .channels
+            .iter()
+            .map(|channel| channel.bytes_read)
+            .sum::<u64>()
+            <= 12 * 1024 * 1024
+    );
+    assert!(snapshot.bytes_transferred <= 12 * 1024 * 1024);
+    for channel in snapshot
+        .channels
+        .iter()
+        .filter(|channel| channel.key.starts_with("busy-"))
+    {
+        assert!(channel.bytes_read >= 256 * 1024);
+        assert!(channel.bytes_read <= 4 * 1024 * 1024);
+        assert!(!channel.complete);
+    }
+    let quiet = snapshot
+        .channels
+        .iter()
+        .find(|channel| channel.key == "payments")
+        .unwrap();
+    assert_eq!(quiet.bytes_read, quiet.size);
+    assert!(quiet.complete);
+    let groups = logs::group(&snapshot, Level::Error, None);
+    assert!(
+        groups
+            .groups
+            .iter()
+            .find(|group| group.class == "BusyException")
+            .unwrap()
+            .partial
+    );
+    assert!(
+        !groups
+            .groups
+            .iter()
+            .find(|group| group.class == "PaymentException")
+            .unwrap()
+            .partial
+    );
+    assert!(logs::render_header(&snapshot).contains("other channels partial"));
+    let tiny = logs::snapshot(
+        &ssh,
+        &target(&path, &[]),
+        &Request {
+            max_bytes: Some(16),
+            ..Request::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        tiny.channels
+            .iter()
+            .map(|channel| channel.bytes_read)
+            .sum::<u64>()
+            <= 16
+    );
+}
+
+#[tokio::test]
+async fn logs_caps_file_slots_and_channels_and_reports_stale_non_disk_hint() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-caps");
+    server.keep_logs(&path, &["payments.log"]);
+    server.exec(&format!("cd {path}/storage/logs; now=$(date -u '+%F %T'); for n in $(seq 0 29); do day=$(date -u -d \"$n days ago\" +%F); for channel in app queue; do printf '[%s] production.ERROR: DailyException: failed\\n' \"$now\" > \"$channel-$day.log\"; done; done"), "");
+    let ssh = server.connect().await;
+    let snapshot = logs::snapshot(
+        &ssh,
+        &target(&path, &[]),
+        &Request {
+            since: Some(Since::Ago(30 * 86400)),
+            ..Request::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        snapshot
+            .channels
+            .iter()
+            .map(|channel| channel.files.len())
+            .sum::<usize>(),
+        50
+    );
+    assert_eq!(
+        snapshot
+            .channels
+            .iter()
+            .map(|channel| channel.omitted_files)
+            .sum::<usize>(),
+        11
+    );
+    assert!(
+        snapshot
+            .channels
+            .iter()
+            .find(|channel| channel.key == "payments")
+            .unwrap()
+            .complete
+    );
+    assert!(logs::render_channels(&snapshot).contains("+11 files not read"));
+    server.keep_logs(&path, &[]);
+    server.exec(&format!("cd {path}/storage/logs; for n in $(seq -w 1 21); do printf 'stdout only\\n' > \"worker-$n.log\"; done; touch -d '2 days ago' -- *.log"), "");
+    let snapshot = logs::snapshot(&ssh, &target(&path, &[]), &Request::default())
+        .await
+        .unwrap();
+    assert_eq!(snapshot.channels.len(), 20);
+    assert!(snapshot
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("+1 channels not shown")));
+    assert!(snapshot
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("stderr, syslog, or a service")));
+    let summary = logs::render_summary(
+        &snapshot,
+        &logs::group(&snapshot, Level::Error, None),
+        Level::Error,
+        false,
+    );
+    assert!(summary.contains("coverage is incomplete"));
+    assert!(!summary.contains("No errors"));
+}
+
+#[tokio::test]
 async fn logs_snapshot_merges_daily_files_and_changes_no_app_or_run_files() {
     let server = Server::start().await;
     let path = server.logs_app("logs-daily");
@@ -274,7 +582,9 @@ async fn logs_snapshot_merges_daily_files_and_changes_no_app_or_run_files() {
     )
     .await
     .unwrap();
-    assert_eq!(snapshot.channels[0].files.len(), 2);
+    assert_eq!(snapshot.channels[0].files.len(), 3);
+    assert_eq!(snapshot.channels[0].kind, ChannelKind::Mixed);
+    assert_eq!(snapshot.channels.len(), 5);
     assert!(snapshot.channels[0].complete);
     let groups = logs::group(&snapshot, Level::Error, None);
     let query = groups
@@ -282,7 +592,7 @@ async fn logs_snapshot_merges_daily_files_and_changes_no_app_or_run_files() {
         .iter()
         .find(|g| g.class == "QueryException")
         .unwrap();
-    assert_eq!(query.count, 2);
+    assert_eq!(query.count, 4);
     let detail = logs::render_detail(&snapshot, query);
     assert!(detail.contains("[stacktrace]"));
     assert!(detail.contains("Checkout.php(3)"));
@@ -293,11 +603,11 @@ async fn logs_snapshot_merges_daily_files_and_changes_no_app_or_run_files() {
     assert!(raw.find("Duplicate entry 7").unwrap() < raw.find("Duplicate entry 9").unwrap());
     assert_eq!(
         logs::group(&snapshot, Level::Critical, None).groups.len(),
-        1
+        2
     );
     assert_eq!(
         logs::group(&snapshot, Level::Error, Some("DUPLICATE")).groups[0].count,
-        2
+        4
     );
     assert!(snapshot.channels[0].bytes_read <= snapshot.channels[0].budget);
     // Tiny individual files can grow when gzip/base64 framing is added.
@@ -320,7 +630,12 @@ async fn logs_paths_require_trust_outside_storage_and_allow_shared_storage() {
         .await
         .unwrap();
     assert_eq!(
-        logs::group(&snapshot, Level::Error, None).groups[0].class,
+        logs::group(&snapshot, Level::Error, None)
+            .groups
+            .iter()
+            .find(|group| group.class == "PaymentException")
+            .unwrap()
+            .class,
         "PaymentException"
     );
     server.exec(&format!("cp {path}/storage/logs/payments.log /home/deploy/secret.log; ln -s /home/deploy/secret.log {path}/storage/logs/secret.log"), "");
@@ -340,7 +655,14 @@ async fn logs_paths_require_trust_outside_storage_and_allow_shared_storage() {
         )
         .await
         .unwrap();
-        assert_eq!(allowed.entries.len(), 1);
+        assert_eq!(
+            allowed
+                .entries
+                .iter()
+                .filter(|entry| entry.file == log)
+                .count(),
+            1
+        );
     }
     server.exec(&format!("rm {path}/storage/logs/secret.log; mv {path}/storage/logs /home/deploy/shared-logs; ln -s /home/deploy/shared-logs {path}/storage/logs"), "");
     target.log = Some("storage/logs/payments.log".into());
@@ -357,6 +679,7 @@ async fn logs_paths_require_trust_outside_storage_and_allow_shared_storage() {
 async fn logs_byte_limit_and_partial_lookup_are_honest() {
     let server = Server::start().await;
     let path = server.logs_app("logs-budget");
+    server.keep_logs(&path, &["laravel.log"]);
     server.exec(&format!("cd {path}/storage/logs; for n in $(seq 1 1000); do printf '[%s] production.ERROR: RuntimeException: row %s\\n' \"$(date -u '+%F %T')\" \"$n\"; done > laravel.log"), "");
     let ssh = server.connect().await;
     for limit in [16, 4096] {
@@ -383,14 +706,15 @@ async fn logs_byte_limit_and_partial_lookup_are_honest() {
 async fn logs_read_refuses_symlink_swaps_rotation_and_copytruncate() {
     let server = Server::start().await;
     let path = server.logs_app("logs-races");
-    let setup = format!("cd {path}/storage/logs; cp payments.log original.log; cp payments.log /home/deploy/secret.log");
+    server.keep_logs(&path, &["payments.log"]);
+    let setup = format!("cd {path}/storage/logs; cp payments.log original.txt; cp payments.log /home/deploy/secret.log");
     server.exec(&setup, "");
     for mutation in [
         "rm payments.log; ln -s /home/deploy/secret.log payments.log",
-        "mv payments.log rotated.log; cp original.log payments.log",
-        ": > payments.log; printf 'replaced content\\n' > payments.log; cat original.log >> payments.log",
+        "mv payments.log rotated.log; cp original.txt payments.log",
+        ": > payments.log; printf 'replaced content\\n' > payments.log; cat original.txt >> payments.log",
     ] {
-        server.exec(&format!("cd {path}/storage/logs; rm -f payments.log; cp original.log payments.log"), "");
+        server.exec(&format!("cd {path}/storage/logs; rm -f payments.log rotated.log; cp original.txt payments.log"), "");
         let transport = LogsTransport { ssh: server.connect().await, calls: AtomicUsize::new(0), before_read: format!("cd {path}/storage/logs; {mutation}"), prefix: String::new() };
         let mut target = target(&path, &[]);
         target.log = Some("storage/logs/payments.log".into());
@@ -407,6 +731,7 @@ async fn logs_read_refuses_symlink_swaps_rotation_and_copytruncate() {
 async fn logs_append_after_probe_is_excluded_from_the_snapshot() {
     let server = Server::start().await;
     let path = server.logs_app("logs-append");
+    server.keep_logs(&path, &["payments.log"]);
     let transport = LogsTransport { ssh: server.connect().await, calls: AtomicUsize::new(0), before_read: format!("printf '[%s] production.ERROR: LateException: appended\\n' \"$(date -u '+%F %T')\" >> {path}/storage/logs/payments.log"), prefix: String::new() };
     let mut target = target(&path, &[]);
     target.log = Some("storage/logs/payments.log".into());
@@ -422,6 +747,7 @@ async fn logs_append_after_probe_is_excluded_from_the_snapshot() {
 async fn logs_timezone_absolute_windows_and_missing_server_zone() {
     let server = Server::start().await;
     let path = server.logs_app("logs-zone");
+    server.keep_logs(&path, &["payments.log"]);
     let ssh = server.connect().await;
     let mut target = target(&path, &[]);
     target.log = Some("storage/logs/payments.log".into());
@@ -482,6 +808,7 @@ async fn logs_timezone_absolute_windows_and_missing_server_zone() {
 async fn logs_dst_keeps_second_pass_entries_and_warns_in_raw_mode() {
     let server = Server::start().await;
     let path = server.logs_app("logs-dst");
+    server.keep_logs(&path, &["dst.log"]);
     let now = server.exec("TZ=America/New_York date -d '2026-11-01 03:00:00' +%s", "");
     let transport = LogsTransport { ssh: server.connect().await, calls: AtomicUsize::new(0), before_read: String::new(), prefix: format!("date() {{ if [ \"$*\" = +%s ]; then echo {now}; elif [ \"$*\" = +%z ]; then command date -d @{now} +%z; else command date \"$@\"; fi; }}") };
     let mut target = target(&path, &[]);
@@ -510,8 +837,13 @@ async fn logs_dst_keeps_second_pass_entries_and_warns_in_raw_mode() {
 async fn logs_missing_or_unreadable_files_do_not_report_all_clear() {
     let server = Server::start().await;
     let path = server.logs_app("logs-missing");
+    server.keep_logs(&path, &["payments.log"]);
     let ssh = server.connect().await;
     let mut target = target(&path, &[]);
+    server.exec(
+        &format!("mv {path}/storage/logs/payments.log {path}/payments.txt"),
+        "",
+    );
     target.log = Some("storage/logs/missing.log".into());
     let snapshot = logs::snapshot(&ssh, &target, &Request::default())
         .await
@@ -525,7 +857,7 @@ async fn logs_missing_or_unreadable_files_do_not_report_all_clear() {
     assert!(summary.contains("no log file found"));
     assert!(summary.contains("coverage is incomplete"));
     target.log = Some("storage/logs/payments.log".into());
-    server.exec(&format!("chmod 000 {path}/storage/logs/payments.log"), "");
+    server.exec(&format!("mv {path}/payments.txt {path}/storage/logs/payments.log; chmod 000 {path}/storage/logs/payments.log"), "");
     assert!(matches!(
         logs::snapshot(&ssh, &target, &Request::default()).await,
         Err(LogsError::Unavailable(_))
@@ -591,6 +923,12 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
     let detail = run_cli(&["logs", "staging", &id.to_uppercase()]);
     assert!(detail.status.success());
     assert!(String::from_utf8_lossy(&detail.stdout).contains("[stacktrace]"));
+    let channels = run_cli(&["logs", "staging", "--channels"]);
+    assert!(channels.status.success());
+    let table = String::from_utf8(channels.stdout).unwrap();
+    assert!(table.contains("CHANNEL  KIND  FILES  SIZE  LAST WRITE  FORMAT  COVERAGE"));
+    assert!(table.contains("laravel  single+daily  3"));
+    assert!(table.contains("payments  single  1"));
     let raw = run_cli(&["logs", "staging", "--raw", "--grep", "SLOW"]);
     assert!(raw.status.success());
     assert!(String::from_utf8_lossy(&raw.stdout).contains("Slow query"));
@@ -601,6 +939,9 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
         (vec!["logs", "staging", "--since", "2026-02-30"], 2),
         (vec!["logs", "staging", "--raw", "1"], 2),
         (vec!["logs", "staging", "--follow"], 2),
+        (vec!["logs", "staging", "--channels", "--raw"], 2),
+        (vec!["logs", "staging", "--channels", "1"], 2),
+        (vec!["logs", "staging", "--channels", "--level", "error"], 2),
     ] {
         let output = run_cli(&args);
         assert_eq!(
@@ -610,6 +951,7 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    server.keep_logs(&path, &["laravel.log"]);
     let now = server.exec("date -u '+%F %T'", "");
     let noisy: String = (0..30)
         .map(|i| format!("[{now}] production.ERROR: E{i}Exception: boom\n"))
