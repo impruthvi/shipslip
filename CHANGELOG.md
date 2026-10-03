@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-03
+
 ### Added
 
 - Opt-in temporary GitHub authentication for `deploy`, `rerun` and `from-step`.
@@ -127,6 +129,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.2.2]: https://github.com/impruthvi/shipslip/releases/tag/v0.2.2
 [0.2.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.2.0
 [0.1.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.1.1
 [0.1.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.1.0
