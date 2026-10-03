@@ -21,6 +21,8 @@ use tokio::sync::mpsc;
 
 const IMAGE: &str = "shipslip-test-sshd";
 
+mod github_token;
+
 fn docker(args: &[&str]) -> String {
     let out = Command::new("docker")
         .args(args)

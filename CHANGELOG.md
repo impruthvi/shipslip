@@ -4,6 +4,23 @@ All notable changes to Shipslip are listed here. Shipslip follows
 [Semantic Versioning](https://semver.org/); before 1.0, a minor release may
 change the library API.
 
+## [Unreleased]
+
+### Added
+
+- Opt-in temporary GitHub authentication for `deploy`, `rerun` and `from-step`.
+  `--github-token` prompts with hidden input; `--github-token-source env|gh`
+  explicitly selects local environment credentials or the GitHub CLI login.
+- Token account identification, repository visibility checks, account
+  confirmation and replacement, and guidance for creating a read-only token.
+- Standard GitHub SSH and HTTPS origins can fetch over HTTPS without saved
+  server credentials or remote configuration changes. Tokens are restricted
+  to the confirmed repository's preflight fetch and excluded from receipts,
+  detached scripts and output. Existing credential stores, redirects, URL
+  rewrites and recursive submodule fetches are disabled for this operation.
+- Library APIs for discovering a GitHub repository and preparing a run with
+  an explicit `GitHubToken` and pinned repository.
+
 ## [0.2.1] - 2026-10-02
 
 ### Fixed

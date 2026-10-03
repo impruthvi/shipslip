@@ -160,14 +160,38 @@ s=$(git status --porcelain) || exit $?
 /// State, then fetch, ancestry and the commit list, then `bash -n` of each
 /// recipe step's script (`steps[0]` is step 1).
 pub(crate) fn preflight_script(path: &str, branch: &str, steps: &[String]) -> String {
+    preflight_script_with_token(path, branch, steps, None)
+}
+
+pub(crate) fn preflight_script_with_token(
+    path: &str,
+    branch: &str,
+    steps: &[String],
+    auth: Option<(
+        &crate::github_auth::GitHubRepository,
+        &crate::github_auth::GitHubToken,
+    )>,
+) -> String {
     let mut s = state_script(path);
-    s.push_str(&format!(
-        r#"export GIT_TERMINAL_PROMPT=0 SSH_ASKPASS_REQUIRE=never
-if ! out=$(git fetch origin {refspec} 2>&1 </dev/null); then
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+    s.push_str("export GIT_TERMINAL_PROMPT=0 SSH_ASKPASS_REQUIRE=never\n");
+    if let Some((repository, token)) = auth {
+        // Disable shell tracing before any secret-bearing line is read.
+        s.insert_str(0, "set +x +v\n");
+        s.push_str(&token.fetch_script(repository, &refspec));
+    } else {
+        s.push_str(&format!(
+            r#"if ! out=$(git fetch origin {refspec} 2>&1 </dev/null); then
   echo "@fetch_failed"
   printf '%s\n' "$out" | sed 's/^/@message /'
   exit 0
 fi
+"#,
+            refspec = shell_quote(&refspec),
+        ));
+    }
+    s.push_str(&format!(
+        r#"
 h=$(git rev-parse HEAD)
 t=$(git rev-parse {remote})
 echo "@target $t"
@@ -175,9 +199,6 @@ echo "@fetch_head $(git rev-parse FETCH_HEAD)"
 git merge-base --is-ancestor "$h" "$t" && echo "@ancestor"
 git log --oneline "$h..$t" | sed 's/^/@commit /'
 "#,
-        refspec = shell_quote(&format!(
-            "+refs/heads/{branch}:refs/remotes/origin/{branch}"
-        )),
         remote = shell_quote(&format!("origin/{branch}")),
     ));
     for (n, step) in (1..).zip(steps) {

@@ -63,8 +63,9 @@ be in your `known_hosts` file. Keep your private key out of Git and out of
 messages to teammates.
 
 The server's deploy user needs permission to run the recipe commands and read
-Laravel's log. Its Git checkout must be clean, on the configured branch, and
-able to `git fetch origin` without an interactive prompt.
+Laravel's log. Its Git checkout must be clean and on the configured branch.
+For GitHub access, either configure the server to `git fetch origin` without
+an interactive prompt, or use a local token as described below.
 
 Recipe commands use the server's permission mask. Choose ownership, group
 access, and a mask that let PHP-FPM read the files Composer and Artisan create.
@@ -135,6 +136,34 @@ anywhere inside your **local Laravel project checkout**, run:
 slip trust staging
 slip deploy staging
 ```
+
+If the server has no GitHub credentials, use:
+
+```sh
+slip deploy staging --github-token
+```
+
+Paste a GitHub personal access token at the hidden prompt. Shipslip shows its
+actual account username and the server's `OWNER/REPO` before asking you to use
+it. Enter `r` to replace a token from the wrong account, or cancel. This works
+without a GitHub CLI login and does not silently use your personal `gh` account.
+The prompt includes token-creation guidance: select the repository with
+Contents: Read-only and an expiry; your organization may require approval or
+SSO authorization. Repository visibility is checked locally; the server fetch
+verifies read access before showing the normal deployment preview.
+
+To use existing local credentials explicitly, choose `--github-token-source
+env` (`GH_TOKEN`, then `GITHUB_TOKEN`) or `--github-token-source gh` (the active
+github.com GitHub CLI login). Both still show the actual account and require
+confirmation. Token authentication also works with `rerun` and `from-step`.
+
+This flow requires local `curl` and a standard github.com HTTPS or SSH origin.
+The token reaches the trusted server briefly in memory over SSH and is not
+saved by Shipslip. The saved Git remote remains unchanged; receipts and
+detached scripts do not contain credentials. The token is used only for the
+application repository's fetch. Configure private Composer dependencies and
+submodules separately. See the [README](../README.md#use-a-local-github-token)
+for source selection and supported remotes.
 
 `trust` shows the config and asks you to approve it. `deploy` fetches the
 configured branch on the server, previews the exact commits and steps, and
