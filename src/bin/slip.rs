@@ -11,14 +11,16 @@ use shipslip::config::{
     approve_trust, default_trust_path, is_branch_name, is_env_name, is_smoke_url, is_ssh_alias,
     trust_status, InitAnswers, InitPlan, LoadedConfig, TrustSnapshot, TrustStatus,
 };
+use shipslip::github_auth::discover_repository;
 use shipslip::logs::{self, Level, Lookup, Since};
 use shipslip::receipt::{default_receipts_root, find_open, ReceiptJournal};
 use shipslip::transport::SshTransport;
 use shipslip::{
-    attach, break_lock, bring_app_up, cancel, execute_recorded, lock_status, prepare_with_plan,
-    BreakLockError, BringUpError, Confirmation, DeployEvent, DeployOutcome, DeployTarget,
-    ExecuteRejected, ExecutionHandle, LogChannel, MaintenancePhase, PrepareError, RunPlan,
-    SmokeResult, StepStatus, WatchResult, WatchStatus, POST_DEPLOY_WATCH,
+    attach, break_lock, bring_app_up, cancel, execute_recorded, lock_status,
+    prepare_with_github_token, prepare_with_plan, BreakLockError, BringUpError, Confirmation,
+    DeployEvent, DeployOutcome, DeployTarget, ExecuteRejected, ExecutionHandle, LogChannel,
+    MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus, WatchResult, WatchStatus,
+    POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -27,9 +29,24 @@ use tokio::time::Instant;
 const INTERRUPTED: u8 = 130;
 const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> ExitCode {
-    match run().await {
+#[path = "slip/github_token.rs"]
+mod github_token;
+use github_token::{LocalTokens, TokenSource};
+
+fn main() -> ExitCode {
+    // Capture and remove ambient token variables before starting any threads.
+    let enabled = std::env::args()
+        .any(|arg| matches!(arg.as_str(), "--github-token" | "--github-token-source"));
+    let local_tokens = LocalTokens::capture(enabled);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("could not start async runtime");
+    runtime.block_on(main_async(local_tokens))
+}
+
+async fn main_async(local_tokens: LocalTokens) -> ExitCode {
+    match run(local_tokens).await {
         Ok(code) => code,
         Err(error) => {
             eprintln!("slip: {}", logs::escape(&error.to_string()));
@@ -49,7 +66,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run() -> Result<ExitCode, Box<dyn Error>> {
+async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> {
     let Some(command) = parse_args()? else {
         return Ok(ExitCode::SUCCESS);
     };
@@ -76,7 +93,7 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
     }
     let trust_path = default_trust_path()?;
     let receipts_root = default_receipts_root()?;
-    let (environment, plan) = match action {
+    let (environment, plan, token_source) = match action {
         Action::Init => unreachable!("init runs before the config is loaded"),
         Action::Trust { environment } => {
             return trust_command(&config, &trust_path, environment.as_deref());
@@ -91,26 +108,81 @@ async fn run() -> Result<ExitCode, Box<dyn Error>> {
             return up_command(&config, &trust_path, &environment).await;
         }
         Action::Logs { .. } => unreachable!("logs runs before deploy setup"),
-        Action::Run { environment, plan } => (environment, plan),
+        Action::Run {
+            environment,
+            plan,
+            token_source,
+        } => (environment, plan, token_source),
     };
     let target = trusted_target(&config, &trust_path, &environment)?;
 
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
     let mut interrupts = Interrupts::listen();
+    let auth = if let Some(source) = token_source {
+        println!(
+            "Temporary GitHub authentication on server: {}",
+            logs::escape(&target.ssh_alias)
+        );
+        let repository = tokio::select! {
+            result = discover_repository(transport.as_ref(), &target.path) => result?,
+            () = interrupts.recv() => {
+                println!("Cancelled; no deploy steps were run.");
+                exit_interrupted();
+            }
+        };
+        let Some(token) = github_token::select_token(
+            source,
+            &mut local_tokens,
+            &repository,
+            &environment,
+            &mut interrupts,
+        )
+        .await?
+        else {
+            println!("Cancelled; no deploy steps were run.");
+            if interrupts.pending {
+                exit_interrupted();
+            }
+            return Ok(ExitCode::SUCCESS);
+        };
+        Some((repository, token))
+    } else {
+        None
+    };
+    drop(local_tokens);
+    let preparing = async {
+        match &auth {
+            Some((repository, token)) => {
+                prepare_with_github_token(
+                    target.clone(),
+                    plan,
+                    transport.as_ref(),
+                    repository,
+                    token,
+                )
+                .await
+            }
+            None => prepare_with_plan(target.clone(), plan, transport.as_ref()).await,
+        }
+    };
     let preview = interrupts
         .defer(
-            prepare_with_plan(target.clone(), plan, transport.as_ref()),
+            preparing,
             "Cancelling once the server check finishes; press Ctrl-C again to quit now.",
         )
-        .await
-        .map_err(|error| match error {
-            PrepareError::LockHeld(info) => format!(
-                "deploy lock is {info}; run `slip attach {environment}` to resume an unfinished \
+        .await;
+    drop(auth);
+    if token_source.is_some() && preview.is_ok() {
+        println!("Repository fetch access: verified");
+    }
+    let preview = preview.map_err(|error| match error {
+        PrepareError::LockHeld(info) => format!(
+            "deploy lock is {info}; run `slip attach {environment}` to resume an unfinished \
                  run, or check the server and run `slip break-lock {environment}` if it is stale"
-            )
-            .into(),
-            error => Box::<dyn Error>::from(error),
-        })?;
+        )
+        .into(),
+        error => Box::<dyn Error>::from(error),
+    })?;
     if interrupts.pending {
         interrupts
             .defer(cancel(preview, transport.as_ref()), "")
@@ -635,13 +707,39 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
         }
     };
 
-    if index != args.len() {
-        return Err(invalid_input("unexpected extra argument; run `slip --help` for usage").into());
+    let mut token_source = None;
+    while index < args.len() {
+        let source = match args[index].as_str() {
+            "--github-token" => TokenSource::Prompt,
+            "--github-token-source" => {
+                index += 1;
+                let value = args.get(index).ok_or_else(|| {
+                    invalid_input("--github-token-source requires prompt, env, or gh")
+                })?;
+                TokenSource::parse(value)?
+            }
+            _ => {
+                return Err(
+                    invalid_input("unexpected extra argument; run `slip --help` for usage").into(),
+                )
+            }
+        };
+        if token_source.replace(source).is_some() {
+            return Err(invalid_input(
+                "select one GitHub token source; do not combine or repeat token flags",
+            )
+            .into());
+        }
+        index += 1;
     }
 
     Ok(Some(Command {
         config,
-        action: Action::Run { environment, plan },
+        action: Action::Run {
+            environment,
+            plan,
+            token_source,
+        },
     }))
 }
 
@@ -814,6 +912,12 @@ fn print_help() {
          \x20 break-lock ENV     Clear a stale deploy lock after checking the old run\n\
          \x20 up ENV             Run `php artisan up` under a new deploy lock\n\
          \x20 logs ENV           Group recent log errors; read-only\n\n\
+         Deploy authentication (deploy, rerun, from-step):\n\
+         \x20 --github-token                  Enter a GitHub token with hidden input\n\
+         \x20 --github-token-source SOURCE    Explicitly select prompt, env, or gh\n\
+         \x20                                 env reads local GH_TOKEN, then GITHUB_TOKEN\n\
+         \x20                                 gh reads the github.com GitHub CLI login\n\
+         \x20 Token account is shown before use; token is not saved by Shipslip.\n\n\
          Logs options:\n\
          \x20 ID|ROW             Show one group's latest entry and variants\n\
          \x20 --since S          30m, 6h, 7d, 2026-10-01 or \"2026-10-01 14:00\"\n\
@@ -1527,6 +1631,7 @@ enum Action {
     Run {
         environment: String,
         plan: RunPlan,
+        token_source: Option<TokenSource>,
     },
     Trust {
         environment: Option<String>,
@@ -1552,6 +1657,53 @@ mod tests {
     use std::io::BufReader;
 
     use super::*;
+
+    #[test]
+    fn token_sources_are_explicit_and_only_supported_on_run_commands() {
+        for (args, expected) in [
+            (vec!["deploy", "staging"], None),
+            (
+                vec!["deploy", "staging", "--github-token"],
+                Some(TokenSource::Prompt),
+            ),
+            (
+                vec!["rerun", "staging", "--github-token-source", "env"],
+                Some(TokenSource::Env),
+            ),
+            (
+                vec!["from-step", "staging", "2", "--github-token-source", "gh"],
+                Some(TokenSource::Gh),
+            ),
+        ] {
+            let parsed = parse_args_from(args.iter().map(|s| s.to_string()).collect())
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(parsed.action, Action::Run { token_source, .. } if token_source == expected)
+            );
+        }
+        for args in [
+            vec!["deploy", "staging", "--github-token-source"],
+            vec!["deploy", "staging", "--github-token-source", "secret-value"],
+            vec!["deploy", "staging", "--github-token", "secret-value"],
+            vec![
+                "deploy",
+                "staging",
+                "--github-token",
+                "--github-token-source",
+                "gh",
+            ],
+            vec!["deploy", "staging", "--github-token", "--github-token"],
+            vec!["attach", "staging", "--github-token"],
+            vec!["logs", "staging", "--github-token"],
+            vec!["trust", "staging", "--github-token"],
+        ] {
+            let error = parse_args_from(args.iter().map(|s| s.to_string()).collect())
+                .err()
+                .unwrap();
+            assert!(!error.to_string().contains("secret-value"));
+        }
+    }
 
     #[test]
     fn logs_arguments_preserve_filters_and_reject_invalid_combinations() {

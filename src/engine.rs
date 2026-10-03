@@ -287,6 +287,31 @@ pub async fn prepare_with_plan<T: Transport>(
     run_plan: RunPlan,
     transport: &T,
 ) -> Result<Preview, PrepareError> {
+    prepare_inner(target, run_plan, transport, None).await
+}
+
+/// Like [`prepare_with_plan`], using a local token only for the server's
+/// GitHub fetch. Supports standard github.com HTTPS and SSH origins without
+/// rewriting their saved configuration. The token never enters the preview.
+pub async fn prepare_with_github_token<T: Transport>(
+    target: DeployTarget,
+    run_plan: RunPlan,
+    transport: &T,
+    repository: &crate::github_auth::GitHubRepository,
+    token: &crate::github_auth::GitHubToken,
+) -> Result<Preview, PrepareError> {
+    prepare_inner(target, run_plan, transport, Some((repository, token))).await
+}
+
+async fn prepare_inner<T: Transport>(
+    target: DeployTarget,
+    run_plan: RunPlan,
+    transport: &T,
+    auth: Option<(
+        &crate::github_auth::GitHubRepository,
+        &crate::github_auth::GitHubToken,
+    )>,
+) -> Result<Preview, PrepareError> {
     match run_plan {
         RunPlan::Deploy => {}
         RunPlan::Rerun if target.steps.is_empty() => {
@@ -309,8 +334,30 @@ pub async fn prepare_with_plan<T: Transport>(
         )));
     }
 
-    let script = preflight::preflight_script(&target.path, &target.branch, &target.steps);
-    let (result, lines) = run_collect(transport, &script).await;
+    let script = zeroize::Zeroizing::new(match auth {
+        Some(auth) => preflight::preflight_script_with_token(
+            &target.path,
+            &target.branch,
+            &target.steps,
+            Some(auth),
+        ),
+        None => preflight::preflight_script(&target.path, &target.branch, &target.steps),
+    });
+    let (result, mut lines) = run_collect(transport, &script).await;
+    let result = if let Some((_, token)) = auth {
+        for line in &mut lines {
+            *line = token.redact(line);
+        }
+        result.map_err(|error| match error {
+            TransportError::Connect(message) => TransportError::Connect(token.redact(&message)),
+            TransportError::ConnectionLost(message) => {
+                TransportError::ConnectionLost(token.redact(&message))
+            }
+        })
+    } else {
+        result
+    };
+    drop(script);
     let code = result?;
     if code != 0 {
         return Err(PrepareError::Blocked(BlockReason::CommandFailed {

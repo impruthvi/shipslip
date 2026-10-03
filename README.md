@@ -94,6 +94,53 @@ Shipslip searches from the current directory to the Git root for
 `.shipslip.toml`. `--config FILE` selects a specific file; `SHIPSLIP_CONFIG`
 sets a default override.
 
+### Use a local GitHub token
+
+If the server has no GitHub credentials, use a token from your laptop for the
+preflight fetch:
+
+```sh
+slip deploy staging --github-token
+```
+
+Shipslip first inspects the server's repository, then asks for a token with
+hidden input. It checks the token's GitHub account and repository visibility,
+shows the username and `OWNER/REPO`, and lets you continue, enter another
+token, or cancel. The server's fetch verifies actual read access; the normal
+deploy preview and production confirmation still follow. Your SSH identity
+and personal GitHub CLI login do not select the account for this token.
+
+Need a token? The prompt includes a GitHub creation link with the repository
+owner and read permissions prefilled. Select the target repository and
+**Contents: Read-only**, choose an expiry, and obtain any required organization
+approval. Classic tokens may need SSO authorization. Follow your organization's
+token policy; a personal account can be used if it has the required access.
+
+Other credential sources must be selected explicitly:
+
+```sh
+slip deploy staging --github-token-source env  # local GH_TOKEN, then GITHUB_TOKEN
+slip deploy staging --github-token-source gh   # active github.com GitHub CLI login
+slip rerun staging --github-token
+slip from-step staging 2 --github-token
+```
+
+`--github-token` always prompts, even if an environment token or GitHub CLI
+login exists. Token flags accept a source name, never a token value. Hidden
+entry requires an interactive terminal. Scripts must choose `env` or `gh`
+explicitly and still answer the account and deploy confirmation prompts.
+
+Temporary authentication supports standard `github.com` HTTPS and SSH origins.
+It fetches over HTTPS without changing the saved `origin`; embedded credentials,
+other hosts, Git URL rewrites and redirects are refused. The repository is
+pinned to the one shown at account confirmation. The trusted server receives
+the token briefly in process memory over SSH. Shipslip does not save it on
+either machine or include it in receipts, detached step scripts or output;
+existing server credential helpers cannot save it. Existing `gh` credentials
+stay managed by GitHub CLI. The token is used only for this fetch, not for
+Composer, submodules or recipe steps. Local `curl` is required for account
+validation. Without a token flag, server authentication works as before.
+
 ## Run plans
 
 ```sh

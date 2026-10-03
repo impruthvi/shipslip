@@ -13,6 +13,7 @@
 pub mod config;
 mod engine;
 mod event;
+pub mod github_auth;
 mod lock;
 pub mod logs;
 mod marker;
@@ -26,9 +27,9 @@ pub mod transport;
 
 pub use engine::{
     attach, break_lock, bring_app_up, cancel, execute, execute_recorded, lock_status, prepare,
-    prepare_with_plan, AttachError, BreakLockError, BringUpError, ConfirmError, Confirmation,
-    DeployTarget, ExecuteError, ExecuteRejected, ExecutionHandle, LockStatusError, LogChannel,
-    PrepareError, Preview, RunPlan, POST_DEPLOY_WATCH,
+    prepare_with_github_token, prepare_with_plan, AttachError, BreakLockError, BringUpError,
+    ConfirmError, Confirmation, DeployTarget, ExecuteError, ExecuteRejected, ExecutionHandle,
+    LockStatusError, LogChannel, PrepareError, Preview, RunPlan, POST_DEPLOY_WATCH,
 };
 pub use event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason};
 pub use lock::{LockInfo, LockOwner, STALE_AFTER};
