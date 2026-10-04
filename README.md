@@ -63,6 +63,9 @@ Laravel Boost is recommended: its setup prompt defaults to Yes. Pass `--boost`
 to enable it without the prompt, or `--no-boost` to skip it. WorkOS, community kits, teams,
 and package managers other than npm are not supported.
 
+Boost configures the AI clients it detects. To choose or add a client after
+creation, run `php artisan boost:install` from the new app.
+
 `slip new .` creates in the current directory only when it is completely empty,
 including hidden files. Both creation modes refuse symlink destinations and
 destinations inside another Git checkout. There is no force or overwrite
@@ -202,7 +205,7 @@ bash scripts/installer-matrix.sh .context/installer-compat.md
 The matrix creates eleven temporary apps: nine starter-kit/auth combinations
 without Boost, plus plain Laravel and React with Boost. It runs application
 checks, moves each scaffold to a path containing spaces, and rebuilds assets.
-Boost cases also initialize the generated MCP command and list tools after
+Boost cases also initialize MCP and list tools after
 relocation. The report retains every result and per-case logs on failure.
 This takes longer than unit tests and downloads Composer/npm dependencies;
 it does not create GitHub repositories. Weekly/manual CI runs the same matrix

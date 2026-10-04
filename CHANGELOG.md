@@ -52,7 +52,9 @@ change the library API.
   or lockfiles change during the wizard.
 - The installer matrix reports every case and a final tally even when a failed
   installer leaves malformed `composer.lock` JSON. Boost cases verify the locked
-  package and generated MCP command after moving the scaffold.
+  package and MCP server after moving the scaffold. Checks recognize generated
+  Claude/Cursor/VS Code/Junie/Codex configurations and verify the server directly
+  when Boost selected no AI client.
 
 ### Changed
 

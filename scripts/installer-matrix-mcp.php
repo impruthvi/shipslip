@@ -1,11 +1,41 @@
 <?php
-// Run Boost's generated command after moving its project, with a bounded wait.
+// Check configured clients, or the server itself when no client was selected.
 $process = null;
 $pipes = [];
 try {
     $path = $argv[1];
-    $config = json_decode(file_get_contents($path.'/.mcp.json'), true, 512, JSON_THROW_ON_ERROR);
-    $server = $config['mcpServers']['laravel-boost'] ?? null;
+    $server = null;
+    foreach (['.mcp.json', '.cursor/mcp.json', '.vscode/mcp.json', '.junie/mcp/mcp.json'] as $file) {
+        if (!is_file($path.'/'.$file)) continue;
+        $config = json_decode(file_get_contents($path.'/'.$file), true, 512, JSON_THROW_ON_ERROR);
+        $server = $config['mcpServers']['laravel-boost'] ?? $config['servers']['laravel-boost'] ?? null;
+        if ($server !== null) break;
+    }
+    if ($server === null && is_file($path.'/.codex/config.toml')) {
+        // Boost writes JSON-compatible strings/arrays in this generated TOML table.
+        $section = false;
+        foreach (file($path.'/.codex/config.toml', FILE_IGNORE_NEW_LINES) as $line) {
+            $line = trim($line);
+            if (str_starts_with($line, '[')) {
+                $section = $line === '[mcp_servers.laravel-boost]';
+                continue;
+            }
+            if ($section && preg_match('/^(command|args)\s*=\s*(.+)$/', $line, $match)) {
+                $server[$match[1]] = json_decode($match[2], true, 512, JSON_THROW_ON_ERROR);
+            }
+        }
+    }
+    if ($server === null) {
+        $boostFile = $path.'/boost.json';
+        $boost = is_file($boostFile)
+            ? json_decode(file_get_contents($boostFile), true, 512, JSON_THROW_ON_ERROR)
+            : null;
+        if (!is_array($boost) || ($boost['agents'] ?? null) !== [] || ($boost['mcp'] ?? null) !== true) {
+            throw new RuntimeException('Missing generated Laravel Boost MCP configuration for selected clients');
+        }
+        echo 'No AI client selected; verifying the installed Boost MCP server directly'.PHP_EOL;
+        $server = ['command' => PHP_BINARY, 'args' => ['artisan', 'boost:mcp']];
+    }
     if (!is_array($server) || !is_string($server['command'] ?? null) || !is_array($server['args'] ?? null)) {
         throw new RuntimeException('Missing generated laravel-boost MCP command');
     }

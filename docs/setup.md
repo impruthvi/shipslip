@@ -111,6 +111,8 @@ Databases are `sqlite`, `mysql`, `mariadb`, `pgsql`, and `sqlsrv`; testing is
 Laravel Boost is recommended and its setup prompt defaults to Yes (Enter).
 Answer No to skip it. Pass `--boost` or `--no-boost` to set that choice without
 being prompted, and `--branch NAME` for another initial branch.
+Boost configures detected AI clients. Run `php artisan boost:install` in the
+new app to choose or add a client after creation.
 WorkOS, community kits, teams, and VPS provisioning are outside this flow.
 
 Use `slip new .` for an existing empty directory. Hidden files count as

@@ -53,7 +53,7 @@ done
 cat >> "$report" <<'TEXT'
 The nine baseline calls use `--no-boost`; two additional plain/React calls use `--boost`. All eleven calls use `-n`, stdin `/dev/null`, SQLite, explicit `--pest`, and `--npm`. No call passes `--git` or `--github`. GitHub token variables are removed for every child process.
 
-Scaffold checks: no `.git`; Artisan, Composer lock/autoloader, npm lock/build script, nonempty Vite manifest and its assets; expected kit packages and auth dependencies; Pest installed; `php artisan about` and `php artisan test`. Each scaffold is then moved to a different directory (including spaces) and must pass `php artisan about`, `npm run build`, and manifest/asset validation again. Boost cases must lock `laravel/boost` and run their generated MCP command from the relocated project, completing initialization and listing tools.
+Scaffold checks: no `.git`; Artisan, Composer lock/autoloader, npm lock/build script, nonempty Vite manifest and its assets; expected kit packages and auth dependencies; Pest installed; `php artisan about` and `php artisan test`. Each scaffold is then moved to a different directory (including spaces) and must pass `php artisan about`, `npm run build`, and manifest/asset validation again. Boost cases must lock `laravel/boost` and initialize MCP/list tools from the relocated project, using a generated client command when configured or the installed server directly when Boost selected no client.
 
 | Kit | Auth | Boost | Framework | Result | Failed stage |
 | --- | --- | --- | --- | --- | --- |
