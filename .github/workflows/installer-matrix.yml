@@ -1,0 +1,68 @@
+name: Laravel installer compatibility
+
+on:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installer-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  installer-matrix:
+    name: installer matrix (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install PHP and Composer
+        uses: shivammathur/setup-php@b604ade2a87db23f8871b7182e69ec5e75effb45 # v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, xml, curl, zip, sqlite3, pdo_sqlite
+          tools: composer:v2
+          coverage: none
+      - name: Install Node.js and npm
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install current Laravel installer
+        shell: bash
+        run: |
+          composer global require laravel/installer --no-interaction --prefer-dist
+          composer global config bin-dir --absolute >> "$GITHUB_PATH"
+      - name: Run matrix script regressions
+        shell: bash
+        run: bash scripts/installer-matrix-test.sh
+      - name: Run eleven installer combinations (including Boost)
+        shell: bash
+        run: bash scripts/installer-matrix.sh .context/installer-compat.md
+      - name: Show compatibility report
+        if: always()
+        shell: bash
+        run: |
+          if [ -f .context/installer-compat.md ]; then
+            cat .context/installer-compat.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Preserve report and installer logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: installer-matrix-${{ matrix.os }}
+          path: |
+            .context/installer-compat.md
+            .context/installer-matrix-logs.*/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14

@@ -6,6 +6,65 @@ change the library API.
 
 ## [Unreleased]
 
+### Added
+
+- `slip new <name|.>` creates a Laravel app with plain Laravel, React, Vue,
+  Svelte, or Livewire; Laravel or no authentication; database and testing
+  choices; an initial branch; and optional Laravel Boost. The command previews
+  installed tools and the exact installer call, verifies tests and built
+  assets in staging, moves without overwriting, and offers a reviewed initial
+  Git commit. Creation requires Laravel installer 5.31.1 or newer.
+- Per-destination local operation locks, private operation journals, retained
+  staging on failure, and cancellation of the installer's process group.
+  GitHub token environment variables are removed from installation processes.
+- `slip publish github` previews the authenticated account and publication
+  intent, scans the pushed history for sensitive filenames, creates a private
+  repository by default, pushes without force, and verifies the remote SHA.
+  Saved intent supports interrupted publication recovery without duplicate
+  repository creation or overwriting an existing origin.
+- Optional publishing and `slip init` continuation after project creation,
+  with a separate reviewed commit and push for a newly written deploy config.
+- A real eleven-case Laravel installer compatibility matrix, retaining nine
+  starter-kit/auth combinations and adding plain/React Boost checks, exercised
+  weekly and manually on macOS and Linux independently of pull-request checks.
+
+### Fixed
+
+- Linux release binaries now link correctly while preserving no-overwrite
+  project moves.
+- Publication checks the remote repository's actual visibility during review
+  and before pushing, including resumed and completed operations. A mismatch
+  stops instead of uploading under a stale private/public label.
+- Publication preserves repository paths containing whitespace or native path
+  bytes, verifies the exact reviewed branch ref, and applies HTTPS redirect,
+  header, and TLS guards to the exact reviewed repository URL.
+- Publication uses the active GitHub account and previews the existing origin's
+  transport, even when the GitHub CLI's preferred protocol has changed.
+- Ending setup input now reports retained project/commit/publication state
+  accurately, and noninteractive missing-Boost guidance names `--boost` and
+  `--no-boost`.
+- Installer child commands use the reviewed tool executables when multiple
+  versions are installed. Setup refuses a stale frontend recipe if its manifest
+  or lockfiles change during the wizard.
+- The installer matrix reports every case and a final tally even when a failed
+  installer leaves malformed `composer.lock` JSON. Boost cases verify the locked
+  package and generated MCP command after moving the scaffold.
+
+### Changed
+
+- Project creation prints clean progress messages instead of raw terminal codes
+  and repeated installer spinner frames, while retaining warnings and errors.
+
+- Project creation recommends Laravel Boost with a default-Yes setup prompt.
+  `--boost` and `--no-boost` select it explicitly without prompting.
+
+- Newly generated deploy configs include `npm ci` and `npm run build` when
+  the project has `package-lock.json` and an npm build script. Other lockfiles
+  produce a warning; existing configs and non-frontend recipes are unchanged.
+- Setup documentation covers local creation and optional GitHub publishing.
+  Deployment still requires an existing server checkout; server bootstrap and
+  VPS provisioning remain outside this release.
+
 ## [0.2.2] - 2026-10-03
 
 ### Added

@@ -33,6 +33,11 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 mod github_token;
 use github_token::{LocalTokens, TokenSource};
 
+#[path = "slip/new.rs"]
+mod new;
+#[path = "slip/publish.rs"]
+mod publish;
+
 fn main() -> ExitCode {
     // Capture and remove ambient token variables before starting any threads.
     let enabled = std::env::args()
@@ -78,6 +83,8 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
             .into());
         }
         Action::Init => return init_command(&std::env::current_dir()?),
+        Action::New(args) => return new::run(args).await,
+        Action::Publish(args) => return publish::run(args).await,
         action => action,
     };
     let config = LoadedConfig::load(&std::env::current_dir()?, command.config.as_deref())?;
@@ -94,7 +101,9 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
     let trust_path = default_trust_path()?;
     let receipts_root = default_receipts_root()?;
     let (environment, plan, token_source) = match action {
-        Action::Init => unreachable!("init runs before the config is loaded"),
+        Action::Init | Action::New(_) | Action::Publish(_) => {
+            unreachable!("local setup runs before the config is loaded")
+        }
         Action::Trust { environment } => {
             return trust_command(&config, &trust_path, environment.as_deref());
         }
@@ -288,6 +297,13 @@ async fn ask(
     read: impl FnOnce() -> io::Result<String> + Send + 'static,
     interrupts: &mut Interrupts,
 ) -> io::Result<Option<String>> {
+    ask_typed(read, interrupts).await
+}
+
+async fn ask_typed<T: Send + 'static>(
+    read: impl FnOnce() -> io::Result<T> + Send + 'static,
+    interrupts: &mut Interrupts,
+) -> io::Result<Option<T>> {
     let answer = tokio::task::spawn_blocking(read);
     tokio::select! {
         answer = answer => answer.map_err(io::Error::other)?.map(Some),
@@ -638,6 +654,34 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
             action: Action::Init,
         }));
     }
+    if action == "new" {
+        if config.is_some() {
+            return Err(invalid_input(
+                "new does not use a deploy config; omit --config and unset SHIPSLIP_CONFIG",
+            )
+            .into());
+        }
+        return Ok(Some(Command {
+            config: None,
+            action: Action::New(new::Args::parse(&args[index..])?),
+        }));
+    }
+    if action == "publish" {
+        if config.is_some() {
+            return Err(invalid_input(
+                "publish does not use a deploy config; omit --config and unset SHIPSLIP_CONFIG",
+            )
+            .into());
+        }
+        if args.get(index).map(String::as_str) != Some("github") {
+            return Err(invalid_input("usage: slip publish github [--owner OWNER] [--repo NAME] [--visibility private|public]").into());
+        }
+        index += 1;
+        return Ok(Some(Command {
+            config: None,
+            action: Action::Publish(publish::Args::parse(&args[index..])?),
+        }));
+    }
     if action == "trust" {
         let environment = args.get(index).cloned();
         if index + usize::from(environment.is_some()) != args.len() {
@@ -896,6 +940,8 @@ fn print_help() {
          Usage:\n\
          \x20 slip [--config FILE] <deploy|rerun|from-step> <ENV> [STEP]\n\
          \x20 slip init\n\
+         \x20 slip new <name|.> [OPTIONS]\n\
+         \x20 slip publish github [--owner OWNER] [--repo NAME] [--visibility private|public]\n\
          \x20 slip [--config FILE] trust [ENV]\n\
          \x20 slip [--config FILE] attach ENV\n\
          \x20 slip [--config FILE] break-lock ENV\n\
@@ -907,11 +953,18 @@ fn print_help() {
          \x20 rerun ENV          Run all recipe steps on the already-deployed commit\n\
          \x20 from-step ENV STEP Run recipe steps starting at STEP (steps start at 1)\n\
          \x20 init               Create .shipslip.toml by answering a few questions\n\
+         \x20 new <name|.>       Create, verify and commit a new Laravel project\n\
+         \x20 publish github     Publish reviewed Git history to GitHub (default private)\n\
          \x20 trust [ENV]        Review and approve config changes\n\
          \x20 attach ENV         Resume an unfinished run without relaunching its active step\n\
          \x20 break-lock ENV     Clear a stale deploy lock after checking the old run\n\
          \x20 up ENV             Run `php artisan up` under a new deploy lock\n\
          \x20 logs ENV           Group recent log errors; read-only\n\n\
+         New project options:\n\
+         \x20 --starter-kit none|react|vue|svelte|livewire\n\
+         \x20 --auth laravel|none  --database sqlite|mysql|mariadb|pgsql|sqlsrv\n\
+         \x20 --testing pest|phpunit  --branch BRANCH (default main)  --boost|--no-boost\n\
+         \x20 Missing choices are prompted; creation needs interactive confirmation.\n\n\
          Deploy authentication (deploy, rerun, from-step):\n\
          \x20 --github-token                  Enter a GitHub token with hidden input\n\
          \x20 --github-token-source SOURCE    Explicitly select prompt, env, or gh\n\
@@ -982,6 +1035,9 @@ fn show_preview(preview: &shipslip::Preview) {
 
 fn init_command(start: &Path) -> Result<ExitCode, Box<dyn Error>> {
     let plan = InitPlan::new(start)?;
+    for warning in plan.warnings() {
+        eprintln!("Warning: {}", logs::escape(warning));
+    }
     if !io::stdin().is_terminal() {
         return Err(invalid_input("init asks questions; run it in an interactive terminal").into());
     }
@@ -1130,7 +1186,7 @@ fn read_init_line(input: &mut impl BufRead, output: &mut impl Write) -> io::Resu
     if input.read_line(&mut line)? == 0 {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
-            "input ended before init finished; nothing was written",
+            "input ended before the question was answered",
         ));
     }
     Ok(line.trim().to_string())
@@ -1628,6 +1684,8 @@ struct Command {
 
 enum Action {
     Init,
+    New(new::Args),
+    Publish(publish::Args),
     Run {
         environment: String,
         plan: RunPlan,
@@ -1650,6 +1708,10 @@ enum Action {
         options: LogsOptions,
     },
 }
+
+#[cfg(test)]
+#[path = "slip/local_tests.rs"]
+mod local_tests;
 
 #[cfg(test)]
 mod tests {
