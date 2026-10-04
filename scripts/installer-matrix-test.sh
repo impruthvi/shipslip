@@ -115,6 +115,12 @@ php "$repo_root/scripts/installer-matrix-mcp.php" "$work/relocated mcp fixture" 
 grep -F 'No AI client selected' "$work/mcp-no-client.out" > /dev/null
 grep -F 'initialized and listed 1 tools' "$work/mcp-no-client.out" > /dev/null
 cat > "$work/relocated mcp fixture/boost.json" <<'CONFIG'
+{"mcp":true}
+CONFIG
+php "$repo_root/scripts/installer-matrix-mcp.php" "$work/relocated mcp fixture" > "$work/mcp-omitted-clients.out"
+grep -F 'No AI client selected' "$work/mcp-omitted-clients.out" > /dev/null
+grep -F 'initialized and listed 1 tools' "$work/mcp-omitted-clients.out" > /dev/null
+cat > "$work/relocated mcp fixture/boost.json" <<'CONFIG'
 {"agents":["claude_code"],"mcp":true}
 CONFIG
 if php "$repo_root/scripts/installer-matrix-mcp.php" "$work/relocated mcp fixture" > "$work/mcp-missing.out" 2>&1; then

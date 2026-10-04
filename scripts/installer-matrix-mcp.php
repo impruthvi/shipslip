@@ -30,7 +30,9 @@ try {
         $boost = is_file($boostFile)
             ? json_decode(file_get_contents($boostFile), true, 512, JSON_THROW_ON_ERROR)
             : null;
-        if (!is_array($boost) || ($boost['agents'] ?? null) !== [] || ($boost['mcp'] ?? null) !== true) {
+        // Boost's writer removes empty lists; its getAgents() defaults to [].
+        $agents = is_array($boost) && array_key_exists('agents', $boost) ? $boost['agents'] : [];
+        if (!is_array($boost) || $agents !== [] || ($boost['mcp'] ?? null) !== true) {
             throw new RuntimeException('Missing generated Laravel Boost MCP configuration for selected clients');
         }
         echo 'No AI client selected; verifying the installed Boost MCP server directly'.PHP_EOL;
