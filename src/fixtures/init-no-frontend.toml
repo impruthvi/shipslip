@@ -1,0 +1,28 @@
+# Shipslip deploy config. Review every value, then run `slip trust staging`.
+
+[project]
+name = "example"
+stack = "laravel"
+
+[env.staging]
+# Host alias from your ~/.ssh/config.
+ssh = "app-staging"
+# Absolute path of the app's Git checkout on the server.
+path = "/var/www/app"
+branch = "main"
+# Production deploys ask you to type the environment name to confirm.
+production = false
+# Runs `php artisan down` before the steps and `php artisan up` once they all succeed.
+maintenance = true
+# Requested from your computer after the steps; 2xx passes.
+smoke_url = "https://staging.example.com/health"
+
+[recipe.deploy]
+# Run in order on the server. Remove any step that is not safe for this app.
+steps = [
+  "composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader",
+  # Runs database migrations on every deploy.
+  "php artisan migrate --force",
+  "php artisan optimize",
+  "php artisan queue:restart",
+]

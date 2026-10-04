@@ -1,8 +1,9 @@
 # Set up Shipslip for a Laravel project
 
-This guide is for a teammate making a first staging deploy. Shipslip runs on
-your macOS or Linux computer and connects to a Linux server over SSH. Start
-with staging; configure production separately after the staging flow works.
+This guide covers creating a local Laravel app, optionally publishing it, and
+making a first staging deploy. Shipslip runs on your macOS or Linux computer
+and connects to a Linux server over SSH. Start with staging; configure
+production separately after the staging flow works.
 
 ## 1. Get access and install Shipslip
 
@@ -45,6 +46,149 @@ unreleased changes, install from the
 [source repository](https://github.com/impruthvi/shipslip):
 `cargo install --git https://github.com/impruthvi/shipslip.git --branch main --locked --bin slip`.
 
+### Local project creation prerequisites
+
+Creation and publishing are currently unreleased source features; the
+published 0.2.2 binary does not include these commands. Build with
+`cargo build --locked --bin slip` from the Shipslip source checkout and use
+that `target/debug/slip` binary from a non-Git parent directory. The README
+has a [complete local example](../README.md#try-project-creation-from-this-checkout).
+
+Skip this section when you already have a Laravel checkout. `slip new` needs
+these installed tools on your local `PATH`:
+
+- PHP and the extensions required by the Laravel version being installed.
+  The compatibility matrix was verified with PHP 8.4.
+- Composer.
+- Laravel installer 5.31.1 or newer. Shipslip also probes the installer's help
+  output for the required non-interactive flags.
+- Node.js and npm, including for plain Laravel's Vite asset build. Other
+  package managers are not supported.
+- Git, with an author name and email configured for the initial commit.
+
+Install or update the Laravel installer with Composer:
+
+```sh
+composer global require laravel/installer
+composer global config bin-dir --absolute
+laravel --version
+```
+
+Add the bin directory printed by Composer to your shell's `PATH` if `laravel`
+cannot be found. Check the remaining tools with `php --version`,
+`composer --version`, `node --version`, `npm --version`, and `git --version`.
+The creation preview shows the selected tool versions; the installer and its
+child commands use those selected executables. Check your Git author with
+`git config user.name` and `git config user.email`;
+if absent, configure your own values before creating a project:
+
+```sh
+git config --global user.name "Your Name"
+git config --global user.email "you@example.com"
+```
+
+### Create and run an app locally
+
+From a normal directory outside any Git checkout:
+
+```sh
+slip new my-app --starter-kit react
+cd my-app
+php artisan serve
+```
+
+Open the URL printed by Artisan. Choose any missing options at the Shipslip
+prompts and review the destination, tool versions, and installer command.
+Shipslip invokes the Laravel installer without interactive prompts, runs the
+app's tests, verifies built assets, then shows the files before the initial
+Git commit. Installation and verification happen in a staging directory before
+the app is moved into place without replacing files.
+
+Available starter kits are `none`, `react`, `vue`, `svelte`, and `livewire`.
+Authentication is `laravel` or `none`; kit `none` requires auth `none`.
+Databases are `sqlite`, `mysql`, `mariadb`, `pgsql`, and `sqlsrv`; testing is
+`pest` or `phpunit`. Defaults are SQLite, Pest, and branch `main`.
+Laravel Boost is recommended and its setup prompt defaults to Yes (Enter).
+Answer No to skip it. Pass `--boost` or `--no-boost` to set that choice without
+being prompted, and `--branch NAME` for another initial branch.
+WorkOS, community kits, teams, and VPS provisioning are outside this flow.
+
+Use `slip new .` for an existing empty directory. Hidden files count as
+contents, symlink destinations are refused, and either mode refuses a target
+inside another Git repository. There is no force or overwrite option. Missing
+choices in a non-interactive shell fail immediately with the flag to supply.
+Creation and publishing still require an interactive terminal even when all
+flags are supplied: there is no unattended confirmation flag.
+
+The staging container is `<parent>/.slip-new-<operation-id>/`; its private
+ownership marker sits beside a `project/` child containing the actual Laravel
+scaffold. A failed installer or verification, or cancellation during those
+stages, marks the journal `scaffold_failed`, reports the container path, and
+offers to delete only that operation's staging container. The private operation
+record remains. A move conflict retains staging for inspection without offering
+automatic cleanup; no conflicting destination entry is replaced.
+
+The CLI prints the operation record path. Records live under
+`~/Library/Application Support/Shipslip/operations/` on macOS or
+`~/.local/share/shipslip/operations/` on Linux and record phases, paths, and
+choices without tokens or `.env` contents. An initial Git failure can leave
+the verified app locally; read the reported fix before completing Git setup.
+Declining the initial commit also leaves the verified app and staged files
+local, and skips the immediate publishing offer.
+
+### Optional: publish to GitHub
+
+Publishing needs the GitHub CLI on your computer and an authenticated account
+with permission to create a repository under the selected owner. It is not
+required for local creation or existing deployment flows:
+
+```sh
+gh --version
+gh auth login
+slip publish github --repo my-app
+```
+
+Shipslip shows the actual authenticated account, requested owner/name,
+visibility, HEAD, and commit count. Review and separately confirm publication.
+Visibility defaults to `private`; use `--visibility public` explicitly to make
+a public repository and `--owner OWNER` for a different owner. `slip new` also
+offers this flow after local creation, and declining leaves the app local.
+Publishing also requires an interactive terminal to review and confirm the
+account and intent, including when all publishing flags are supplied.
+
+Before pushing, Shipslip scans every path in the pushed history for `.env*`
+(except `.env.example`), `auth.json`, `*.pem`, `*.key`, and `id_rsa*`. A secret
+filename in an older commit still blocks even if it has since been deleted;
+the error identifies its path and commit. Remove the sensitive file from the
+history you intend to publish before trying again. This filename check does
+not replace reviewing your code for credentials.
+
+An existing `origin` must identify the selected repository; Shipslip will not
+replace it, and the preview shows its actual SSH or HTTPS transport. The
+active GitHub account is used without switching accounts. Before resuming or
+pushing, Shipslip checks the remote repository's current visibility against
+your reviewed choice; a mismatch stops publication. Publication never force-pushes or deletes a remote repository,
+and verifies the remote branch SHA against local HEAD. If interrupted, run
+`slip publish github` again: a saved operation can retry its push, or adopt
+its own marked, still-empty repository after an uncertain create response.
+An existing repository with a different marker or unexpected refs is unresolved
+and requires a new name. Shipslip does not switch GitHub accounts for you.
+
+Installer, Composer, and npm processes do not receive `GH_TOKEN`,
+`GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, or
+`SHIPSLIP_GITHUB_TOKEN`. GitHub publishing uses your local
+GitHub CLI authentication; it does not send publishing credentials to a server
+or change global Git credential settings.
+
+### Prepare the server checkout before deployment
+
+The remaining steps require an existing Laravel Git checkout on the Linux
+server at the configured path. Clone and configure that app separately with
+your normal server procedure, including PHP, Composer, the database, `.env`,
+permissions, and web server. For a frontend build recipe the server also needs
+Node.js and npm. Shipslip currently neither bootstraps an empty server path
+nor provisions a VPS. Publishing a GitHub repository does not deploy it.
+
 ## 2. Configure SSH
 
 Add an alias to `~/.ssh/config`, using the staging server's real host, user,
@@ -85,6 +229,23 @@ slip init
 It asks a few questions and writes `.shipslip.toml` at the Git root, with the
 default Laravel recipe written out so you can edit it. Review the file before
 the first deploy: the recipe includes `php artisan migrate --force`.
+
+When the local project has `package-lock.json` and a `build` script in
+`package.json`, the generated recipe adds `npm ci` and `npm run build` after
+Composer and before `php artisan optimize`. Other package-manager lockfiles
+produce a warning without an automatic build step. This affects only newly
+written configs; `slip init` still refuses to replace an existing config and
+requires a Git checkout. If `package.json` or a package-manager lockfile changes
+while the wizard is open, no config is written; run `slip init` again to review
+the current recipe.
+
+The creation flow can hand off to this wizard after local verification and
+optional publishing. When you publish and then configure in the same
+`slip new` flow, Shipslip shows the new config diff and offers a separate
+config-only commit, then previews the resulting publication and asks again
+before pushing. Declining leaves the config local-only. Other changes are not
+committed. Running `slip init` separately writes local config only; review and
+commit it yourself before publishing the new commit.
 
 To write the file by hand instead, create `.shipslip.toml` in the **Laravel
 project's Git root**. Replace every example value below. Use the exact deploy

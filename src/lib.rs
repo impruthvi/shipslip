@@ -11,15 +11,19 @@
 //!    built from that exact preview.
 
 pub mod config;
+pub mod create;
 mod engine;
 mod event;
+pub mod git;
 pub mod github_auth;
+pub mod laravel;
 mod lock;
 pub mod logs;
 mod marker;
 pub mod observation;
 mod preflight;
 mod private_file;
+pub mod publish;
 pub mod receipt;
 mod runner;
 mod script;

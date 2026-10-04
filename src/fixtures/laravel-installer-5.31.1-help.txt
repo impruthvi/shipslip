@@ -1,0 +1,42 @@
+Description:
+  Create a new Laravel application
+
+Usage:
+  new [options] [--] <name>
+
+Arguments:
+  name
+
+Options:
+      --dev                        Install the latest "development" release
+      --git                        Initialize a Git repository
+      --branch=BRANCH              The branch that should be created for a new repository [default: "main"]
+      --github[=GITHUB]            Create a new repository on GitHub [default: false]
+      --organization=ORGANIZATION  The GitHub organization to create the new repository for
+      --database=DATABASE          The database driver your application will use. Possible values are: mysql, mariadb, pgsql, sqlite, sqlsrv
+      --react                      Install the React Starter Kit
+      --svelte                     Install the Svelte Starter Kit
+      --vue                        Install the Vue Starter Kit
+      --livewire                   Install the Livewire Starter Kit
+      --livewire-class-components  Generate stand-alone Livewire class components
+      --workos                     Use WorkOS for authentication
+      --teams                      Install team support
+      --no-authentication          Do not generate authentication scaffolding
+      --pest                       Install the Pest testing framework
+      --phpunit                    Install the PHPUnit testing framework
+      --npm                        Install and build NPM dependencies
+      --pnpm                       Install and build NPM dependencies via PNPM
+      --bun                        Install and build NPM dependencies via Bun
+      --yarn                       Install and build NPM dependencies via Yarn
+      --no-node                    Skip installing and building NPM dependencies
+      --boost                      Install Laravel Boost to improve AI assisted coding
+      --no-boost                   Skip Laravel Boost installation
+      --using[=USING]              Install a custom starter kit from a community maintained package
+  -f, --force                      Forces install even if the directory already exists
+  -h, --help                       Display help for the given command. When no command is given display help for the list command
+      --silent                     Do not output any message
+  -q, --quiet                      Only errors are displayed. All other output is suppressed
+  -V, --version                    Display this application version
+      --ansi|--no-ansi             Force (or disable --no-ansi) ANSI output
+  -n, --no-interaction             Do not ask any interactive question
+  -v|vv|vvv, --verbose             Increase the verbosity of messages: 1 for normal output, 2 for more verbose output and 3 for debug

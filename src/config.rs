@@ -55,6 +55,8 @@ pub enum ConfigError {
     TrustVersion(u32),
     #[error("`{0}` already exists; edit it instead of running init")]
     AlreadyExists(PathBuf),
+    #[error("package.json or frontend lockfiles changed during config review; run slip init again to review the current frontend setup")]
+    InitInputsChanged,
 }
 
 #[derive(Debug, Deserialize)]
@@ -461,6 +463,9 @@ pub struct InitPlan {
     path: PathBuf,
     repo_root: PathBuf,
     project_name: String,
+    frontend_build: bool,
+    warnings: Vec<String>,
+    frontend_inputs: String,
 }
 
 impl InitPlan {
@@ -478,10 +483,18 @@ impl InitPlan {
             .map(|name| name.to_string_lossy().into_owned())
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| "app".into());
+        let frontend_inputs = frontend_input_hash(&repo_root);
+        let (frontend_build, warnings) = frontend_recipe(&repo_root);
+        if frontend_input_hash(&repo_root) != frontend_inputs {
+            return Err(ConfigError::InitInputsChanged);
+        }
         Ok(Self {
             path: repo_root.join(".shipslip.toml"),
             repo_root,
             project_name,
+            frontend_build,
+            warnings,
+            frontend_inputs,
         })
     }
 
@@ -489,8 +502,14 @@ impl InitPlan {
         &self.path
     }
 
+    /// Frontend setup that needs review before writing a deploy recipe.
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+
     /// The config text, checked with the same rules as [`LoadedConfig::load`].
     pub fn render(&self, answers: &InitAnswers) -> Result<String, ConfigError> {
+        self.check_frontend_inputs()?;
         if !is_env_name(&answers.env) {
             return Err(ConfigError::Invalid(format!(
                 "environment name `{}` may only use letters, digits, `-` and `_`",
@@ -534,6 +553,11 @@ impl InitPlan {
                 text.push_str("  # Runs database migrations on every deploy.\n");
             }
             text.push_str(&format!("  {},\n", quote(step)));
+            if self.frontend_build && step.starts_with("composer install ") {
+                for npm_step in ["npm ci", "npm run build"] {
+                    text.push_str(&format!("  {},\n", quote(npm_step)));
+                }
+            }
         }
         text.push_str("]\n");
         LoadedConfig::parse(&text, self.path.clone(), self.repo_root.clone())?;
@@ -543,6 +567,7 @@ impl InitPlan {
     /// Writes the config. Never replaces an existing file.
     pub fn write(&self, answers: &InitAnswers) -> Result<(), ConfigError> {
         let text = self.render(answers)?;
+        self.check_frontend_inputs()?;
         let io_error = |source| ConfigError::Io {
             path: self.path.clone(),
             source,
@@ -560,6 +585,88 @@ impl InitPlan {
             io_error(error)
         })
     }
+
+    fn check_frontend_inputs(&self) -> Result<(), ConfigError> {
+        if frontend_input_hash(&self.repo_root) != self.frontend_inputs {
+            return Err(ConfigError::InitInputsChanged);
+        }
+        Ok(())
+    }
+}
+
+fn frontend_input_hash(repo_root: &Path) -> String {
+    let mut hash = Sha256::new();
+    for name in [
+        "package.json",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "bun.lock",
+        "bun.lockb",
+    ] {
+        hash.update(name.as_bytes());
+        match fs::read(repo_root.join(name)) {
+            Ok(bytes) => {
+                hash.update([1]);
+                hash.update((bytes.len() as u64).to_le_bytes());
+                hash.update(bytes);
+            }
+            Err(error) => {
+                hash.update([0]);
+                hash.update(format!("{:?}", error.kind()).as_bytes());
+            }
+        }
+    }
+    hash.finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn frontend_recipe(repo_root: &Path) -> (bool, Vec<String>) {
+    let unsupported: Vec<_> = ["yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"]
+        .into_iter()
+        .filter(|lock| repo_root.join(lock).exists())
+        .collect();
+    if !unsupported.is_empty() {
+        return (
+            false,
+            vec![format!(
+                "Found {}; automatic frontend deploy steps support only package-lock.json. Add the appropriate install and build steps to .shipslip.toml.",
+                unsupported.join(", ")
+            )],
+        );
+    }
+    if !repo_root.join("package-lock.json").is_file() {
+        return (false, Vec::new());
+    }
+    let package = match fs::read(repo_root.join("package.json")) {
+        Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+            Ok(package) => package,
+            Err(error) => {
+                return (
+                    false,
+                    vec![format!(
+                        "Could not parse package.json: {error}. No frontend deploy steps were added."
+                    )],
+                );
+            }
+        },
+        Err(error) => {
+            return (
+                false,
+                vec![format!(
+                    "Could not read package.json: {error}. No frontend deploy steps were added."
+                )],
+            );
+        }
+    };
+    let has_build = package
+        .get("scripts")
+        .and_then(|scripts| scripts.get("build"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|script| !script.trim().is_empty());
+    (has_build, Vec::new())
 }
 
 /// Syntax added in bash 4 that bash 3.2, the stock macOS bash, rejects.
@@ -853,6 +960,201 @@ mod tests {
             maintenance: true,
             smoke_url: Some("https://staging.example.com/health".into()),
         }
+    }
+
+    const INIT_NO_FRONTEND: &str = include_str!("fixtures/init-no-frontend.toml");
+
+    fn example_plan(fixture: &Fixture) -> InitPlan {
+        let mut plan = InitPlan::new(&fixture.root).unwrap();
+        plan.project_name = "example".into();
+        plan
+    }
+
+    #[test]
+    fn init_without_npm_lock_preserves_the_full_render() {
+        let fixture = Fixture::new();
+        assert_eq!(
+            example_plan(&fixture).render(&answers()).unwrap(),
+            INIT_NO_FRONTEND
+        );
+        fs::write(
+            fixture.root.join("package.json"),
+            r#"{"scripts":{"build":"vite build"}}"#,
+        )
+        .unwrap();
+        let plan = example_plan(&fixture);
+        assert_eq!(plan.render(&answers()).unwrap(), INIT_NO_FRONTEND);
+        assert!(plan.warnings().is_empty());
+    }
+
+    #[test]
+    fn init_frontend_adds_only_two_npm_steps_after_composer() {
+        let fixture = Fixture::new();
+        fs::write(fixture.root.join("package-lock.json"), "{}").unwrap();
+        fs::write(
+            fixture.root.join("package.json"),
+            r#"{"scripts":{"build":"vite build"}}"#,
+        )
+        .unwrap();
+        let plan = example_plan(&fixture);
+        let text = plan.render(&answers()).unwrap();
+        let npm_steps = "  \"npm ci\",\n  \"npm run build\",\n";
+        assert_eq!(text.matches(npm_steps).count(), 1);
+        assert_eq!(text.replace(npm_steps, ""), INIT_NO_FRONTEND);
+        let target = LoadedConfig::parse(&text, plan.path.clone(), plan.repo_root.clone())
+            .unwrap()
+            .target("staging")
+            .unwrap();
+        assert_eq!(
+            target.steps,
+            [
+                DEFAULT_STEPS[0],
+                "npm ci",
+                "npm run build",
+                DEFAULT_STEPS[1],
+                DEFAULT_STEPS[2],
+                DEFAULT_STEPS[3],
+            ]
+        );
+        assert!(plan.warnings().is_empty());
+    }
+
+    #[test]
+    fn init_unsupported_frontend_locks_warn_without_adding_steps() {
+        for lock in ["yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb"] {
+            for npm_lock in [false, true] {
+                let fixture = Fixture::new();
+                fs::write(fixture.root.join(lock), "{}").unwrap();
+                fs::write(
+                    fixture.root.join("package.json"),
+                    r#"{"scripts":{"build":"vite build"}}"#,
+                )
+                .unwrap();
+                if npm_lock {
+                    fs::write(fixture.root.join("package-lock.json"), "{}").unwrap();
+                }
+                let plan = example_plan(&fixture);
+                assert_eq!(plan.render(&answers()).unwrap(), INIT_NO_FRONTEND);
+                assert_eq!(plan.warnings().len(), 1);
+                assert!(plan.warnings()[0].contains(lock));
+            }
+        }
+    }
+
+    #[test]
+    fn init_npm_lock_without_a_build_script_adds_no_steps() {
+        for package in [
+            r#"{}"#,
+            r#"{"scripts":{"build":" "}}"#,
+            r#"{"scripts":{"build":true}}"#,
+        ] {
+            let fixture = Fixture::new();
+            fs::write(fixture.root.join("package-lock.json"), "{}").unwrap();
+            fs::write(fixture.root.join("package.json"), package).unwrap();
+            assert_eq!(
+                example_plan(&fixture).render(&answers()).unwrap(),
+                INIT_NO_FRONTEND
+            );
+        }
+    }
+
+    #[test]
+    fn init_invalid_package_manifest_warns_without_adding_steps() {
+        let fixture = Fixture::new();
+        fs::write(fixture.root.join("package-lock.json"), "{}").unwrap();
+        fs::write(fixture.root.join("package.json"), "invalid json").unwrap();
+        let plan = example_plan(&fixture);
+        assert_eq!(plan.render(&answers()).unwrap(), INIT_NO_FRONTEND);
+        assert!(plan.warnings()[0].contains("Could not parse package.json"));
+    }
+
+    #[test]
+    fn init_refuses_changed_frontend_inputs_before_writing() {
+        for change in [
+            "add npm",
+            "remove npm lock",
+            "remove build",
+            "change build",
+            "change npm lock",
+            "switch to pnpm",
+            "add yarn",
+            "add bun",
+        ] {
+            let fixture = Fixture::new();
+            let package = fixture.root.join("package.json");
+            let npm_lock = fixture.root.join("package-lock.json");
+            if change != "add npm" {
+                fs::write(&package, r#"{"scripts":{"build":"vite build"}}"#).unwrap();
+                fs::write(&npm_lock, "{}").unwrap();
+            }
+            let plan = example_plan(&fixture);
+            let _reviewed = plan.render(&answers()).unwrap();
+            match change {
+                "add npm" => {
+                    fs::write(&package, r#"{"scripts":{"build":"vite build"}}"#).unwrap();
+                    fs::write(&npm_lock, "{}").unwrap();
+                }
+                "remove npm lock" => fs::remove_file(&npm_lock).unwrap(),
+                "remove build" => fs::write(&package, "{}").unwrap(),
+                "change build" => {
+                    fs::write(&package, r#"{"scripts":{"build":"vite build --ssr"}}"#).unwrap();
+                }
+                "change npm lock" => fs::write(&npm_lock, r#"{"lockfileVersion":3}"#).unwrap(),
+                "switch to pnpm" => {
+                    fs::remove_file(&npm_lock).unwrap();
+                    fs::write(fixture.root.join("pnpm-lock.yaml"), "lockfileVersion: 9").unwrap();
+                }
+                "add yarn" => fs::write(fixture.root.join("yarn.lock"), "yarn lock").unwrap(),
+                "add bun" => fs::write(fixture.root.join("bun.lockb"), b"bun lock").unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(plan.render(&answers()), Err(ConfigError::InitInputsChanged)),
+                "{change}"
+            );
+            assert!(
+                matches!(plan.write(&answers()), Err(ConfigError::InitInputsChanged)),
+                "{change}"
+            );
+            assert!(!plan.path().exists(), "{change} created a stale config");
+            let refreshed = example_plan(&fixture);
+            let text = refreshed.render(&answers()).unwrap();
+            let has_npm = matches!(change, "add npm" | "change build" | "change npm lock");
+            assert_eq!(text.contains("\"npm ci\""), has_npm, "{change}");
+            if !has_npm {
+                assert_eq!(text, INIT_NO_FRONTEND, "{change}");
+            }
+        }
+    }
+
+    #[test]
+    fn init_frontend_snapshot_allows_identical_inputs_rewritten() {
+        let fixture = Fixture::new();
+        let package = fixture.root.join("package.json");
+        let contents = r#"{"scripts":{"build":"vite build"}}"#;
+        fs::write(&package, contents).unwrap();
+        fs::write(fixture.root.join("package-lock.json"), "{}").unwrap();
+        let plan = example_plan(&fixture);
+        fs::write(&package, contents).unwrap();
+        plan.write(&answers()).unwrap();
+        assert!(fixture
+            .load()
+            .unwrap()
+            .target("staging")
+            .unwrap()
+            .steps
+            .iter()
+            .any(|step| step == "npm ci"));
+    }
+
+    #[test]
+    fn init_still_requires_a_git_root() {
+        let fixture = Fixture::new();
+        fs::remove_dir(fixture.root.join(".git")).unwrap();
+        assert!(matches!(
+            InitPlan::new(&fixture.root),
+            Err(ConfigError::NoGitRoot(_))
+        ));
     }
 
     #[test]
