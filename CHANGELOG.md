@@ -30,6 +30,8 @@ change the library API.
 
 ### Fixed
 
+- Git branch validation preserves executable launch errors instead of reporting
+  them as invalid branch names.
 - Linux release binaries now link correctly while preserving no-overwrite
   project moves.
 - Publication checks the remote repository's actual visibility during review

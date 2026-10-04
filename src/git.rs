@@ -252,14 +252,14 @@ impl Git {
         }
     }
     pub fn validate_branch(&self, root: &Path, branch: &str) -> Result<(), GitError> {
-        if branch.starts_with('-')
-            || self
-                .run(root, &["check-ref-format", "--branch", branch])
-                .is_err()
-        {
+        if branch.starts_with('-') {
             return Err(GitError::InvalidBranch);
         }
-        Ok(())
+        match self.run(root, &["check-ref-format", "--branch", branch]) {
+            Ok(_) => Ok(()),
+            Err(GitError::Command { .. }) => Err(GitError::InvalidBranch),
+            Err(error) => Err(error),
+        }
     }
     pub fn init(&self, root: &Path, branch: &str) -> Result<(), GitError> {
         self.validate_branch(root, branch)?;
@@ -810,7 +810,6 @@ impl Git {
 #[cfg(all(test, unix))]
 pub(crate) mod test_support {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     pub struct Fixture {
         pub root: PathBuf,
@@ -873,8 +872,34 @@ exec /usr/bin/git "$@"
             }
         }
         pub fn script(path: &Path, text: &str) {
-            std::fs::write(path, text).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            // A parallel test's fork can inherit a writable script FD even with
+            // CLOEXEC, making Linux exec return ETXTBSY until that child execs.
+            // Keep the writable FD in a separate process, outside the test runner.
+            let mut writer = Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    "umask 077; cat > \"$1\" && chmod 700 \"$1\"",
+                    "shipslip-fixture-writer",
+                ])
+                .arg(path)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            writer
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(text.as_bytes())
+                .unwrap();
+            let output = writer.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "could not write fixture script {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         pub fn initialized(&self) {
             self.git.init(&self.repo, "custom-branch").unwrap();
@@ -899,6 +924,41 @@ exec /usr/bin/git "$@"
 mod tests {
     use super::test_support::Fixture;
     use super::*;
+    #[test]
+    fn branch_validation_preserves_launch_errors_and_rejects_invalid_names() {
+        let fixture = Fixture::new();
+        let missing_git = Git::new(fixture.root.join("missing-git"));
+        assert!(matches!(
+            missing_git.validate_branch(&fixture.repo, "valid-branch"),
+            Err(GitError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound
+        ));
+        for branch in ["-option", "invalid..branch", "branch with spaces"] {
+            assert!(matches!(
+                fixture.git.validate_branch(&fixture.repo, branch),
+                Err(GitError::InvalidBranch)
+            ));
+        }
+    }
+    #[test]
+    fn fixture_scripts_execute_immediately_during_parallel_creation() {
+        let fixture = Fixture::new();
+        std::thread::scope(|scope| {
+            for worker in 0..8 {
+                let root = &fixture.root;
+                scope.spawn(move || {
+                    for iteration in 0..32 {
+                        let path = root.join(format!("script-{worker}-{iteration}"));
+                        Fixture::script(&path, "#!/bin/sh\nprintf 'ready'\n");
+                        let output = Command::new(&path).output().unwrap_or_else(|error| {
+                            panic!("could not execute {}: {error}", path.display())
+                        });
+                        assert!(output.status.success());
+                        assert_eq!(output.stdout, b"ready");
+                    }
+                });
+            }
+        });
+    }
     #[test]
     fn initial_stage_excludes_secrets_and_honors_branch() {
         let fixture = Fixture::new();
