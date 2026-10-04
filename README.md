@@ -33,9 +33,9 @@ Open a new terminal, then check it with `slip --version`. The installer puts
 Shipslip runs on macOS (primary) and Linux (supported, less tested). Windows
 is not supported yet.
 
-Project creation and publishing below are **unreleased source features**.
-The published 0.2.2 installer does not include them yet. To try them now, use
-the [local build instructions](#try-project-creation-from-this-checkout).
+Project creation and GitHub publishing require Shipslip **0.3.0 or newer**.
+Run the GitHub installer above to upgrade, or use the
+[local build instructions](#try-project-creation-from-this-checkout).
 
 Create a project from a directory outside any existing Git checkout:
 
@@ -171,7 +171,7 @@ sets a default override.
 
 ### Try project creation from this checkout
 
-For unreleased changes, build the local binary first. Run creation from a
+To test this source checkout, build the local binary first. Run creation from a
 normal non-Git directory, not from inside the Shipslip source checkout:
 
 ```sh
@@ -187,7 +187,8 @@ php artisan serve
 Use a new app name on subsequent runs. To publish this app with the same build,
 run `"$slip_binary" publish github` from its directory. To configure deployment,
 run `"$slip_binary" init` after preparing an existing server checkout. The
-installed release binary may not include unreleased source features.
+installed binary can be checked with `slip --version`; creation and publishing
+require 0.3.0 or newer.
 
 ### Check Laravel installer compatibility
 
