@@ -762,9 +762,11 @@ fn rename_exclusive(source: &Path, destination: &Path) -> Result<(), CreateError
             libc::renamex_np(source_c.as_ptr(), destination_c.as_ptr(), libc::RENAME_EXCL)
         };
         #[cfg(target_os = "linux")]
+        // Call the kernel directly: Rust's bundled musl may lack the libc wrapper.
         // SAFETY: both C strings are valid paths; RENAME_NOREPLACE never replaces a destination.
         let result = unsafe {
-            libc::renameat2(
+            libc::syscall(
+                libc::SYS_renameat2,
                 libc::AT_FDCWD,
                 source_c.as_ptr(),
                 libc::AT_FDCWD,

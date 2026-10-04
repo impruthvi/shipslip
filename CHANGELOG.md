@@ -30,6 +30,8 @@ change the library API.
 
 ### Fixed
 
+- Linux release binaries now link correctly while preserving no-overwrite
+  project moves.
 - Publication checks the remote repository's actual visibility during review
   and before pushing, including resumed and completed operations. A mismatch
   stops instead of uploading under a stale private/public label.
