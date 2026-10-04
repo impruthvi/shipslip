@@ -33,9 +33,9 @@ Open a new terminal, then check it with `slip --version`. The installer puts
 Shipslip runs on macOS (primary) and Linux (supported, less tested). Windows
 is not supported yet.
 
-Project creation and publishing below are **unreleased source features**.
-The published 0.2.2 installer does not include them yet. To try them now, use
-the [local build instructions](#try-project-creation-from-this-checkout).
+Project creation and GitHub publishing require Shipslip **0.3.0 or newer**.
+Run the GitHub installer above to upgrade, or use the
+[local build instructions](#try-project-creation-from-this-checkout).
 
 Create a project from a directory outside any existing Git checkout:
 
@@ -62,6 +62,9 @@ uses no authentication. SQLite, Pest, and branch `main` are the defaults.
 Laravel Boost is recommended: its setup prompt defaults to Yes. Pass `--boost`
 to enable it without the prompt, or `--no-boost` to skip it. WorkOS, community kits, teams,
 and package managers other than npm are not supported.
+
+Boost configures the AI clients it detects. To choose or add a client after
+creation, run `php artisan boost:install` from the new app.
 
 `slip new .` creates in the current directory only when it is completely empty,
 including hidden files. Both creation modes refuse symlink destinations and
@@ -171,7 +174,7 @@ sets a default override.
 
 ### Try project creation from this checkout
 
-For unreleased changes, build the local binary first. Run creation from a
+To test this source checkout, build the local binary first. Run creation from a
 normal non-Git directory, not from inside the Shipslip source checkout:
 
 ```sh
@@ -187,7 +190,8 @@ php artisan serve
 Use a new app name on subsequent runs. To publish this app with the same build,
 run `"$slip_binary" publish github` from its directory. To configure deployment,
 run `"$slip_binary" init` after preparing an existing server checkout. The
-installed release binary may not include unreleased source features.
+installed binary can be checked with `slip --version`; creation and publishing
+require 0.3.0 or newer.
 
 ### Check Laravel installer compatibility
 
@@ -201,7 +205,7 @@ bash scripts/installer-matrix.sh .context/installer-compat.md
 The matrix creates eleven temporary apps: nine starter-kit/auth combinations
 without Boost, plus plain Laravel and React with Boost. It runs application
 checks, moves each scaffold to a path containing spaces, and rebuilds assets.
-Boost cases also initialize the generated MCP command and list tools after
+Boost cases also initialize MCP and list tools after
 relocation. The report retains every result and per-case logs on failure.
 This takes longer than unit tests and downloads Composer/npm dependencies;
 it does not create GitHub repositories. Weekly/manual CI runs the same matrix

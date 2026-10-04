@@ -91,4 +91,42 @@ if MATRIX_EMPTY_TOOLS=1 php "$repo_root/scripts/installer-matrix-mcp.php" "$work
 fi
 grep -F 'Boost MCP listed no tools' "$work/mcp-empty.out" > /dev/null
 printf 'PASS: generated relative MCP command runs in relocated directory; empty tools rejected\n'
+rm "$work/relocated mcp fixture/.mcp.json"
+mkdir "$work/relocated mcp fixture/.vscode"
+cat > "$work/relocated mcp fixture/.vscode/mcp.json" <<'CONFIG'
+{"servers":{"laravel-boost":{"command":"php","args":["artisan","boost:mcp"]}}}
+CONFIG
+php "$repo_root/scripts/installer-matrix-mcp.php" "$work/relocated mcp fixture" > "$work/mcp-vscode.out"
+grep -F 'initialized and listed 1 tools' "$work/mcp-vscode.out" > /dev/null
+rm "$work/relocated mcp fixture/.vscode/mcp.json"
+mkdir "$work/relocated mcp fixture/.codex"
+cat > "$work/relocated mcp fixture/.codex/config.toml" <<'CONFIG'
+[mcp_servers.laravel-boost]
+command = "php"
+args = ["artisan", "boost:mcp"]
+CONFIG
+php "$repo_root/scripts/installer-matrix-mcp.php" "$work/relocated mcp fixture" > "$work/mcp-codex.out"
+grep -F 'initialized and listed 1 tools' "$work/mcp-codex.out" > /dev/null
+rm "$work/relocated mcp fixture/.codex/config.toml"
+cat > "$work/relocated mcp fixture/boost.json" <<'CONFIG'
+{"agents":[],"mcp":true}
+CONFIG
+php "$repo_root/scripts/installer-matrix-mcp.php" "$work/relocated mcp fixture" > "$work/mcp-no-client.out"
+grep -F 'No AI client selected' "$work/mcp-no-client.out" > /dev/null
+grep -F 'initialized and listed 1 tools' "$work/mcp-no-client.out" > /dev/null
+cat > "$work/relocated mcp fixture/boost.json" <<'CONFIG'
+{"mcp":true}
+CONFIG
+php "$repo_root/scripts/installer-matrix-mcp.php" "$work/relocated mcp fixture" > "$work/mcp-omitted-clients.out"
+grep -F 'No AI client selected' "$work/mcp-omitted-clients.out" > /dev/null
+grep -F 'initialized and listed 1 tools' "$work/mcp-omitted-clients.out" > /dev/null
+cat > "$work/relocated mcp fixture/boost.json" <<'CONFIG'
+{"agents":["claude_code"],"mcp":true}
+CONFIG
+if php "$repo_root/scripts/installer-matrix-mcp.php" "$work/relocated mcp fixture" > "$work/mcp-missing.out" 2>&1; then
+    echo 'Missing selected-client MCP configuration unexpectedly passed' >&2
+    exit 1
+fi
+grep -F 'Missing generated Laravel Boost MCP configuration' "$work/mcp-missing.out" > /dev/null
+printf 'PASS: VS Code/Codex configurations and no-client server check; missing selected-client config rejected\n'
 printf 'PASS: Bash %s; stdin null and all five token variables removed\n' "$BASH_VERSION"

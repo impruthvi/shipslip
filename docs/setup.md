@@ -48,11 +48,11 @@ unreleased changes, install from the
 
 ### Local project creation prerequisites
 
-Creation and publishing are currently unreleased source features; the
-published 0.2.2 binary does not include these commands. Build with
-`cargo build --locked --bin slip` from the Shipslip source checkout and use
-that `target/debug/slip` binary from a non-Git parent directory. The README
-has a [complete local example](../README.md#try-project-creation-from-this-checkout).
+Creation and GitHub publishing require Shipslip **0.3.0 or newer**. Run the
+GitHub installer above to upgrade. To test from source, build with
+`cargo build --locked --bin slip` and use that `target/debug/slip` binary from
+a non-Git parent directory. The README has a
+[complete local example](../README.md#try-project-creation-from-this-checkout).
 
 Skip this section when you already have a Laravel checkout. `slip new` needs
 these installed tools on your local `PATH`:
@@ -111,6 +111,8 @@ Databases are `sqlite`, `mysql`, `mariadb`, `pgsql`, and `sqlsrv`; testing is
 Laravel Boost is recommended and its setup prompt defaults to Yes (Enter).
 Answer No to skip it. Pass `--boost` or `--no-boost` to set that choice without
 being prompted, and `--branch NAME` for another initial branch.
+Boost configures detected AI clients. Run `php artisan boost:install` in the
+new app to choose or add a client after creation.
 WorkOS, community kits, teams, and VPS provisioning are outside this flow.
 
 Use `slip new .` for an existing empty directory. Hidden files count as

@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-04
+
 ### Added
 
 - `slip new <name|.>` creates a Laravel app with plain Laravel, React, Vue,
@@ -50,16 +52,16 @@ change the library API.
   or lockfiles change during the wizard.
 - The installer matrix reports every case and a final tally even when a failed
   installer leaves malformed `composer.lock` JSON. Boost cases verify the locked
-  package and generated MCP command after moving the scaffold.
+  package and MCP server after moving the scaffold. Checks recognize generated
+  Claude/Cursor/VS Code/Junie/Codex configurations and verify the server directly
+  when Boost selected no AI client.
 
 ### Changed
 
 - Project creation prints clean progress messages instead of raw terminal codes
   and repeated installer spinner frames, while retaining warnings and errors.
-
 - Project creation recommends Laravel Boost with a default-Yes setup prompt.
   `--boost` and `--no-boost` select it explicitly without prompting.
-
 - Newly generated deploy configs include `npm ci` and `npm run build` when
   the project has `package-lock.json` and an npm build script. Other lockfiles
   produce a warning; existing configs and non-frontend recipes are unchanged.
@@ -190,6 +192,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.3.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.3.0
 [0.2.2]: https://github.com/impruthvi/shipslip/releases/tag/v0.2.2
 [0.2.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.2.0
 [0.1.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.1.1
