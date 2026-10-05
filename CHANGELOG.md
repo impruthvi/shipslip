@@ -6,6 +6,36 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-05
+
+### Added
+
+- `slip doctor [--for create|publish] [--json]` reports every requirement for
+  project creation and GitHub publishing at once: tools, PHP extensions, Git
+  identity, and GitHub login. It is read-only, exits 0 when ready and 3 when a
+  blocking requirement is missing, too old, or broken, and prints versioned
+  JSON for scripts. The GitHub login check stops waiting after 10 seconds.
+- Tools installed in Homebrew's or Composer's global bin directory but not on
+  `PATH` are used, with a warning that shows the line to add to your shell
+  startup file.
+- `slip setup` on macOS plans exact Homebrew, Composer, and Git identity
+  commands, asks once, runs them with the approved tools first on `PATH`, and
+  checks again. It never installs Homebrew, never edits shell startup files,
+  and leaves tools owned by Herd, php.new, nvm, fnm, asdf, or mise untouched.
+  Runs are locked, recorded privately, and safe to interrupt and rerun. Linux
+  receives manual guidance.
+- `slip new` and `slip publish github` repair missing prerequisites in place
+  with one confirmation and continue with the answers already given, printing
+  the exact rerun command when they stop. `slip new` warns early when
+  publishing will later need `gh` or a GitHub login.
+
+### Changed
+
+- `slip publish github` exits 3 when publication is declined or prerequisites
+  remain missing, instead of 0.
+- Project name, branch, and destination are validated before any tool checks
+  or setup.
+
 ## [0.3.0] - 2026-10-04
 
 ### Added

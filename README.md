@@ -33,9 +33,22 @@ Open a new terminal, then check it with `slip --version`. The installer puts
 Shipslip runs on macOS (primary) and Linux (supported, less tested). Windows
 is not supported yet.
 
-Project creation and GitHub publishing require Shipslip **0.3.0 or newer**.
+Project creation and GitHub publishing require Shipslip **0.3.0 or newer**;
+`slip doctor`, `slip setup`, and in-place repair require **0.4.0 or newer**.
 Run the GitHub installer above to upgrade, or use the
 [local build instructions](#try-project-creation-from-this-checkout).
+
+Check your machine first. Doctor is read-only:
+
+```sh
+slip doctor
+```
+
+It lists every tool, PHP extension, Git identity, and GitHub login that
+creation and publishing need, then exits 0 when ready or 3 when something is
+missing. On macOS with Homebrew, `slip setup` fixes what it can: it shows the
+exact commands, asks once, runs them, and checks again. See
+[check and fix your machine](docs/setup.md#check-and-fix-your-machine).
 
 Create a project from a directory outside any existing Git checkout:
 
@@ -47,7 +60,9 @@ php artisan serve
 
 Open the local URL printed by Artisan. Shipslip asks for any missing choices,
 checks your installed tools, and previews the destination and exact installer
-command. Child commands use the tool executables shown in that preview, even
+command. If a tool is missing, it shows only what needs attention and offers
+the same reviewed plan as `slip setup`; after one confirmation it continues
+with your answers. Child commands use the tool executables shown in that preview, even
 when multiple versions are installed. After confirmation, it installs
 dependencies, builds assets, runs
 `php artisan test`, and offers an initial commit after showing the files to
@@ -55,7 +70,7 @@ include. Git needs your `user.name` and `user.email` configured. Declining the
 commit leaves the verified project and staged files local.
 
 Project creation needs local PHP, Composer, Laravel installer **5.31.1 or
-newer**, Node.js, npm, and Git on `PATH`; see [prerequisites](docs/setup.md#local-project-creation-prerequisites).
+newer**, Node.js, npm, and Git; see [prerequisites](docs/setup.md#local-project-creation-prerequisites).
 Starter kits are `none`, `react`, `vue`, `svelte`, and `livewire`. Kits support
 Laravel authentication or `--auth none`; plain Laravel (`--starter-kit none`)
 uses no authentication. SQLite, Pest, and branch `main` are the defaults.
