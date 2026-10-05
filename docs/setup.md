@@ -48,17 +48,19 @@ unreleased changes, install from the
 
 ### Local project creation prerequisites
 
-Creation and GitHub publishing require Shipslip **0.3.0 or newer**. Run the
-GitHub installer above to upgrade. To test from source, build with
+Creation and GitHub publishing require Shipslip **0.3.0 or newer**;
+`slip doctor`, `slip setup`, and in-place repair require **0.4.0 or newer**.
+Run the GitHub installer above to upgrade. To test from source, build with
 `cargo build --locked --bin slip` and use that `target/debug/slip` binary from
 a non-Git parent directory. The README has a
 [complete local example](../README.md#try-project-creation-from-this-checkout).
 
-Skip this section when you already have a Laravel checkout. `slip new` needs
-these installed tools on your local `PATH`:
+Skip this section when you already have a Laravel checkout. `slip new` needs:
 
-- PHP and the extensions required by the Laravel version being installed.
-  The compatibility matrix was verified with PHP 8.4.
+- PHP with the extensions Laravel uses, including `pdo_sqlite`, which the new
+  app's tests use. The driver for another selected database (`pdo_mysql`,
+  `pdo_pgsql`, `pdo_sqlsrv`) is reported as a warning only. The compatibility
+  matrix was verified with PHP 8.4.
 - Composer.
 - Laravel installer 5.31.1 or newer. Shipslip also probes the installer's help
   output for the required non-interactive flags.
@@ -66,23 +68,68 @@ these installed tools on your local `PATH`:
   package managers are not supported.
 - Git, with an author name and email configured for the initial commit.
 
-Install or update the Laravel installer with Composer:
+Publishing also needs the GitHub CLI (`gh`) logged in to github.com, or
+`GH_TOKEN` set.
+
+### Check and fix your machine
+
+Run doctor from any directory. It changes nothing:
+
+```sh
+slip doctor
+```
+
+Doctor reports every requirement at once and exits `0` when ready, `3` when a
+blocking requirement is missing, too old, or broken, `1` if doctor itself
+fails, and `2` for invalid input. `--for create` or `--for publish` narrows
+the check; `--json` prints versioned output for scripts. The GitHub login check
+gives up after 10 seconds and shows a warning instead of waiting.
+
+A tool installed outside your `PATH`, such as the Laravel installer in
+Composer's global bin directory, still counts: Shipslip uses it and shows the
+exact line to add to your shell startup file so your own terminal finds it too.
+
+On macOS, fix what is missing with:
+
+```sh
+slip setup
+```
+
+Setup prints a plan of exact commands, asks once, runs them, and checks again:
+
+- Missing tools are installed with your existing Homebrew, with automatic
+  updates and upgrades of installed formulae turned off. Homebrew may still
+  install the new formula's own dependencies.
+- The Laravel installer is installed with `composer global require
+  laravel/installer`.
+- A missing Git name or email is asked for before the plan and saved first.
+
+Shipslip never installs Homebrew, never runs `curl | bash`, never edits shell
+startup files, and never changes tools owned by Herd, php.new, nvm, fnm, asdf,
+or mise; for those it prints the manager's own command. Tools that are present
+but too old or broken get instructions instead of upgrades, because upgrading a
+shared Homebrew formula affects every project using it. If Homebrew is missing
+or not writable by you, setup prints guidance and changes nothing.
+
+When there is work to do, setup keeps a private record of the plan, command
+output, and exit codes under Shipslip's operations directory. Press Ctrl-C once to stop after the
+current command; press it again to exit immediately. Setup exits `0` when
+ready, `3` when something still needs you (including a declined plan), `1`
+when a command fails or another setup is running, and `130` when
+interrupted. Run `slip setup` again to continue; it re-checks first.
+
+`slip new` and `slip publish github` run the same checks. When something is
+missing they show only what needs attention, offer the same plan with one
+confirmation, and then continue with the answers you already gave. If you
+decline or the repair fails, they print the exact command to run again.
+`slip new` also warns before installing when publishing will later need `gh`
+or a GitHub login.
+
+On Linux, doctor works and setup prints manual guidance. Install the tools with
+your distribution's packages, then the Laravel installer and Git identity:
 
 ```sh
 composer global require laravel/installer
-composer global config bin-dir --absolute
-laravel --version
-```
-
-Add the bin directory printed by Composer to your shell's `PATH` if `laravel`
-cannot be found. Check the remaining tools with `php --version`,
-`composer --version`, `node --version`, `npm --version`, and `git --version`.
-The creation preview shows the selected tool versions; the installer and its
-child commands use those selected executables. Check your Git author with
-`git config user.name` and `git config user.email`;
-if absent, configure your own values before creating a project:
-
-```sh
 git config --global user.name "Your Name"
 git config --global user.email "you@example.com"
 ```
