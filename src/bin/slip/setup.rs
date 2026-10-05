@@ -81,6 +81,17 @@ pub(super) fn shell_line(dir: &std::path::Path) -> String {
     )
 }
 
+pub(super) fn render_state(state: &FindingState) -> String {
+    match state {
+        FindingState::Ok { version, .. } => format!("ok ({version})"),
+        FindingState::Missing => "missing".into(),
+        FindingState::TooOld { found, need } => format!("too old ({found}; need {need})"),
+        FindingState::Broken { error, .. } => format!("broken: {error}"),
+        FindingState::OffPath { .. } => "warning: installed outside PATH; usable by slip".into(),
+        FindingState::Unverified { reason } => format!("warning: unverified: {reason}"),
+    }
+}
+
 pub(super) fn render(report: &DetectionReport, purposes: &[Purpose]) -> String {
     let mut lines = Vec::new();
     for purpose in purposes {
@@ -93,16 +104,7 @@ pub(super) fn render(report: &DetectionReport, purposes: &[Purpose]) -> String {
             .iter()
             .filter(|finding| finding.requirement.purposes.contains(purpose))
         {
-            let status = match &finding.state {
-                FindingState::Ok { version, .. } => format!("ok ({version})"),
-                FindingState::Missing => "missing".into(),
-                FindingState::TooOld { found, need } => format!("too old ({found}; need {need})"),
-                FindingState::Broken { error, .. } => format!("broken: {error}"),
-                FindingState::OffPath { .. } => {
-                    "warning: installed outside PATH; usable by slip".into()
-                }
-                FindingState::Unverified { reason } => format!("warning: unverified: {reason}"),
-            };
+            let status = render_state(&finding.state);
             lines.push(format!("  {}: {}", finding.requirement.id, escape(&status)));
             if let Some(location) = &finding.location {
                 lines.push(format!(
@@ -282,7 +284,7 @@ pub(super) fn render_plan(plan: &setup::SetupPlan) -> String {
     lines.join("\n")
 }
 
-trait SetupPrompts {
+pub(super) trait SetupPrompts {
     async fn identity(
         &mut self,
         field: &'static str,
@@ -291,10 +293,11 @@ trait SetupPrompts {
     async fn confirm(
         &mut self,
         plan: &setup::SetupPlan,
+        question: &str,
         interrupts: &mut Interrupts,
     ) -> io::Result<Option<bool>>;
 }
-struct TerminalPrompts;
+pub(super) struct TerminalPrompts;
 impl SetupPrompts for TerminalPrompts {
     async fn identity(
         &mut self,
@@ -318,17 +321,12 @@ impl SetupPrompts for TerminalPrompts {
     async fn confirm(
         &mut self,
         _plan: &setup::SetupPlan,
+        question: &str,
         interrupts: &mut Interrupts,
     ) -> io::Result<Option<bool>> {
+        let question = question.to_owned();
         ask_typed(
-            || {
-                ask_yes_no(
-                    &mut io::stdin().lock(),
-                    &mut io::stdout(),
-                    "Apply this setup plan?",
-                    false,
-                )
-            },
+            move || ask_yes_no(&mut io::stdin().lock(), &mut io::stdout(), &question, false),
             interrupts,
         )
         .await
@@ -371,34 +369,74 @@ fn rerun(args: &RepairArgs) -> String {
     )
 }
 
-fn finish_setup(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RepairOutcome {
+    Ready,
+    NotReady,
+    Declined,
+    Failed,
+    Invalid,
+    Interrupted,
+}
+impl RepairOutcome {
+    fn from_code(code: u8) -> Self {
+        match code {
+            0 => Self::Ready,
+            3 => Self::NotReady,
+            2 => Self::Invalid,
+            INTERRUPTED => Self::Interrupted,
+            _ => Self::Failed,
+        }
+    }
+    pub(super) fn exit_code(self) -> ExitCode {
+        ExitCode::from(match self {
+            Self::Ready => 0,
+            Self::NotReady | Self::Declined => 3,
+            Self::Failed => 1,
+            Self::Invalid => 2,
+            Self::Interrupted => INTERRUPTED,
+        })
+    }
+}
+
+pub(super) struct RepairRequest {
+    pub options: DetectionOptions,
+    pub operations_root: std::path::PathBuf,
+    pub report: Option<DetectionReport>,
+    pub heading: Option<&'static str>,
+    pub warnings: String,
+    pub confirmation: String,
+    pub rerun: String,
+}
+
+fn finish_repair(
     code: u8,
-    args: &RepairArgs,
+    rerun: &str,
     path: &std::path::Path,
     error: Option<&str>,
-) -> ExitCode {
+) -> RepairOutcome {
     println!("Operation record: {}", escape(&path.display().to_string()));
     if let Some(error) = error {
         eprintln!("{}", escape(error));
     }
     if code == INTERRUPTED {
-        println!("Setup was interrupted; run `{}` again", rerun(args));
+        println!("Setup was interrupted; run `{}` again", rerun);
     } else if code != 0 {
         println!(
             "Run `{}` again after resolving the remaining requirements.",
-            rerun(args)
+            rerun
         );
     }
-    ExitCode::from(code)
+    RepairOutcome::from_code(code)
 }
 
 fn finish_prompt_error(
-    args: &RepairArgs,
+    rerun: &str,
     operations_root: &std::path::Path,
     plan: &setup::SetupPlan,
     report: &DetectionReport,
     error: io::Error,
-) -> Result<ExitCode, setup::SetupError> {
+) -> Result<RepairOutcome, setup::SetupError> {
     let code = if error.kind() == io::ErrorKind::InvalidInput {
         2
     } else {
@@ -406,7 +444,7 @@ fn finish_prompt_error(
     };
     let path =
         setup::record_setup_outcome(operations_root, plan, report, code, Some(error.to_string()))?;
-    Ok(finish_setup(code, args, &path, Some(&error.to_string())))
+    Ok(finish_repair(code, rerun, &path, Some(&error.to_string())))
 }
 
 async fn run_setup_flow(
@@ -417,31 +455,78 @@ async fn run_setup_flow(
     interrupts: &mut Interrupts,
     prompts: &mut impl SetupPrompts,
 ) -> Result<ExitCode, Box<dyn Error>> {
-    let options = DetectionOptions {
-        purposes: args.purpose.map_or_else(
-            || vec![Purpose::Create, Purpose::Publish],
-            |purpose| vec![purpose],
-        ),
-        root,
-        installer_options: None,
+    let request = RepairRequest {
+        options: DetectionOptions {
+            purposes: args.purpose.map_or_else(
+                || vec![Purpose::Create, Purpose::Publish],
+                |purpose| vec![purpose],
+            ),
+            root,
+            installer_options: None,
+        },
+        operations_root,
+        report: None,
+        heading: None,
+        warnings: String::new(),
+        confirmation: "Apply this setup plan?".into(),
+        rerun: rerun(&args),
     };
-    let mut report = interrupts.defer(setup::detect(context, &options), "Setup was interrupted; waiting for the current check. Press Ctrl-C again to exit immediately.").await?;
+    Ok(repair_with_prompts(request, context, interrupts, prompts)
+        .await?
+        .exit_code())
+}
+
+pub(super) async fn repair_with_prompts(
+    request: RepairRequest,
+    context: &DetectionContext,
+    interrupts: &mut Interrupts,
+    prompts: &mut impl SetupPrompts,
+) -> Result<RepairOutcome, Box<dyn Error>> {
+    let RepairRequest {
+        options,
+        operations_root,
+        report,
+        heading,
+        warnings,
+        confirmation,
+        rerun,
+    } = request;
+    let notice = format!("Setup was interrupted; waiting for the current check. Press Ctrl-C again to exit immediately. Resume with `{rerun}`.");
+    let mut report = match report {
+        Some(report) => report,
+        None => {
+            interrupts
+                .defer(setup::detect(context, &options), &notice)
+                .await?
+        }
+    };
     let mut inputs = setup::SetupInputs::default();
     let mut session = None;
     loop {
+        if !report.ready() {
+            if let Some(heading) = heading {
+                println!("\n{heading}");
+            }
+        }
         println!("{}", render(&report, &options.purposes));
+        if !warnings.is_empty() {
+            println!("{warnings}");
+        }
+        if heading.is_some() && report.ready() && !interrupts.pending {
+            return Ok(RepairOutcome::Ready);
+        }
         let mut plan = setup::plan_setup(context, &report, &inputs)?;
         if interrupts.pending {
             let path =
                 setup::record_setup_outcome(&operations_root, &plan, &report, INTERRUPTED, None)?;
-            return Ok(finish_setup(INTERRUPTED, &args, &path, None));
+            return Ok(finish_repair(INTERRUPTED, &rerun, &path, None));
         }
         for field in plan.inputs_needed.clone() {
             let answer = match prompts.identity(field, interrupts).await {
                 Ok(answer) => answer,
                 Err(error) => {
                     return Ok(finish_prompt_error(
-                        &args,
+                        &rerun,
                         &operations_root,
                         &plan,
                         &report,
@@ -457,7 +542,7 @@ async fn run_setup_flow(
                     INTERRUPTED,
                     None,
                 )?;
-                return Ok(finish_setup(INTERRUPTED, &args, &path, None));
+                return Ok(finish_repair(INTERRUPTED, &rerun, &path, None));
             };
             match field {
                 "user.name" => inputs.name = Some(value),
@@ -470,11 +555,11 @@ async fn run_setup_flow(
         let code = if plan.actions.is_empty() {
             Some(if report.ready() { 0 } else { 3 })
         } else {
-            let answer = match prompts.confirm(&plan, interrupts).await {
+            let answer = match prompts.confirm(&plan, &confirmation, interrupts).await {
                 Ok(answer) => answer,
                 Err(error) => {
                     return Ok(finish_prompt_error(
-                        &args,
+                        &rerun,
                         &operations_root,
                         &plan,
                         &report,
@@ -490,7 +575,12 @@ async fn run_setup_flow(
         };
         if let Some(code) = code {
             let path = setup::record_setup_outcome(&operations_root, &plan, &report, code, None)?;
-            return Ok(finish_setup(code, &args, &path, None));
+            let outcome = finish_repair(code, &rerun, &path, None);
+            return Ok(if code == 3 && !plan.actions.is_empty() {
+                RepairOutcome::Declined
+            } else {
+                outcome
+            });
         }
         if session.is_none() {
             match setup::SetupSession::acquire(&operations_root) {
@@ -503,7 +593,7 @@ async fn run_setup_flow(
                         1,
                         Some(error.to_string()),
                     )?;
-                    return Ok(finish_setup(1, &args, &path, Some(&error.to_string())));
+                    return Ok(finish_repair(1, &rerun, &path, Some(&error.to_string())));
                 }
             }
         }
@@ -521,7 +611,7 @@ async fn run_setup_flow(
                     println!("\nRunning setup action {}…", index + 1)
                 }
                 setup::SetupEvent::Output { line, .. } => println!("  {}", escape(&line)),
-                setup::SetupEvent::Interrupted { .. } => eprintln!("\nSetup was interrupted; waiting for the current command. Press Ctrl-C again to exit immediately."),
+                setup::SetupEvent::Interrupted { .. } => eprintln!("\nSetup was interrupted; waiting for the current command. Press Ctrl-C again to exit immediately. Resume with `{}`.", escape(&rerun)),
                 _ => {}
             },
         );
@@ -546,9 +636,9 @@ async fn run_setup_flow(
                 if let Some(report) = &outcome.report {
                     println!("{}", render(report, &options.purposes));
                 }
-                return Ok(finish_setup(
+                return Ok(finish_repair(
                     outcome.exit_code,
-                    &args,
+                    &rerun,
                     &outcome.record_path,
                     outcome.error.as_deref(),
                 ));
@@ -562,7 +652,7 @@ async fn run_setup_flow(
                     code,
                     Some(error.to_string()),
                 )?;
-                return Ok(finish_setup(code, &args, &path, Some(&error.to_string())));
+                return Ok(finish_repair(code, &rerun, &path, Some(&error.to_string())));
             }
         }
     }

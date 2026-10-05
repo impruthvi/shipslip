@@ -38,6 +38,118 @@ fn parse(values: &[&str]) -> Result<Option<Command>, Box<dyn Error>> {
 }
 
 #[test]
+fn in_flow_terminal_child() {
+    let Ok(kind) = std::env::var("SHIPSLIP_IN_FLOW_TERMINAL_CHILD") else {
+        return;
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let code = runtime.block_on(async {
+        if kind == "publish" {
+            publish::run(publish::Args::default()).await.unwrap()
+        } else {
+            let args = [
+                "shop",
+                "--starter-kit=none",
+                "--auth=none",
+                "--database=sqlite",
+                "--testing=pest",
+                "--branch=feature/shop",
+                "--no-boost",
+            ]
+            .map(String::from);
+            new::run(new::Args::parse(&args).unwrap()).await.unwrap()
+        }
+    });
+    assert_eq!(code, ExitCode::from(3));
+    std::process::exit(3);
+}
+
+#[test]
+fn interactive_new_and_publish_exit_three_with_rerun_hints_and_no_install() {
+    use std::io::Write;
+    for kind in ["new", "publish"] {
+        let fixture = super::setup_fixture::Fixture::new();
+        fixture.complete();
+        for name in ["node", "npm", "gh"] {
+            fs::remove_file(fixture.root.join("brew/bin").join(name)).unwrap();
+        }
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: openpty initializes both descriptor outputs; optional arguments are null.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        // SAFETY: successful openpty returned two distinct, owned descriptors.
+        let mut master = unsafe { File::from_raw_fd(master) };
+        let slave = unsafe { File::from_raw_fd(slave) };
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "local_tests::in_flow_terminal_child",
+                "--nocapture",
+            ])
+            .env("SHIPSLIP_IN_FLOW_TERMINAL_CHILD", kind)
+            .env("HOME", fixture.root.join("home"))
+            .env("COMPOSER_HOME", fixture.root.join("home/.composer"))
+            .env("XDG_STATE_HOME", fixture.root.join("state"))
+            .env("PATH", fixture.root.join("brew/bin"))
+            .env_remove("SHIPSLIP_CONFIG")
+            .current_dir(&fixture.root)
+            .stdin(Stdio::from(slave))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        master.write_all(b"n\n").unwrap();
+        let pid = child.id();
+        let (sender, receiver) = sync_mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let _ = sender.send(child.wait_with_output());
+        });
+        let output = match receiver.recv_timeout(Duration::from_secs(20)) {
+            Ok(output) => output.unwrap(),
+            Err(error) => {
+                // SAFETY: this is the test's child, still owned by the waiter thread.
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
+                waiter.join().unwrap();
+                panic!("terminal flow hung: {error}");
+            }
+        };
+        waiter.join().unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(3),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains(if kind == "new" {
+            "Missing for project creation"
+        } else {
+            "Missing for GitHub publishing"
+        }));
+        assert!(text.contains(if kind == "new" { "slip new 'shop' --starter-kit none --auth none --database sqlite --testing pest --branch 'feature/shop' --no-boost" } else { "slip publish github" }));
+        assert!(!fixture.root.join("actions").exists());
+        assert!(!fixture.root.join("shop").exists());
+    }
+}
+
+#[test]
 fn new_dispatch_preserves_choices_without_a_deploy_config() {
     if isolated(
         "new_dispatch_preserves_choices_without_a_deploy_config",
