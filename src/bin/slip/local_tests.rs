@@ -664,6 +664,21 @@ impl DoctorFixture {
         setup::run_with_context(
             setup::Args {
                 purpose: Some(purpose),
+                ..setup::Args::default()
+            },
+            &self.context,
+            self.root.clone(),
+        )
+        .await
+    }
+    async fn run_json(
+        &self,
+        purpose: shipslip::setup::Purpose,
+    ) -> Result<ExitCode, Box<dyn Error>> {
+        setup::run_with_context(
+            setup::Args {
+                purpose: Some(purpose),
+                json: true,
             },
             &self.context,
             self.root.clone(),
@@ -767,7 +782,8 @@ fn doctor_rejects_invalid_options() {
         vec!["doctor", "--for=deploy"],
         vec!["doctor", "--for=unknown"],
         vec!["doctor", "--for=create", "--for=publish"],
-        vec!["doctor", "--json"],
+        vec!["doctor", "--json", "--json"],
+        vec!["doctor", "--json=true"],
         vec!["doctor", "--unknown"],
         vec!["doctor", "create"],
     ] {
@@ -778,6 +794,192 @@ fn doctor_rejects_invalid_options() {
             "{values:?}"
         );
     }
+}
+
+#[test]
+fn doctor_json_parses_options() {
+    for values in [
+        vec!["doctor", "--json"],
+        vec!["doctor", "--json", "--for", "create"],
+        vec!["doctor", "--for=publish", "--json"],
+    ] {
+        let args: Vec<_> = values.into_iter().map(String::from).collect();
+        assert!(setup::Args::parse(&args[1..]).unwrap().json);
+    }
+    assert!(!setup::Args::default().json);
+}
+
+#[test]
+fn doctor_json_request_only_matches_doctor() {
+    for (values, expected) in [
+        (vec!["doctor", "--json"], true),
+        (vec!["doctor", "--for", "publish", "--json"], true),
+        (vec!["--config", "deploy.toml", "doctor", "--json"], true),
+        (vec!["doctor", "--for", "publish"], false),
+        (vec!["new", "doctor", "--json"], false),
+        (vec!["--config", "doctor", "new", "--json"], false),
+        (vec!["--config", "doctor"], false),
+        (vec![], false),
+    ] {
+        let args: Vec<_> = values.into_iter().map(String::from).collect();
+        assert_eq!(setup::json_requested(&args), expected, "{args:?}");
+    }
+}
+
+fn json_documents(output: &std::process::Output) -> Vec<serde_json::Value> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("Project creation:"));
+    assert!(!stdout.contains("GitHub publishing:"));
+    assert!(!stdout.contains('\u{1b}'));
+    stdout
+        .lines()
+        .filter(|line| line.starts_with('{'))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn doctor_json_output_matches_readiness_and_filters_purpose() {
+    if let Some(output) = isolated_output(
+        "doctor_json_output_matches_readiness_and_filters_purpose",
+        None,
+    ) {
+        let documents = json_documents(&output);
+        assert_eq!(documents.len(), 4);
+        for (document, (code, purpose)) in
+            documents
+                .iter()
+                .zip([(0, "create"), (0, "create"), (3, "create"), (0, "publish")])
+        {
+            assert_eq!(document["schema"], 1);
+            assert_eq!(document["exit_code"], code);
+            assert_eq!(document["ready"], code == 0);
+            assert_eq!(document["purposes"], serde_json::json!([purpose]));
+            assert_eq!(document["error"], serde_json::Value::Null);
+            assert!(document["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|finding| {
+                    finding["requirement"]["purposes"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&serde_json::json!(purpose))
+                }));
+        }
+        assert!(documents[1]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|finding| {
+                finding["requirement"]["id"] == "laravel"
+                    && finding["state"]["status"] == "off_path"
+            }));
+        assert_eq!(documents[3]["findings"].as_array().unwrap().len(), 3);
+        return;
+    }
+    use shipslip::setup::Purpose;
+    let fixture = DoctorFixture::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        assert_eq!(
+            fixture.run_json(Purpose::Create).await.unwrap(),
+            ExitCode::SUCCESS
+        );
+        let bin = fixture.root.join("composer/vendor/bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::rename(fixture.root.join("bin/laravel"), bin.join("laravel")).unwrap();
+        assert_eq!(
+            fixture.run_json(Purpose::Create).await.unwrap(),
+            ExitCode::SUCCESS
+        );
+        fs::remove_file(fixture.root.join("bin/node")).unwrap();
+        fs::remove_file(fixture.root.join("bin/npm")).unwrap();
+        assert_eq!(
+            fixture.run_json(Purpose::Create).await.unwrap(),
+            ExitCode::from(3)
+        );
+        assert_eq!(
+            fixture.run_json(Purpose::Publish).await.unwrap(),
+            ExitCode::SUCCESS
+        );
+    });
+}
+
+#[test]
+fn doctor_json_errors_record_exit_codes() {
+    if let Some(output) = isolated_output("doctor_json_errors_record_exit_codes", None) {
+        let documents = json_documents(&output);
+        assert_eq!(documents.len(), 4);
+        for (document, code) in documents.iter().zip([2, 2, 2, 1]) {
+            assert_eq!(document["schema"], 1);
+            assert_eq!(document["exit_code"], code);
+            assert_eq!(document["ready"], false);
+            assert!(document["findings"].as_array().unwrap().is_empty());
+            assert!(document["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()));
+        }
+        assert!(output.stderr.is_empty());
+        return;
+    }
+    for values in [
+        vec!["doctor", "--json", "--for=deploy"],
+        vec!["doctor", "--json", "--json"],
+        vec!["--config", "deploy.toml", "doctor", "--json"],
+    ] {
+        let error = parse(&values).err().unwrap();
+        assert_eq!(finish_run(Err(error), true), ExitCode::from(2));
+    }
+    let fixture = DoctorFixture::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let result = runtime.block_on(setup::run_with_context(
+        setup::Args {
+            json: true,
+            ..setup::Args::default()
+        },
+        &fixture.context,
+        fixture.root.join("missing"),
+    ));
+    assert_eq!(finish_run(result, true), ExitCode::FAILURE);
+}
+
+#[test]
+fn doctor_json_preserves_auth_redaction() {
+    if let Some(output) = isolated_output("doctor_json_preserves_auth_redaction", None) {
+        let documents = json_documents(&output);
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0]["exit_code"], 3);
+        let document = documents[0].to_string();
+        assert!(!document.contains("doctor-json-secret"));
+        assert!(document.contains("[REDACTED]"));
+        return;
+    }
+    let mut fixture = DoctorFixture::new();
+    fixture
+        .context
+        .environment
+        .insert("GH_TOKEN".into(), "doctor-json-secret".into());
+    fixture.script(
+        &fixture.root.join("bin/gh"),
+        "if [ \"$1\" = --version ]; then echo gh-test; else echo \"$GH_TOKEN\" >&2; exit 1; fi",
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .block_on(fixture.run_json(shipslip::setup::Purpose::Publish))
+            .unwrap(),
+        ExitCode::from(3)
+    );
 }
 
 #[test]

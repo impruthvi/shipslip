@@ -53,11 +53,24 @@ fn main() -> ExitCode {
 }
 
 async fn main_async(local_tokens: LocalTokens) -> ExitCode {
-    match run(local_tokens).await {
+    let json = setup::json_requested(&std::env::args().skip(1).collect::<Vec<_>>());
+    finish_run(run(local_tokens).await, json)
+}
+
+fn finish_run(result: Result<ExitCode, Box<dyn Error>>, doctor_json: bool) -> ExitCode {
+    match result {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("slip: {}", logs::escape(&error.to_string()));
-            error_exit_code(error.as_ref())
+            let code = error_exit_code(error.as_ref());
+            if doctor_json {
+                println!(
+                    "{}",
+                    setup::render_error_json(&error.to_string(), code == ExitCode::from(2))
+                );
+            } else {
+                eprintln!("slip: {}", logs::escape(&error.to_string()));
+            }
+            code
         }
     }
 }
@@ -962,7 +975,7 @@ fn print_help() {
         "Shipslip deploy runner\n\n\
          Usage:\n\
          \x20 slip [--config FILE] <deploy|rerun|from-step> <ENV> [STEP]\n\
-         \x20 slip doctor [--for create|publish]\n\
+         \x20 slip doctor [--for create|publish] [--json]\n\
          \x20 slip init\n\
          \x20 slip new <name|.> [OPTIONS]\n\
          \x20 slip publish github [--owner OWNER] [--repo NAME] [--visibility private|public]\n\

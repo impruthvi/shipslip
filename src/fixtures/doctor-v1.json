@@ -1,0 +1,90 @@
+{
+  "schema": 1,
+  "exit_code": 3,
+  "ready": false,
+  "purposes": ["create", "publish"],
+  "findings": [
+    {
+      "requirement": {"id": "git", "purposes": ["create", "publish"], "blocking": true},
+      "state": {"status": "ok", "path": "/fixture/brew/bin/git", "version": "git 2.53.0"},
+      "location": {"entry": "/fixture/bin/git", "path": "/fixture/brew/bin/git", "off_path": false},
+      "owner": "homebrew",
+      "managers": [],
+      "shadowing": null,
+      "detail": null,
+      "version": "git 2.53.0"
+    },
+    {
+      "requirement": {"id": "node", "purposes": ["create"], "blocking": true},
+      "state": {"status": "missing"},
+      "location": null,
+      "owner": "unknown",
+      "managers": ["nvm", "fnm"],
+      "shadowing": null,
+      "detail": "Node is managed; install it through its provider.",
+      "version": null
+    },
+    {
+      "requirement": {"id": "laravel", "purposes": ["create"], "blocking": true},
+      "state": {"status": "too_old", "found": "5.30.0", "need": "5.31.1"},
+      "location": {"entry": "/fixture/bin/laravel", "path": "/fixture/herd-lite/laravel", "off_path": false},
+      "owner": "herd_lite",
+      "managers": ["herd_lite"],
+      "shadowing": "/fixture/bin/laravel",
+      "detail": null,
+      "version": "5.30.0"
+    },
+    {
+      "requirement": {"id": "php.pdo_sqlite", "purposes": ["create"], "blocking": true},
+      "state": {"status": "broken", "path": "/fixture/brew/bin/php", "error": "extension probe failed"},
+      "location": {"entry": "/fixture/bin/php", "path": "/fixture/brew/bin/php", "off_path": false},
+      "owner": "homebrew",
+      "managers": [],
+      "shadowing": null,
+      "detail": null,
+      "version": null
+    },
+    {
+      "requirement": {"id": "composer", "purposes": ["create"], "blocking": true},
+      "state": {"status": "off_path", "path": "/fixture/composer/vendor/bin/composer", "dir": "/fixture/composer/vendor/bin"},
+      "location": {"entry": "/fixture/composer/vendor/bin/composer", "path": "/fixture/composer/vendor/bin/composer", "off_path": true},
+      "owner": "composer_global",
+      "managers": [],
+      "shadowing": null,
+      "detail": null,
+      "version": "Composer 2.10.2"
+    },
+    {
+      "requirement": {"id": "git.user.name", "purposes": ["create"], "blocking": true},
+      "state": {"status": "ok", "path": "/fixture/brew/bin/git", "version": "Example User"},
+      "location": {"entry": "/fixture/bin/git", "path": "/fixture/brew/bin/git", "off_path": false},
+      "owner": "homebrew",
+      "managers": [],
+      "shadowing": null,
+      "detail": null,
+      "version": null
+    },
+    {
+      "requirement": {"id": "github.auth", "purposes": ["publish"], "blocking": true},
+      "state": {"status": "unverified", "reason": "could not reach GitHub within 10 s"},
+      "location": {"entry": "/fixture/bin/gh", "path": "/fixture/mise/gh", "off_path": false},
+      "owner": "mise",
+      "managers": ["mise"],
+      "shadowing": null,
+      "detail": null,
+      "version": null
+    }
+  ],
+  "facts": {
+    "homebrew": {"binary": "/fixture/brew/bin/brew", "prefix": "/fixture/brew", "bin": "/fixture/brew/bin", "writable": false},
+    "composer_home": "/fixture/composer",
+    "composer_bin": "/fixture/composer/vendor/bin",
+    "managers": ["herd", "herd_lite", "asdf", "mise", "nvm", "fnm"],
+    "providers": {"node": ["nvm", "fnm"], "php": ["herd"]},
+    "command_line_tools": false
+  },
+  "warnings": [
+    {"path": "/fixture/composer/config.json", "message": "invalid config; using vendor/bin"}
+  ],
+  "error": null
+}

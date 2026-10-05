@@ -1,0 +1,22 @@
+[
+  {
+    "schema": 1,
+    "exit_code": 1,
+    "ready": false,
+    "purposes": [],
+    "findings": [],
+    "facts": null,
+    "warnings": [],
+    "error": "could not inspect working directory"
+  },
+  {
+    "schema": 1,
+    "exit_code": 2,
+    "ready": false,
+    "purposes": [],
+    "findings": [],
+    "facts": null,
+    "warnings": [],
+    "error": "--for must be create or publish"
+  }
+]
