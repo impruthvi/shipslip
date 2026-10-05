@@ -97,13 +97,21 @@ impl PublishTools {
         root: &Path,
         args: &[&str],
     ) -> Result<std::process::Output, PublishError> {
-        let mut command = tokio::process::Command::new(&self.gh);
+        Self::gh_output_with(&self.gh, &self.credentials, root, args).await
+    }
+    async fn gh_output_with(
+        gh: &Path,
+        credentials: &GhCredentials,
+        root: &Path,
+        args: &[&str],
+    ) -> Result<std::process::Output, PublishError> {
+        let mut command = tokio::process::Command::new(gh);
         command
             .current_dir(root)
             .args(args)
             .stdin(Stdio::null())
             .kill_on_drop(true);
-        self.credentials.apply(&mut command);
+        credentials.apply(&mut command);
         for name in crate::git::REPOSITORY_ENV {
             command.env_remove(name);
         }
@@ -111,6 +119,19 @@ impl PublishTools {
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_HOST", "github.com");
         Ok(command.output().await?)
+    }
+    pub(crate) async fn auth_status(
+        gh: &Path,
+        credentials: &GhCredentials,
+        root: &Path,
+    ) -> Result<std::process::Output, PublishError> {
+        Self::gh_output_with(
+            gh,
+            credentials,
+            root,
+            &["auth", "status", "--hostname", "github.com", "--active"],
+        )
+        .await
     }
     async fn gh(&self, root: &Path, args: &[&str]) -> Result<String, PublishError> {
         let output = self.gh_output(root, args).await?;

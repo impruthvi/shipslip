@@ -125,6 +125,9 @@ fn local_commands_refuse_explicit_deploy_config() {
         return;
     }
     for values in [
+        vec!["--config", "/missing-config.toml", "doctor"],
+        vec!["doctor", "--config", "/missing-config.toml"],
+        vec!["doctor", "--config=/missing-config.toml"],
         vec!["--config", "/missing-config.toml", "new", "app"],
         vec!["--config", "/missing-config.toml", "publish", "github"],
         vec!["new", "app", "--config", "/missing-config.toml"],
@@ -143,7 +146,11 @@ fn local_commands_refuse_inherited_deploy_config() {
     ) {
         return;
     }
-    for values in [vec!["new", "app"], vec!["publish", "github"]] {
+    for values in [
+        vec!["new", "app"],
+        vec!["publish", "github"],
+        vec!["doctor"],
+    ] {
         let error = parse(&values).err().unwrap().to_string();
         assert!(error.contains("unset SHIPSLIP_CONFIG"), "{error}");
     }
@@ -559,4 +566,425 @@ printf secret > "$2/.env"
             .any(|path| path == ".env"));
         assert!(git.head(&root).is_err());
     });
+}
+
+struct DoctorFixture {
+    root: PathBuf,
+    context: shipslip::setup::DetectionContext,
+}
+impl DoctorFixture {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "shipslip-doctor-tests-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let mut context = shipslip::setup::DetectionContext::from_environment();
+        context.environment = BTreeMap::from([
+            ("HOME".into(), root.join("home").into_os_string()),
+            ("PATH".into(), root.join("bin").into_os_string()),
+            (
+                "COMPOSER_HOME".into(),
+                root.join("composer").into_os_string(),
+            ),
+        ]);
+        context.macos = false;
+        context.system_bin = root.join("system");
+        context.xdg_system = root.join("xdg-system");
+        context.herd_app = root.join("Herd.app");
+        context.brew_candidates = vec![];
+        fs::create_dir(root.join("home")).unwrap();
+        fs::create_dir(root.join("bin")).unwrap();
+        fs::create_dir(root.join("composer")).unwrap();
+        let fixture = Self { root, context };
+        fixture.script(
+            &fixture.root.join("bin/php"),
+            &format!(
+                "if [ \"$1\" = -m ]; then printf '%s\\n' {}; else echo 'PHP 1.0.0'; fi",
+                Self::quote(&shipslip::setup::PHP_EXTENSIONS.join("\n"))
+            ),
+        );
+        fixture.script(&fixture.root.join("bin/laravel"), &format!("if [ \"$1\" = --version ]; then echo 'Laravel Installer 5.31.1'; else printf '%s\\n' {}; fi", Self::quote(include_str!("../../fixtures/laravel-installer-5.31.1-help.txt"))));
+        for tool in ["composer", "node", "npm", "gh"] {
+            fixture.script(&fixture.root.join("bin").join(tool), "echo tool-test");
+        }
+        fixture.script(&fixture.root.join("bin/git"), "echo git-ready");
+        fixture
+    }
+    fn quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+    fn script(&self, path: &Path, body: &str) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Keep writable script descriptors out of the parallel test runner.
+        let mut writer = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "umask 077; /bin/cat > \"$1\" && /bin/chmod 700 \"$1\"",
+                "shipslip-fixture-writer",
+            ])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("#!/bin/sh\nset -eu\n{body}\n").as_bytes())
+            .unwrap();
+        let output = writer.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    async fn report(&self) -> shipslip::setup::DetectionReport {
+        shipslip::setup::detect(
+            &self.context,
+            &shipslip::setup::DetectionOptions {
+                purposes: vec![shipslip::setup::Purpose::Create],
+                root: self.root.clone(),
+                installer_options: None,
+            },
+        )
+        .await
+        .unwrap()
+    }
+    async fn run(&self, purpose: shipslip::setup::Purpose) -> Result<ExitCode, Box<dyn Error>> {
+        setup::run_with_context(
+            setup::Args {
+                purpose: Some(purpose),
+            },
+            &self.context,
+            self.root.clone(),
+        )
+        .await
+    }
+}
+impl Drop for DoctorFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn doctor_dispatches_without_project_or_terminal() {
+    if isolated("doctor_dispatches_without_project_or_terminal", None) {
+        return;
+    }
+    assert!(!io::stdin().is_terminal());
+    let command = parse(&["doctor", "--for", "create"]).unwrap().unwrap();
+    assert!(command.config.is_none());
+    let Action::Doctor(args) = command.action else {
+        panic!("wrong dispatch");
+    };
+    let fixture = DoctorFixture::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .block_on(setup::run_with_context(
+                args,
+                &fixture.context,
+                fixture.root.clone()
+            ))
+            .unwrap(),
+        ExitCode::SUCCESS
+    );
+    assert!(!fixture.root.join(".shipslip.toml").exists());
+}
+
+#[test]
+fn doctor_for_filters_requirements() {
+    if isolated("doctor_for_filters_requirements", None) {
+        return;
+    }
+    use shipslip::setup::Purpose;
+    for (values, expected) in [
+        (vec!["doctor"], None),
+        (vec!["doctor", "--for=create"], Some(Purpose::Create)),
+        (vec!["doctor", "--for", "publish"], Some(Purpose::Publish)),
+    ] {
+        let Action::Doctor(args) = parse(&values).unwrap().unwrap().action else {
+            panic!("wrong dispatch");
+        };
+        assert_eq!(args.purpose, expected);
+    }
+    let fixture = DoctorFixture::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        for purpose in [Purpose::Create, Purpose::Publish] {
+            let report = shipslip::setup::detect(
+                &fixture.context,
+                &shipslip::setup::DetectionOptions {
+                    purposes: vec![purpose],
+                    root: fixture.root.clone(),
+                    installer_options: None,
+                },
+            )
+            .await
+            .unwrap();
+            assert!(report
+                .findings
+                .iter()
+                .all(|finding| finding.requirement.purposes.contains(&purpose)));
+            if purpose == Purpose::Publish {
+                assert_eq!(report.findings.len(), 3);
+            } else {
+                assert!(!report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.requirement.id
+                        == shipslip::setup::RequirementId::GithubAuth));
+            }
+        }
+    });
+}
+
+#[test]
+fn doctor_rejects_invalid_options() {
+    if isolated("doctor_rejects_invalid_options", None) {
+        return;
+    }
+    for values in [
+        vec!["doctor", "--for"],
+        vec!["doctor", "--for="],
+        vec!["doctor", "--for=deploy"],
+        vec!["doctor", "--for=unknown"],
+        vec!["doctor", "--for=create", "--for=publish"],
+        vec!["doctor", "--json"],
+        vec!["doctor", "--unknown"],
+        vec!["doctor", "create"],
+    ] {
+        let error = parse(&values).err().unwrap();
+        assert_eq!(
+            error_exit_code(error.as_ref()),
+            ExitCode::from(2),
+            "{values:?}"
+        );
+    }
+}
+
+#[test]
+fn doctor_off_path_only_exits_zero_with_shell_warning() {
+    if let Some(output) =
+        isolated_output("doctor_off_path_only_exits_zero_with_shell_warning", None)
+    {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("export PATH='"), "{stdout}");
+        assert!(stdout.contains(":\"$PATH\""), "{stdout}");
+        assert!(
+            stdout.contains("installed outside PATH; usable by slip"),
+            "{stdout}"
+        );
+        return;
+    }
+    let fixture = DoctorFixture::new();
+    let bin = fixture.root.join("composer/vendor/bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::rename(fixture.root.join("bin/laravel"), bin.join("laravel")).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .block_on(fixture.run(shipslip::setup::Purpose::Create))
+            .unwrap(),
+        ExitCode::SUCCESS
+    );
+}
+
+#[test]
+fn doctor_config_warning_does_not_change_readiness() {
+    if let Some(output) = isolated_output("doctor_config_warning_does_not_change_readiness", None) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("config.json") && stdout.contains("Warning:"),
+            "{stdout}"
+        );
+        return;
+    }
+    let fixture = DoctorFixture::new();
+    fs::write(fixture.root.join("composer/config.json"), "malformed").unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .block_on(fixture.run(shipslip::setup::Purpose::Create))
+            .unwrap(),
+        ExitCode::SUCCESS
+    );
+}
+
+#[test]
+fn doctor_missing_requirements_exit_three() {
+    if let Some(output) = isolated_output("doctor_missing_requirements_exit_three", None) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("node: missing") && stdout.contains("npm: missing"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("Not ready:"), "{stdout}");
+        return;
+    }
+    let fixture = DoctorFixture::new();
+    fs::remove_file(fixture.root.join("bin/node")).unwrap();
+    fs::remove_file(fixture.root.join("bin/npm")).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    assert_eq!(
+        runtime
+            .block_on(fixture.run(shipslip::setup::Purpose::Create))
+            .unwrap(),
+        ExitCode::from(3)
+    );
+}
+
+#[test]
+fn doctor_unverified_only_exits_zero() {
+    if let Some(output) = isolated_output("doctor_unverified_only_exits_zero", None) {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("warning: unverified"), "{stdout}");
+        return;
+    }
+    let fixture = DoctorFixture::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut report = fixture.report().await;
+        report.findings[0].state = shipslip::setup::FindingState::Unverified {
+            reason: "probe unavailable".into(),
+        };
+        assert!(report.ready());
+        println!(
+            "{}",
+            setup::render(&report, &[shipslip::setup::Purpose::Create])
+        );
+        assert_eq!(setup::report_exit_code(&report), ExitCode::SUCCESS);
+    });
+}
+
+#[test]
+fn doctor_internal_failure_exits_one() {
+    let fixture = DoctorFixture::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let error = runtime
+        .block_on(setup::run_with_context(
+            setup::Args::default(),
+            &fixture.context,
+            fixture.root.join("missing"),
+        ))
+        .unwrap_err();
+    assert_eq!(error_exit_code(error.as_ref()), ExitCode::FAILURE);
+}
+
+#[test]
+fn doctor_output_escapes_external_text() {
+    let fixture = DoctorFixture::new();
+    fixture.script(
+        &fixture.root.join("bin/node"),
+        "printf '\x1b[31mfailed\x1b[0m' >&2; exit 1",
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let report = runtime.block_on(fixture.report());
+    let output = setup::render(&report, &[shipslip::setup::Purpose::Create]);
+    assert!(!output.contains('\x1b'));
+    assert!(output.contains("failed"));
+    let quoted_dir = Path::new("/some user's tools");
+    assert_eq!(
+        setup::shell_line(quoted_dir),
+        "export PATH='/some user'\\''s tools':\"$PATH\""
+    );
+}
+
+#[test]
+fn fresh_process_finds_custom_composer_bin_dir() {
+    if let Some(root) = std::env::var_os("SHIPSLIP_COMPOSER_FIXTURE") {
+        let root = PathBuf::from(root);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = runtime
+            .block_on(shipslip::setup::detect(
+                &shipslip::setup::DetectionContext::from_environment(),
+                &shipslip::setup::DetectionOptions {
+                    purposes: vec![shipslip::setup::Purpose::Create],
+                    root: root.clone(),
+                    installer_options: None,
+                },
+            ))
+            .unwrap();
+        assert!(report.ready());
+        let laravel = report
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.requirement.id == shipslip::setup::RequirementId::Tool("laravel")
+            })
+            .unwrap();
+        assert!(
+            matches!(&laravel.state, shipslip::setup::FindingState::OffPath { path, .. } if path == &root.join("composer/custom tools/laravel"))
+        );
+        return;
+    }
+    let fixture = DoctorFixture::new();
+    let bin = fixture.root.join("composer/custom tools");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        fixture.root.join("composer/config.json"),
+        r#"{"config":{"bin-dir":"custom tools"}}"#,
+    )
+    .unwrap();
+    fs::rename(fixture.root.join("bin/laravel"), bin.join("laravel")).unwrap();
+    fixture.script(
+        &fixture.root.join("bin/composer"),
+        "[ \"$*\" = --version ]; echo composer-ready",
+    );
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "local_tests::fresh_process_finds_custom_composer_bin_dir",
+            "--nocapture",
+        ])
+        .env("SHIPSLIP_COMPOSER_FIXTURE", &fixture.root)
+        .envs(&fixture.context.environment)
+        .env_remove("SHIPSLIP_CONFIG")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

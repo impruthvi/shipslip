@@ -27,6 +27,7 @@ pub mod publish;
 pub mod receipt;
 mod runner;
 mod script;
+pub mod setup;
 pub mod transport;
 
 pub use engine::{

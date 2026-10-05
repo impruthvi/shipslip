@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal};
 use std::path::Path;
 use std::process::ExitCode;
 
-use shipslip::create::{default_operations_root, resolve_tool};
+use shipslip::create::default_operations_root;
 use shipslip::logs::escape;
 use shipslip::publish::{
     self, PublishError, PublishEvent, PublishRequest, PublishResult, PublishTools, Visibility,
@@ -111,7 +111,11 @@ async fn prompt(
     Ok(answer.unwrap_or_else(|| super::exit_interrupted()))
 }
 fn tools() -> Result<PublishTools, Box<dyn Error>> {
-    Ok(PublishTools::new(resolve_tool("git")?, resolve_tool("gh")?))
+    Ok(shipslip::setup::detect_tools(
+        &shipslip::setup::DetectionContext::from_environment(),
+        &["git", "gh"],
+    )
+    .publish_tools()?)
 }
 
 #[derive(Debug)]
