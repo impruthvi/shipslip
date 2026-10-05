@@ -447,6 +447,23 @@ fn resolve_tool_in(
         .transpose()
 }
 
+/// Homebrew writes into these directories, not the prefix itself: an Intel
+/// prefix of `/usr/local` stays root-owned while Homebrew still works.
+fn homebrew_writable(prefix: &Path) -> bool {
+    let directories: Vec<_> = ["Cellar", "bin"]
+        .into_iter()
+        .map(|name| prefix.join(name))
+        .filter(|path| path.is_dir())
+        .collect();
+    if directories.is_empty() {
+        crate::create::writable(prefix).is_ok()
+    } else {
+        directories
+            .iter()
+            .all(|path| crate::create::writable(path).is_ok())
+    }
+}
+
 fn discover_paths(
     context: &DetectionContext,
 ) -> (MachineFacts, Vec<DiscoveryWarning>, Vec<PathBuf>) {
@@ -472,7 +489,7 @@ fn discover_paths(
                 .to_path_buf();
         }
         let bin = prefix.join("bin");
-        let writable = crate::create::writable(&prefix).is_ok();
+        let writable = homebrew_writable(&prefix);
         known.push(bin.clone());
         facts.homebrew = Some(Homebrew {
             binary,
@@ -1486,7 +1503,11 @@ pub fn plan_setup(
     {
         let id = finding.requirement.id;
         if !context.macos {
-            plan.guidance.push(guidance(id, "Install or configure this requirement using your Linux distribution or its provider; Linux repair is manual in this release.".into(), vec![]));
+            plan.guidance.push(match id {
+                RequirementId::Identity(field) => guidance(id, "Configure your Git identity.".into(), vec![format!("git config --global {field} <value>")]),
+                RequirementId::GithubAuth => guidance(id, "Log in to GitHub, or set GH_TOKEN. gh may offer to change Git's credential helper.".into(), vec!["gh auth login --hostname github.com".into()]),
+                _ => guidance(id, "Install or configure this requirement using your Linux distribution or its provider; Linux repair is manual in this release.".into(), vec![]),
+            });
             continue;
         }
         let RequirementId::Tool(name) = id else {
@@ -1564,7 +1585,7 @@ pub fn plan_setup(
                     formulae.insert(formula);
                     brew_satisfies.push(id);
                 }
-                Some(brew) if !brew.writable => plan.guidance.push(guidance(id, format!("Homebrew prefix {} is not writable by this user; resolve its ownership before installing.", brew.prefix.display()), vec![])),
+                Some(brew) if !brew.writable => plan.guidance.push(guidance(id, format!("Homebrew at {} is not writable by this user (Cellar or bin); see `brew doctor` for its ownership guidance before installing.", brew.prefix.display()), vec!["brew doctor".into()])),
                 Some(_) => plan.guidance.push(guidance(id, "Install macOS Command Line Tools before using Homebrew.".into(), vec!["xcode-select --install".into()])),
                 None => plan.guidance.push(guidance(id, "Homebrew is not installed. Follow the official Homebrew installation instructions at https://brew.sh.".into(), vec![r#"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#.into()])),
             }
@@ -1908,6 +1929,8 @@ impl SetupSession {
                     report: &current,
                     path: &record_path,
                     record: &mut record,
+                    unsaved: 0,
+                    saved_at: tokio::time::Instant::now(),
                 },
                 &mut interrupted,
                 &mut emit,
@@ -2005,6 +2028,8 @@ struct RunningSetup<'a> {
     report: &'a DetectionReport,
     path: &'a Path,
     record: &'a mut SetupRecord,
+    unsaved: usize,
+    saved_at: tokio::time::Instant,
 }
 
 async fn run_setup_action(
@@ -2176,7 +2201,14 @@ fn save_action_output(
     if output.len() > 200 {
         output.remove(0);
     }
-    save_setup_record(running.path, running.record)?;
+    // Every save syncs the whole record; batch chatty installers. The caller
+    // saves again when the action finishes.
+    running.unsaved += 1;
+    if running.unsaved >= 50 || running.saved_at.elapsed() >= std::time::Duration::from_secs(1) {
+        save_setup_record(running.path, running.record)?;
+        running.unsaved = 0;
+        running.saved_at = tokio::time::Instant::now();
+    }
     emit(SetupEvent::Output {
         index: running.index,
         line: line.into(),
@@ -3090,8 +3122,10 @@ esac"#,
                 .unwrap()
                 .writable
         );
-        fs::set_permissions(fixture.root.join("brew"), fs::Permissions::from_mode(0o555)).unwrap();
+        let bin = fixture.root.join("brew/bin");
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o555)).unwrap();
         let facts = detect_tools(&fixture.context, &[]).facts;
+        fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
         assert!(!facts.homebrew.unwrap().writable);
         assert_eq!(fs::read_dir(fixture.root.join("brew")).unwrap().count(), 1);
     }

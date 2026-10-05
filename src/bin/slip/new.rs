@@ -275,10 +275,13 @@ pub(super) async fn run(args: Args) -> Result<ExitCode, Box<dyn Error>> {
         },
         branch: args.branch,
     };
+    let start = std::env::current_dir()?;
+    // Rerunning cannot fix an invalid request or an occupied destination.
+    request.check(&start)?;
     let rerun = rerun_command(&request);
     let preview = match prepare_creation(
         request,
-        &std::env::current_dir()?,
+        &start,
         &DetectionContext::from_environment(),
         create::default_operations_root()?,
         &mut interrupts,

@@ -213,7 +213,7 @@ async fn preview_shows_exact_commands_environment_privilege_and_path_additions()
         assert!(text.contains(&format!("{key}='1'")));
     }
     assert!(text.contains("own dependencies"));
-    assert!(text.contains("CurrentUser; Captured"));
+    assert!(text.contains("Runs as you; output shown below"));
     assert!(text.contains("Requires executable:"));
     assert!(text.contains("PATH additions:"));
     assert!(text.contains(
