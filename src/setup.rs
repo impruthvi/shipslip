@@ -1,4 +1,4 @@
-//! Read-only local toolchain discovery and health checks.
+//! Local toolchain discovery, health checks, and confirmed setup actions.
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -325,6 +325,10 @@ impl LookupReport {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SetupError {
+    #[error("another slip setup is running")]
+    Busy,
+    #[error("{0}")]
+    Invalid(String),
     #[error("could not inspect {path}: {source}")]
     Io {
         path: PathBuf,
@@ -637,7 +641,7 @@ impl Finding {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DetectionReport {
     pub findings: Vec<Finding>,
     pub facts: MachineFacts,
@@ -1207,6 +1211,982 @@ pub async fn detect(
         warnings: lookup.warnings,
     })
 }
+
+#[derive(Debug, Clone, Default)]
+pub struct SetupInputs {
+    pub name: Option<String>,
+    pub email: Option<String>,
+}
+impl SetupInputs {
+    fn get(&self, field: &str) -> Option<&str> {
+        match field {
+            "user.name" => self.name.as_deref(),
+            "user.email" => self.email.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+pub fn validate_identity(value: &str) -> Result<(), &'static str> {
+    if value.trim().is_empty() || value.chars().any(char::is_control) {
+        Err("enter a non-empty value without control characters")
+    } else {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionKind {
+    Captured,
+    Attached,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunAs {
+    CurrentUser,
+    Sudo,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionPrecondition {
+    #[serde(serialize_with = "serialize_path")]
+    pub path: PathBuf,
+    #[serde(serialize_with = "serialize_optional_path")]
+    pub canonical: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SetupAction {
+    #[serde(serialize_with = "serialize_path")]
+    pub binary: PathBuf,
+    pub args: Vec<String>,
+    pub environment: BTreeMap<String, String>,
+    pub kind: ActionKind,
+    pub runs_as: RunAs,
+    pub satisfies: Vec<RequirementId>,
+    pub preconditions: Vec<ActionPrecondition>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SetupGuidance {
+    pub requirement: Option<RequirementId>,
+    pub message: String,
+    pub commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SetupPlan {
+    pub findings_hash: String,
+    pub purposes: Vec<Purpose>,
+    pub actions: Vec<SetupAction>,
+    pub guidance: Vec<SetupGuidance>,
+    pub inputs_needed: Vec<&'static str>,
+    #[serde(serialize_with = "serialize_paths")]
+    pub path_additions: Vec<PathBuf>,
+}
+
+fn serialize_paths<S: Serializer>(paths: &[PathBuf], serializer: S) -> Result<S::Ok, S::Error> {
+    paths
+        .iter()
+        .map(|path| path.to_string_lossy())
+        .collect::<Vec<_>>()
+        .serialize(serializer)
+}
+
+#[derive(Debug)]
+pub struct SetupConfirmation {
+    fingerprint: String,
+}
+impl SetupPlan {
+    pub fn confirm(&self) -> SetupConfirmation {
+        SetupConfirmation {
+            fingerprint: self.fingerprint(),
+        }
+    }
+    fn fingerprint(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new();
+        hash.update(serde_json::to_vec(self).expect("setup plans contain JSON-safe fields"));
+        for path in &self.path_additions {
+            let bytes = path.as_os_str().as_encoded_bytes();
+            hash.update(bytes.len().to_le_bytes());
+            hash.update(bytes);
+        }
+        for action in &self.actions {
+            for path in std::iter::once(&action.binary).chain(action.preconditions.iter().flat_map(
+                |precondition| {
+                    std::iter::once(&precondition.path).chain(precondition.canonical.iter())
+                },
+            )) {
+                let bytes = path.as_os_str().as_encoded_bytes();
+                hash.update(bytes.len().to_le_bytes());
+                hash.update(bytes);
+            }
+        }
+        hash.finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+}
+
+pub fn findings_hash(context: &DetectionContext, report: &DetectionReport) -> String {
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
+    let bytes = |path: &Path| path.as_os_str().as_encoded_bytes().to_vec();
+    let findings: Vec<_> = report.findings.iter().filter(|finding| finding.requirement.id != RequirementId::GithubAuth).map(|finding| {
+        let state = match finding.state {
+            FindingState::Ok { .. } => "ok",
+            FindingState::Missing => "missing",
+            FindingState::TooOld { .. } => "too_old",
+            FindingState::Broken { .. } => "broken",
+            FindingState::OffPath { .. } => "off_path",
+            FindingState::Unverified { .. } => "unverified",
+        };
+        json!({
+            "id": finding.requirement.id, "blocking": finding.requirement.blocking,
+            "state": state, "path": finding.location.as_ref().map(|location| bytes(&location.path)),
+            "owner": finding.owner, "managers": finding.managers,
+            "shadowing": finding.shadowing.as_deref().map(bytes),
+        })
+    }).collect();
+    let eligibility = json!({
+        "macos": context.macos, "findings": findings,
+        "providers": report.facts.providers,
+        "homebrew": report.facts.homebrew.as_ref().map(|brew| json!({
+            "binary": bytes(&brew.binary), "prefix": bytes(&brew.prefix), "bin": bytes(&brew.bin), "writable": brew.writable,
+        })),
+        "composer_bin": report.facts.composer_bin.as_deref().map(bytes),
+        "command_line_tools": report.facts.command_line_tools,
+    });
+    Sha256::digest(serde_json::to_vec(&eligibility).expect("eligibility contains JSON-safe fields"))
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn usable_tool(report: &DetectionReport, name: &'static str) -> Option<PathBuf> {
+    report
+        .findings
+        .iter()
+        .find(|finding| {
+            finding.requirement.id == RequirementId::Tool(name)
+                && matches!(
+                    finding.state,
+                    FindingState::Ok { .. } | FindingState::OffPath { .. }
+                )
+        })
+        .and_then(|finding| finding.location.as_ref())
+        .map(|location| location.path.clone())
+}
+
+fn managed(owner: Owner) -> bool {
+    matches!(
+        owner,
+        Owner::Herd | Owner::HerdLite | Owner::Asdf | Owner::Mise | Owner::Nvm | Owner::Fnm
+    )
+}
+
+fn manager_guidance(manager: Manager, name: &str) -> (&'static str, String) {
+    match manager {
+        Manager::Nvm => ("nvm provides this tool", "nvm install --lts".into()),
+        Manager::Fnm => ("fnm provides this tool", "fnm install --lts".into()),
+        Manager::Herd => (
+            "Herd provides this tool; update it through Herd",
+            "herd --help".into(),
+        ),
+        Manager::HerdLite => (
+            "php.new provides this tool; follow its upgrade instructions",
+            "https://php.new".into(),
+        ),
+        Manager::Asdf => (
+            "asdf provides this tool",
+            format!(
+                "asdf install {} latest",
+                if matches!(name, "node" | "npm") {
+                    "nodejs"
+                } else {
+                    name
+                }
+            ),
+        ),
+        Manager::Mise => (
+            "mise provides this tool",
+            format!(
+                "mise use --global {}@latest",
+                if name == "npm" { "node" } else { name }
+            ),
+        ),
+    }
+}
+
+fn action(binary: PathBuf, args: Vec<String>, satisfies: Vec<RequirementId>) -> SetupAction {
+    let canonical = fs::canonicalize(&binary).ok();
+    SetupAction {
+        preconditions: vec![ActionPrecondition {
+            path: binary.clone(),
+            canonical,
+        }],
+        binary,
+        args,
+        satisfies,
+        environment: BTreeMap::new(),
+        kind: ActionKind::Captured,
+        runs_as: RunAs::CurrentUser,
+    }
+}
+
+pub fn plan_setup(
+    context: &DetectionContext,
+    report: &DetectionReport,
+    inputs: &SetupInputs,
+) -> Result<SetupPlan, SetupError> {
+    for value in [inputs.name.as_deref(), inputs.email.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        validate_identity(value).map_err(|error| SetupError::Invalid(error.into()))?;
+    }
+    let mut plan = SetupPlan {
+        findings_hash: findings_hash(context, report),
+        purposes: [Purpose::Create, Purpose::Publish]
+            .into_iter()
+            .filter(|purpose| {
+                report
+                    .findings
+                    .iter()
+                    .any(|finding| finding.requirement.purposes.contains(purpose))
+            })
+            .collect(),
+        actions: vec![],
+        guidance: vec![],
+        inputs_needed: vec![],
+        path_additions: report
+            .facts
+            .homebrew
+            .iter()
+            .map(|brew| brew.bin.clone())
+            .chain(report.facts.composer_bin.iter().cloned())
+            .collect(),
+    };
+    let guidance = |id, message: String, commands| SetupGuidance {
+        requirement: Some(id),
+        message,
+        commands,
+    };
+    let mut formulae = std::collections::BTreeSet::new();
+    let mut brew_satisfies = Vec::new();
+    let mut installer = None;
+    for finding in report
+        .findings
+        .iter()
+        .filter(|finding| finding.state.is_failure())
+    {
+        let id = finding.requirement.id;
+        if !context.macos {
+            plan.guidance.push(guidance(id, "Install or configure this requirement using your Linux distribution or its provider; Linux repair is manual in this release.".into(), vec![]));
+            continue;
+        }
+        let RequirementId::Tool(name) = id else {
+            match id {
+                RequirementId::GithubAuth => plan.guidance.push(guidance(id, "Log in to GitHub, or set GH_TOKEN. gh may offer to change Git's credential helper.".into(), vec!["gh auth login --hostname github.com".into()])),
+                RequirementId::Extension(_) => plan.guidance.push(guidance(id, "Enable this extension in the PHP used by slip.".into(), if finding.owner == Owner::Homebrew { vec!["brew reinstall php".into()] } else { vec![] })),
+                RequirementId::Identity(_) => {},
+                RequirementId::Tool(_) => unreachable!(),
+            }
+            continue;
+        };
+        if managed(finding.owner)
+            || (matches!(finding.state, FindingState::Missing) && !finding.managers.is_empty())
+        {
+            let providers: Vec<_> = if finding.managers.is_empty() {
+                vec![match finding.owner {
+                    Owner::Herd => Manager::Herd,
+                    Owner::HerdLite => Manager::HerdLite,
+                    Owner::Asdf => Manager::Asdf,
+                    Owner::Mise => Manager::Mise,
+                    Owner::Nvm => Manager::Nvm,
+                    Owner::Fnm => Manager::Fnm,
+                    _ => unreachable!(),
+                }]
+            } else {
+                finding.managers.clone()
+            };
+            let suggestions: Vec<_> = providers
+                .iter()
+                .map(|manager| manager_guidance(*manager, name))
+                .collect();
+            plan.guidance.push(guidance(
+                id,
+                suggestions
+                    .iter()
+                    .map(|(message, _)| *message)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                suggestions
+                    .into_iter()
+                    .map(|(_, command)| command)
+                    .collect(),
+            ));
+        } else if let Some(path) = &finding.shadowing {
+            plan.guidance.push(guidance(
+                id,
+                format!(
+                    "A failing copy at {} shadows the install destination; resolve it first.",
+                    path.display()
+                ),
+                vec![],
+            ));
+        } else if name == "laravel"
+            && matches!(
+                finding.state,
+                FindingState::Missing | FindingState::TooOld { .. }
+            )
+        {
+            installer = Some(id);
+        } else if report.facts.command_line_tools == Some(false)
+            && finding
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("Command Line Tools"))
+        {
+            plan.guidance.push(guidance(
+                id,
+                "Install macOS Command Line Tools before using the system shim.".into(),
+                vec!["xcode-select --install".into()],
+            ));
+        } else if matches!(finding.state, FindingState::Missing) {
+            match &report.facts.homebrew {
+                Some(brew) if brew.writable && report.facts.command_line_tools != Some(false) => {
+                    let formula = if name == "npm" { "node" } else { name };
+                    formulae.insert(formula);
+                    brew_satisfies.push(id);
+                }
+                Some(brew) if !brew.writable => plan.guidance.push(guidance(id, format!("Homebrew prefix {} is not writable by this user; resolve its ownership before installing.", brew.prefix.display()), vec![])),
+                Some(_) => plan.guidance.push(guidance(id, "Install macOS Command Line Tools before using Homebrew.".into(), vec!["xcode-select --install".into()])),
+                None => plan.guidance.push(guidance(id, "Homebrew is not installed. Follow the official Homebrew installation instructions at https://brew.sh.".into(), vec![r#"/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)""#.into()])),
+            }
+        } else {
+            plan.guidance.push(guidance(id, "Repair or upgrade this tool manually; upgrading a shared formula affects every project using it.".into(), if finding.owner == Owner::Homebrew { vec![format!("brew upgrade {}", if name == "npm" { "node" } else { name })] } else { vec![] }));
+        }
+    }
+    let brew = report.facts.homebrew.as_ref();
+    let git = usable_tool(report, "git").or_else(|| {
+        formulae
+            .contains("git")
+            .then(|| brew.unwrap().bin.join("git"))
+    });
+    let mut identity = Vec::new();
+    if context.macos {
+        for finding in report
+            .findings
+            .iter()
+            .filter(|finding| matches!(finding.requirement.id, RequirementId::Identity(_)))
+        {
+            let RequirementId::Identity(field) = finding.requirement.id else {
+                unreachable!()
+            };
+            let needs_input = matches!(finding.state, FindingState::Missing)
+                || (formulae.contains("git")
+                    && matches!(finding.state, FindingState::Unverified { .. }));
+            if !needs_input {
+                continue;
+            }
+            if let Some(git) = &git {
+                if let Some(value) = inputs.get(field) {
+                    identity.push(action(
+                        git.clone(),
+                        vec![
+                            "config".into(),
+                            "--global".into(),
+                            field.into(),
+                            value.trim().into(),
+                        ],
+                        vec![finding.requirement.id],
+                    ));
+                } else {
+                    plan.inputs_needed.push(field);
+                }
+            } else {
+                plan.guidance.push(guidance(
+                    finding.requirement.id,
+                    "Configure Git identity after Git is available.".into(),
+                    vec![format!("git config --global {field} <value>")],
+                ));
+            }
+        }
+    }
+    if !formulae.contains("git") {
+        plan.actions.append(&mut identity);
+    }
+    if !formulae.is_empty() {
+        let mut install = action(
+            brew.unwrap().binary.clone(),
+            std::iter::once("install")
+                .chain(
+                    ["php", "composer", "node", "gh", "git"]
+                        .into_iter()
+                        .filter(|formula| formulae.contains(formula)),
+                )
+                .map(String::from)
+                .collect(),
+            brew_satisfies,
+        );
+        install.environment = [
+            "HOMEBREW_NO_AUTO_UPDATE",
+            "HOMEBREW_NO_INSTALL_UPGRADE",
+            "HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK",
+            "HOMEBREW_NO_INSTALL_CLEANUP",
+        ]
+        .into_iter()
+        .map(|key| (key.into(), "1".into()))
+        .collect();
+        plan.actions.push(install);
+    }
+    plan.actions.append(&mut identity);
+    if let Some(id) = installer {
+        if let Some(composer) = usable_tool(report, "composer").or_else(|| {
+            formulae
+                .contains("composer")
+                .then(|| brew.unwrap().bin.join("composer"))
+        }) {
+            plan.actions.push(action(
+                composer,
+                vec![
+                    "global".into(),
+                    "require".into(),
+                    "laravel/installer".into(),
+                ],
+                vec![id],
+            ));
+        } else {
+            plan.guidance.push(guidance(
+                id,
+                "Install or repair Composer before installing the Laravel installer.".into(),
+                vec!["composer global require laravel/installer".into()],
+            ));
+        }
+    }
+    Ok(plan)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionState {
+    NotStarted,
+    Running,
+    Ok,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActionRecord {
+    pub state: ActionState,
+    pub exit_code: Option<i32>,
+    pub output: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetupRecord {
+    pub schema: u32,
+    pub plan: SetupPlan,
+    pub actions: Vec<ActionRecord>,
+    pub exit_code: Option<u8>,
+    pub final_report: Option<DetectionReport>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum SetupEvent {
+    Record {
+        #[serde(serialize_with = "serialize_path")]
+        path: PathBuf,
+    },
+    ActionStarted {
+        index: usize,
+    },
+    Output {
+        index: usize,
+        line: String,
+    },
+    Interrupted {
+        index: usize,
+    },
+    ActionFinished {
+        index: usize,
+        exit_code: Option<i32>,
+        state: ActionState,
+    },
+    Finished {
+        exit_code: u8,
+    },
+}
+
+fn setup_io(path: &Path, source: std::io::Error) -> SetupError {
+    SetupError::Io {
+        path: path.into(),
+        source,
+    }
+}
+
+fn save_setup_record(path: &Path, record: &SetupRecord) -> Result<(), SetupError> {
+    let bytes = serde_json::to_vec_pretty(record)
+        .map_err(|error| SetupError::Invalid(error.to_string()))?;
+    crate::private_file::write_atomic(path, &bytes).map_err(|error| setup_io(path, error))
+}
+
+fn new_setup_record(root: &Path, plan: &SetupPlan) -> Result<(PathBuf, SetupRecord), SetupError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let directory = root.join("setup");
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(&directory)
+        .map_err(|error| setup_io(&directory, error))?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = directory.join(format!(
+        "{stamp:x}-{}-{}.json",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    Ok((
+        path,
+        SetupRecord {
+            schema: 1,
+            plan: plan.clone(),
+            exit_code: None,
+            final_report: None,
+            error: None,
+            actions: plan
+                .actions
+                .iter()
+                .map(|_| ActionRecord {
+                    state: ActionState::NotStarted,
+                    exit_code: None,
+                    output: vec![],
+                })
+                .collect(),
+        },
+    ))
+}
+
+pub fn record_setup_outcome(
+    root: &Path,
+    plan: &SetupPlan,
+    report: &DetectionReport,
+    exit_code: u8,
+    error: Option<String>,
+) -> Result<PathBuf, SetupError> {
+    let (path, mut record) = new_setup_record(root, plan)?;
+    record.exit_code = Some(exit_code);
+    record.final_report = Some(report.clone());
+    record.error = error;
+    save_setup_record(&path, &record)?;
+    Ok(path)
+}
+
+#[derive(Debug)]
+pub struct SetupOutcome {
+    pub exit_code: u8,
+    pub report: Option<Box<DetectionReport>>,
+    pub record_path: PathBuf,
+    pub error: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum SetupApplyResult {
+    Changed {
+        report: Box<DetectionReport>,
+        record_path: PathBuf,
+    },
+    Finished(SetupOutcome),
+}
+
+pub struct SetupEnvironment<'a> {
+    pub context: &'a DetectionContext,
+    pub options: &'a DetectionOptions,
+}
+
+#[derive(Debug)]
+pub struct SetupSession {
+    _lock: crate::create::OperationLock,
+    operations_root: PathBuf,
+}
+impl SetupSession {
+    pub fn acquire(operations_root: &Path) -> Result<Self, SetupError> {
+        let lock = crate::create::OperationLock::acquire(operations_root, Path::new("setup"))
+            .map_err(|error| match error {
+                CreateError::Busy(_) => SetupError::Busy,
+                error => SetupError::Create(error),
+            })?;
+        Ok(Self {
+            _lock: lock,
+            operations_root: operations_root.into(),
+        })
+    }
+
+    pub async fn apply(
+        &self,
+        plan: &SetupPlan,
+        confirmation: SetupConfirmation,
+        environment: SetupEnvironment<'_>,
+        mut interrupted: tokio::sync::watch::Receiver<bool>,
+        mut emit: impl FnMut(SetupEvent),
+    ) -> Result<SetupApplyResult, SetupError> {
+        let SetupEnvironment { context, options } = environment;
+        if confirmation.fingerprint != plan.fingerprint() || !plan.inputs_needed.is_empty() {
+            return Err(SetupError::Invalid(
+                "setup plan does not match its confirmation or still needs identity inputs".into(),
+            ));
+        }
+        let mut current = detect(context, options).await?;
+        if findings_hash(context, &current) != plan.findings_hash {
+            let record_path = record_setup_outcome(
+                &self.operations_root,
+                plan,
+                &current,
+                3,
+                Some("machine changed; re-plan required".into()),
+            )?;
+            return Ok(SetupApplyResult::Changed {
+                report: Box::new(current),
+                record_path,
+            });
+        }
+        let (record_path, mut record) = new_setup_record(&self.operations_root, plan)?;
+        save_setup_record(&record_path, &record)?;
+        emit(SetupEvent::Record {
+            path: record_path.clone(),
+        });
+        let mut exit_code = 0;
+        for (index, action) in plan.actions.iter().enumerate() {
+            if *interrupted.borrow() {
+                exit_code = 130;
+                break;
+            }
+            for precondition in &action.preconditions {
+                if !executable(&precondition.path)
+                    || precondition.canonical.as_ref().is_some_and(|expected| {
+                        fs::canonicalize(&precondition.path).as_ref().ok() != Some(expected)
+                    })
+                {
+                    record.error = Some(format!(
+                        "failed precondition: {} must be the approved executable",
+                        precondition.path.display()
+                    ));
+                    record.actions[index].state = ActionState::Failed;
+                    exit_code = 1;
+                    break;
+                }
+            }
+            if exit_code != 0 {
+                break;
+            }
+            record.actions[index].state = ActionState::Running;
+            save_setup_record(&record_path, &record)?;
+            emit(SetupEvent::ActionStarted { index });
+            let result = run_setup_action(
+                action,
+                &mut RunningSetup {
+                    index,
+                    context,
+                    options,
+                    report: &current,
+                    path: &record_path,
+                    record: &mut record,
+                },
+                &mut interrupted,
+                &mut emit,
+            )
+            .await;
+            match result {
+                Ok(code) => {
+                    let stopped = *interrupted.borrow()
+                        || record.actions[index].state == ActionState::Interrupted;
+                    record.actions[index].exit_code = code;
+                    record.actions[index].state = if stopped {
+                        ActionState::Interrupted
+                    } else if code == Some(0) {
+                        ActionState::Ok
+                    } else {
+                        ActionState::Failed
+                    };
+                    exit_code = if stopped {
+                        130
+                    } else if code == Some(0) {
+                        0
+                    } else {
+                        1
+                    };
+                    if exit_code == 1 {
+                        record.error = Some(format!(
+                            "setup action {} failed (exit status {code:?})",
+                            index + 1
+                        ));
+                    }
+                }
+                Err(error) => {
+                    record.error = Some(error.to_string());
+                    record.actions[index].state = if *interrupted.borrow() {
+                        ActionState::Interrupted
+                    } else {
+                        ActionState::Failed
+                    };
+                    exit_code = if *interrupted.borrow() { 130 } else { 1 };
+                }
+            }
+            save_setup_record(&record_path, &record)?;
+            emit(SetupEvent::ActionFinished {
+                index,
+                exit_code: record.actions[index].exit_code,
+                state: record.actions[index].state,
+            });
+            if exit_code != 0 {
+                break;
+            }
+            match detect(context, options).await {
+                Ok(report) => current = report,
+                Err(error) => {
+                    record.error = Some(error.to_string());
+                    exit_code = 1;
+                    break;
+                }
+            }
+        }
+        // Refresh partial progress after a failed or interrupted action as well.
+        if exit_code != 0 {
+            match detect(context, options).await {
+                Ok(report) => current = report,
+                Err(error) => {
+                    record.error = Some(error.to_string());
+                    if exit_code != 130 {
+                        exit_code = 1;
+                    }
+                }
+            }
+        }
+        if exit_code == 0 {
+            exit_code = if current.ready() { 0 } else { 3 };
+        }
+        if *interrupted.borrow() {
+            exit_code = 130;
+        }
+        record.exit_code = Some(exit_code);
+        record.final_report = Some(current.clone());
+        save_setup_record(&record_path, &record)?;
+        emit(SetupEvent::Finished { exit_code });
+        Ok(SetupApplyResult::Finished(SetupOutcome {
+            exit_code,
+            report: Some(Box::new(current)),
+            record_path,
+            error: record.error,
+        }))
+    }
+}
+
+struct RunningSetup<'a> {
+    index: usize,
+    context: &'a DetectionContext,
+    options: &'a DetectionOptions,
+    report: &'a DetectionReport,
+    path: &'a Path,
+    record: &'a mut SetupRecord,
+}
+
+async fn run_setup_action(
+    action: &SetupAction,
+    running: &mut RunningSetup<'_>,
+    interrupted: &mut tokio::sync::watch::Receiver<bool>,
+    emit: &mut impl FnMut(SetupEvent),
+) -> Result<Option<i32>, SetupError> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let tools: Vec<_> = running
+        .report
+        .findings
+        .iter()
+        .filter_map(|finding| match finding.requirement.id {
+            RequirementId::Tool(name)
+                if matches!(
+                    finding.state,
+                    FindingState::Ok { .. } | FindingState::OffPath { .. }
+                ) =>
+            {
+                finding
+                    .location
+                    .as_ref()
+                    .map(|location| (name, location.path.as_path()))
+            }
+            _ => None,
+        })
+        .collect();
+    let binding = crate::create::ToolPath::from_paths(tools)?;
+    let directories = std::iter::once(binding.path.clone())
+        .chain(running.context.path_dirs())
+        .chain(
+            running
+                .report
+                .facts
+                .homebrew
+                .iter()
+                .map(|brew| brew.bin.clone()),
+        )
+        .chain(running.report.facts.composer_bin.iter().cloned());
+    let path = std::env::join_paths(directories)
+        .map_err(|error| SetupError::Invalid(error.to_string()))?;
+    let mut command = tokio::process::Command::new(&action.binary);
+    command
+        .args(&action.args)
+        .envs(&running.context.environment)
+        .envs(&action.environment)
+        .env("PATH", path)
+        .current_dir(&running.options.root);
+    crate::create::clean(&mut command);
+    command
+        .env("NO_COLOR", "1")
+        .env("FORCE_COLOR", "0")
+        .env("CLICOLOR", "0")
+        .env("TERM", "dumb");
+    if action.kind == ActionKind::Captured {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    } else {
+        command
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| setup_io(&action.binary, error))?;
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(64);
+    let mut readers = Vec::new();
+    fn reader(
+        stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+        sender: tokio::sync::mpsc::Sender<String>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stream).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if sender.send(line).await.is_err() {
+                    break;
+                }
+            }
+        })
+    }
+    if let Some(stdout) = child.stdout.take() {
+        readers.push(reader(stdout, sender.clone()));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        readers.push(reader(stderr, sender.clone()));
+    }
+    drop(sender);
+    let credentials = crate::git::GhCredentials::new(
+        [
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "SHIPSLIP_GITHUB_TOKEN",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            running
+                .context
+                .environment
+                .get(std::ffi::OsStr::new(name))
+                .and_then(|value| value.to_str())
+                .map(|value| (name.into(), value.into()))
+        }),
+    );
+    let mut status = None;
+    let mut output_done = false;
+    let mut signal_open = true;
+    let mut deadline = None;
+    loop {
+        if status.is_some() && output_done {
+            break;
+        }
+        tokio::select! {
+            biased;
+            changed = interrupted.changed(), if signal_open => {
+                if changed.is_err() { signal_open = false; }
+                else if *interrupted.borrow() && running.record.actions[running.index].state != ActionState::Interrupted {
+                    running.record.actions[running.index].state = ActionState::Interrupted;
+                    running.record.exit_code = Some(130);
+                    save_setup_record(running.path, running.record)?;
+                    if action.kind == ActionKind::Captured { emit(SetupEvent::Interrupted { index: running.index }); }
+                }
+            }
+            result = child.wait(), if status.is_none() => {
+                status = Some(result.map_err(|error| setup_io(&action.binary, error))?);
+                deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(500));
+            }
+            line = receiver.recv(), if !output_done => {
+                if let Some(line) = line {
+                    save_action_output(running, &credentials.redact(&line), emit)?;
+                    if status.is_some() { deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_millis(500)); }
+                }
+                else { output_done = true; }
+            }
+            () = tokio::time::sleep_until(deadline.unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(1))), if status.is_some() => break,
+        }
+    }
+    for reader in readers {
+        reader.abort();
+        let _ = reader.await;
+    }
+    while let Ok(line) = receiver.try_recv() {
+        save_action_output(running, &credentials.redact(&line), emit)?;
+    }
+    Ok(status.expect("loop waits for the child").code())
+}
+
+fn save_action_output(
+    running: &mut RunningSetup<'_>,
+    line: &str,
+    emit: &mut impl FnMut(SetupEvent),
+) -> Result<(), SetupError> {
+    let limit = line
+        .char_indices()
+        .map(|(index, _)| index)
+        .take_while(|index| *index <= 16 * 1024)
+        .last()
+        .unwrap_or(0);
+    let line = if line.len() > 16 * 1024 {
+        &line[..limit]
+    } else {
+        line
+    };
+    let output = &mut running.record.actions[running.index].output;
+    output.push(line.into());
+    if output.len() > 200 {
+        output.remove(0);
+    }
+    save_setup_record(running.path, running.record)?;
+    emit(SetupEvent::Output {
+        index: running.index,
+        line: line.into(),
+    });
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+#[path = "setup_repair_tests.rs"]
+mod repair_tests;
 
 #[cfg(all(test, unix))]
 mod tests {

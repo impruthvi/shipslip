@@ -125,6 +125,9 @@ fn local_commands_refuse_explicit_deploy_config() {
         return;
     }
     for values in [
+        vec!["--config", "/missing-config.toml", "setup"],
+        vec!["setup", "--config", "/missing-config.toml"],
+        vec!["setup", "--config=/missing-config.toml"],
         vec!["--config", "/missing-config.toml", "doctor"],
         vec!["doctor", "--config", "/missing-config.toml"],
         vec!["doctor", "--config=/missing-config.toml"],
@@ -150,10 +153,27 @@ fn local_commands_refuse_inherited_deploy_config() {
         vec!["new", "app"],
         vec!["publish", "github"],
         vec!["doctor"],
+        vec!["setup"],
     ] {
         let error = parse(&values).err().unwrap().to_string();
         assert!(error.contains("unset SHIPSLIP_CONFIG"), "{error}");
     }
+}
+
+#[tokio::test]
+async fn non_terminal_setup_refuses_before_detection() {
+    if isolated("non_terminal_setup_refuses_before_detection", None) {
+        return;
+    }
+    std::env::set_var("HOME", "/missing-setup-home");
+    std::env::set_var("PATH", "/missing-setup-path");
+    let result = setup::run_setup(setup::RepairArgs::default()).await;
+    let error = result.err().unwrap();
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(error.to_string().contains("interactive terminal"));
 }
 
 #[test]
