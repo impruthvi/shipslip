@@ -647,7 +647,7 @@ async fn trapping_brew_records_interrupt_before_exit_and_returns_130_even_for_ze
     fixture.brew(&format!(r#"
 {SCRUBBED}
 trap 'echo trapped > {root}/trapped; while [ ! -f {root}/release ]; do /bin/sleep 0.02; done; exit 0' INT
-echo $$ > {root}/pid
+echo $$ > {root}/pid.tmp && /bin/mv {root}/pid.tmp {root}/pid
 while :; do /bin/sleep 0.02; done
 "#));
     let plan = plan_setup(&fixture.context, &fixture.detect().await, &fixture.inputs()).unwrap();
