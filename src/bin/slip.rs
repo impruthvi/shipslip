@@ -37,6 +37,8 @@ use github_token::{LocalTokens, TokenSource};
 mod new;
 #[path = "slip/publish.rs"]
 mod publish;
+#[path = "slip/setup.rs"]
+mod setup;
 
 fn main() -> ExitCode {
     // Capture and remove ambient token variables before starting any threads.
@@ -55,19 +57,23 @@ async fn main_async(local_tokens: LocalTokens) -> ExitCode {
         Ok(code) => code,
         Err(error) => {
             eprintln!("slip: {}", logs::escape(&error.to_string()));
-            if error
-                .downcast_ref::<io::Error>()
-                .is_some_and(|error| error.kind() == io::ErrorKind::InvalidInput)
-                || matches!(
-                    error.downcast_ref::<logs::LogsError>(),
-                    Some(logs::LogsError::BadSince(_) | logs::LogsError::TooOld)
-                )
-            {
-                ExitCode::from(2)
-            } else {
-                ExitCode::FAILURE
-            }
+            error_exit_code(error.as_ref())
         }
+    }
+}
+
+fn error_exit_code(error: &(dyn Error + 'static)) -> ExitCode {
+    if error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::InvalidInput)
+        || matches!(
+            error.downcast_ref::<logs::LogsError>(),
+            Some(logs::LogsError::BadSince(_) | logs::LogsError::TooOld)
+        )
+    {
+        ExitCode::from(2)
+    } else {
+        ExitCode::FAILURE
     }
 }
 
@@ -85,6 +91,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         Action::Init => return init_command(&std::env::current_dir()?),
         Action::New(args) => return new::run(args).await,
         Action::Publish(args) => return publish::run(args).await,
+        Action::Doctor(args) => return setup::run(args).await,
         action => action,
     };
     let config = LoadedConfig::load(&std::env::current_dir()?, command.config.as_deref())?;
@@ -101,7 +108,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
     let trust_path = default_trust_path()?;
     let receipts_root = default_receipts_root()?;
     let (environment, plan, token_source) = match action {
-        Action::Init | Action::New(_) | Action::Publish(_) => {
+        Action::Init | Action::New(_) | Action::Publish(_) | Action::Doctor(_) => {
             unreachable!("local setup runs before the config is loaded")
         }
         Action::Trust { environment } => {
@@ -682,6 +689,22 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
             action: Action::Publish(publish::Args::parse(&args[index..])?),
         }));
     }
+    if action == "doctor" {
+        if config.is_some()
+            || args[index..]
+                .iter()
+                .any(|arg| arg == "--config" || arg.starts_with("--config="))
+        {
+            return Err(invalid_input(
+                "doctor does not use a deploy config; omit --config and unset SHIPSLIP_CONFIG",
+            )
+            .into());
+        }
+        return Ok(Some(Command {
+            config: None,
+            action: Action::Doctor(setup::Args::parse(&args[index..])?),
+        }));
+    }
     if action == "trust" {
         let environment = args.get(index).cloned();
         if index + usize::from(environment.is_some()) != args.len() {
@@ -939,6 +962,7 @@ fn print_help() {
         "Shipslip deploy runner\n\n\
          Usage:\n\
          \x20 slip [--config FILE] <deploy|rerun|from-step> <ENV> [STEP]\n\
+         \x20 slip doctor [--for create|publish]\n\
          \x20 slip init\n\
          \x20 slip new <name|.> [OPTIONS]\n\
          \x20 slip publish github [--owner OWNER] [--repo NAME] [--visibility private|public]\n\
@@ -952,6 +976,7 @@ fn print_help() {
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\
          \x20 rerun ENV          Run all recipe steps on the already-deployed commit\n\
          \x20 from-step ENV STEP Run recipe steps starting at STEP (steps start at 1)\n\
+         \x20 doctor             Check local creation and GitHub publishing prerequisites\n\
          \x20 init               Create .shipslip.toml by answering a few questions\n\
          \x20 new <name|.>       Create, verify and commit a new Laravel project\n\
          \x20 publish github     Publish reviewed Git history to GitHub (default private)\n\
@@ -1686,6 +1711,7 @@ enum Action {
     Init,
     New(new::Args),
     Publish(publish::Args),
+    Doctor(setup::Args),
     Run {
         environment: String,
         plan: RunPlan,

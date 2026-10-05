@@ -129,42 +129,16 @@ pub struct Tools {
 }
 
 pub fn resolve_tool(name: &str) -> Result<PathBuf, CreateError> {
-    let found = std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .map(|directory| directory.join(name))
-        .find(|path| {
-            path.is_file() && {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    fs::metadata(path)
-                        .is_ok_and(|metadata| metadata.permissions().mode() & 0o111 != 0)
-                }
-                #[cfg(not(unix))]
-                {
-                    true
-                }
-            }
-        });
-    let path = found.ok_or_else(|| {
-        CreateError::Invalid(format!(
-            "missing {name}; install it and add it to PATH (see docs/setup.md)"
-        ))
-    })?;
-    fs::canonicalize(&path).map_err(|error| io_error(&path, error))
+    crate::setup::resolve_tool(name)
 }
 
 impl Tools {
     pub fn resolve() -> Result<Self, CreateError> {
-        Ok(Self {
-            php: resolve_tool("php")?,
-            composer: resolve_tool("composer")?,
-            laravel: resolve_tool("laravel")?,
-            git: resolve_tool("git")?,
-            node: resolve_tool("node")?,
-            npm: resolve_tool("npm")?,
-        })
+        crate::setup::detect_tools(
+            &crate::setup::DetectionContext::from_environment(),
+            &["php", "composer", "laravel", "git", "node", "npm"],
+        )
+        .creation_tools()
     }
     fn prepend_path(&self, command: &mut Command) -> Result<ToolPath, CreateError> {
         let binding = ToolPath::new(self)?;
@@ -226,11 +200,23 @@ impl Tools {
 }
 
 #[derive(Debug)]
-struct ToolPath {
-    path: PathBuf,
+pub(crate) struct ToolPath {
+    pub(crate) path: PathBuf,
 }
 impl ToolPath {
     fn new(tools: &Tools) -> Result<Self, CreateError> {
+        Self::from_paths([
+            ("php", tools.php.as_path()),
+            ("composer", tools.composer.as_path()),
+            ("laravel", tools.laravel.as_path()),
+            ("git", tools.git.as_path()),
+            ("node", tools.node.as_path()),
+            ("npm", tools.npm.as_path()),
+        ])
+    }
+    pub(crate) fn from_paths<'a>(
+        tools: impl IntoIterator<Item = (&'a str, &'a Path)>,
+    ) -> Result<Self, CreateError> {
         let id = format!(
             "{:x}-{}-{}",
             SystemTime::now()
@@ -251,14 +237,7 @@ impl ToolPath {
             .create(&path)
             .map_err(|error| io_error(&path, error))?;
         let binding = Self { path };
-        for (name, binary) in [
-            ("php", &tools.php),
-            ("composer", &tools.composer),
-            ("laravel", &tools.laravel),
-            ("git", &tools.git),
-            ("node", &tools.node),
-            ("npm", &tools.npm),
-        ] {
+        for (name, binary) in tools {
             let target = fs::canonicalize(binary).map_err(|error| io_error(binary, error))?;
             let shim = binding.path.join(name);
             #[cfg(unix)]
@@ -299,7 +278,7 @@ impl Drop for ToolPath {
     }
 }
 
-fn clean(command: &mut Command) {
+pub(crate) fn clean(command: &mut Command) {
     for key in TOKEN_ENV {
         command.env_remove(key);
     }
@@ -429,7 +408,7 @@ fn require_empty(path: &Path) -> Result<(), CreateError> {
     }
     Ok(())
 }
-fn writable(path: &Path) -> Result<(), CreateError> {
+pub(crate) fn writable(path: &Path) -> Result<(), CreateError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

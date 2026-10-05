@@ -162,7 +162,7 @@ impl InstallerOptions {
     }
 }
 
-fn parse_version(version: &str) -> Result<(u32, u32, u32), LaravelError> {
+pub(crate) fn parse_version(version: &str) -> Result<(u32, u32, u32), LaravelError> {
     let parts: Vec<_> = version.split('.').collect();
     if parts.len() != 3 {
         return Err(LaravelError::Incompatible(
