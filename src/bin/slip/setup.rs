@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use shipslip::logs::escape;
 use shipslip::setup::{
-    self, DetectionContext, DetectionOptions, DetectionReport, FindingState, Purpose,
+    self, DetectionContext, DetectionOptions, DetectionReport, DoctorReport, FindingState, Purpose,
 };
 
 use super::invalid_input;
@@ -12,12 +12,20 @@ use super::invalid_input;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Args {
     pub(super) purpose: Option<Purpose>,
+    pub(super) json: bool,
 }
 impl Args {
     pub(super) fn parse(args: &[String]) -> io::Result<Self> {
         let mut result = Self::default();
         let mut args = args.iter();
         while let Some(arg) = args.next() {
+            if arg == "--json" {
+                if result.json {
+                    return Err(invalid_input("--json was provided twice"));
+                }
+                result.json = true;
+                continue;
+            }
             let value = if arg == "--for" {
                 args.next()
                     .ok_or_else(|| invalid_input("--for requires create or publish"))?
@@ -38,6 +46,32 @@ impl Args {
         }
         Ok(result)
     }
+}
+
+pub(super) fn json_requested(args: &[String]) -> bool {
+    let index = if args.first().map(String::as_str) == Some("--config") {
+        2
+    } else {
+        0
+    };
+    args.get(index).map(String::as_str) == Some("doctor")
+        && args[index + 1..].iter().any(|arg| arg == "--json")
+}
+
+pub(super) fn render_json(
+    report: &DetectionReport,
+    purposes: &[Purpose],
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&DoctorReport::from_detection(report, purposes))
+}
+
+pub(super) fn render_error_json(error: &str, invalid: bool) -> String {
+    let report = if invalid {
+        DoctorReport::invalid_input(error)
+    } else {
+        DoctorReport::failed(error)
+    };
+    serde_json::to_string(&report).expect("doctor error output contains only JSON-safe fields")
 }
 
 pub(super) fn shell_line(dir: &std::path::Path) -> String {
@@ -153,7 +187,12 @@ pub(super) async fn run_with_context(
         },
     )
     .await?;
-    println!("{}", render(&report, &purposes));
+    let output = if args.json {
+        render_json(&report, &purposes)?
+    } else {
+        render(&report, &purposes)
+    };
+    println!("{output}");
     Ok(report_exit_code(&report))
 }
 

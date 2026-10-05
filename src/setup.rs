@@ -4,11 +4,14 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::{Serialize, Serializer};
+
 use crate::create::{CreateError, Tools};
 use crate::laravel::{Database, InstallerOptions};
 use crate::publish::PublishTools;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Purpose {
     Create,
     Publish,
@@ -31,8 +34,13 @@ impl std::fmt::Display for RequirementId {
         }
     }
 }
+impl Serialize for RequirementId {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Requirement {
     pub id: RequirementId,
     pub purposes: Vec<Purpose>,
@@ -114,14 +122,33 @@ pub fn requirements(purposes: &[Purpose], database: Database) -> Vec<Requirement
     requirements
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum FindingState {
-    Ok { path: PathBuf, version: String },
+    Ok {
+        #[serde(serialize_with = "serialize_path")]
+        path: PathBuf,
+        version: String,
+    },
     Missing,
-    TooOld { found: String, need: String },
-    Broken { path: PathBuf, error: String },
-    OffPath { path: PathBuf, dir: PathBuf },
-    Unverified { reason: String },
+    TooOld {
+        found: String,
+        need: String,
+    },
+    Broken {
+        #[serde(serialize_with = "serialize_path")]
+        path: PathBuf,
+        error: String,
+    },
+    OffPath {
+        #[serde(serialize_with = "serialize_path")]
+        path: PathBuf,
+        #[serde(serialize_with = "serialize_path")]
+        dir: PathBuf,
+    },
+    Unverified {
+        reason: String,
+    },
 }
 impl FindingState {
     pub fn is_failure(&self) -> bool {
@@ -132,7 +159,8 @@ impl FindingState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Owner {
     Homebrew,
     System,
@@ -146,7 +174,8 @@ pub enum Owner {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Manager {
     Herd,
     HerdLite,
@@ -203,31 +232,52 @@ impl DetectionContext {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+fn serialize_path<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&path.to_string_lossy())
+}
+
+fn serialize_optional_path<S: Serializer>(
+    path: &Option<PathBuf>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    path.as_deref()
+        .map(Path::to_string_lossy)
+        .serialize(serializer)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ToolLocation {
+    #[serde(serialize_with = "serialize_path")]
     pub entry: PathBuf,
+    #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
     pub off_path: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DiscoveryWarning {
+    #[serde(serialize_with = "serialize_path")]
     pub path: PathBuf,
     pub message: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Homebrew {
+    #[serde(serialize_with = "serialize_path")]
     pub binary: PathBuf,
+    #[serde(serialize_with = "serialize_path")]
     pub prefix: PathBuf,
+    #[serde(serialize_with = "serialize_path")]
     pub bin: PathBuf,
     pub writable: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct MachineFacts {
     pub homebrew: Option<Homebrew>,
+    #[serde(serialize_with = "serialize_optional_path")]
     pub composer_home: Option<PathBuf>,
+    #[serde(serialize_with = "serialize_optional_path")]
     pub composer_bin: Option<PathBuf>,
     pub managers: Vec<Manager>,
     pub providers: BTreeMap<String, Vec<Manager>>,
@@ -569,13 +619,14 @@ fn manager_providers(context: &DetectionContext, facts: &mut MachineFacts) {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Finding {
     pub requirement: Requirement,
     pub state: FindingState,
     pub location: Option<ToolLocation>,
     pub owner: Owner,
     pub managers: Vec<Manager>,
+    #[serde(serialize_with = "serialize_optional_path")]
     pub shadowing: Option<PathBuf>,
     pub detail: Option<String>,
     pub version: Option<String>,
@@ -595,6 +646,54 @@ pub struct DetectionReport {
 impl DetectionReport {
     pub fn ready(&self) -> bool {
         self.findings.iter().all(Finding::ready)
+    }
+}
+
+pub const DOCTOR_SCHEMA_VERSION: u32 = 1;
+
+/// Versioned doctor output. Paths use the same display strings as human output.
+#[derive(Debug, Serialize)]
+pub struct DoctorReport<'a> {
+    schema: u32,
+    pub exit_code: u8,
+    ready: bool,
+    purposes: &'a [Purpose],
+    findings: &'a [Finding],
+    facts: Option<&'a MachineFacts>,
+    warnings: &'a [DiscoveryWarning],
+    error: Option<&'a str>,
+}
+impl<'a> DoctorReport<'a> {
+    pub fn from_detection(report: &'a DetectionReport, purposes: &'a [Purpose]) -> Self {
+        let ready = report.ready();
+        Self {
+            schema: DOCTOR_SCHEMA_VERSION,
+            exit_code: if ready { 0 } else { 3 },
+            ready,
+            purposes,
+            findings: &report.findings,
+            facts: Some(&report.facts),
+            warnings: &report.warnings,
+            error: None,
+        }
+    }
+    pub fn failed(error: &'a str) -> Self {
+        Self::failure(error, 1)
+    }
+    pub fn invalid_input(error: &'a str) -> Self {
+        Self::failure(error, 2)
+    }
+    fn failure(error: &'a str, exit_code: u8) -> Self {
+        Self {
+            schema: DOCTOR_SCHEMA_VERSION,
+            exit_code,
+            ready: false,
+            purposes: &[],
+            findings: &[],
+            facts: None,
+            warnings: &[],
+            error: Some(error),
+        }
     }
 }
 
@@ -1228,6 +1327,321 @@ esac"#,
             testing: Testing::Pest,
             boost: false,
         }
+    }
+
+    fn json_contract_report() -> DetectionReport {
+        let purposes = [Purpose::Create, Purpose::Publish];
+        let requirements = requirements(&purposes, Database::Sqlite);
+        let mut findings: Vec<_> = [
+            (
+                RequirementId::Tool("git"),
+                FindingState::Ok {
+                    path: "/fixture/brew/bin/git".into(),
+                    version: "git 2.53.0".into(),
+                },
+                Owner::Homebrew,
+            ),
+            (
+                RequirementId::Tool("node"),
+                FindingState::Missing,
+                Owner::Unknown,
+            ),
+            (
+                RequirementId::Tool("laravel"),
+                FindingState::TooOld {
+                    found: "5.30.0".into(),
+                    need: "5.31.1".into(),
+                },
+                Owner::HerdLite,
+            ),
+            (
+                RequirementId::Extension("pdo_sqlite"),
+                FindingState::Broken {
+                    path: "/fixture/brew/bin/php".into(),
+                    error: "extension probe failed".into(),
+                },
+                Owner::Homebrew,
+            ),
+            (
+                RequirementId::Tool("composer"),
+                FindingState::OffPath {
+                    path: "/fixture/composer/vendor/bin/composer".into(),
+                    dir: "/fixture/composer/vendor/bin".into(),
+                },
+                Owner::ComposerGlobal,
+            ),
+            (
+                RequirementId::Identity("user.name"),
+                FindingState::Ok {
+                    path: "/fixture/brew/bin/git".into(),
+                    version: "Example User".into(),
+                },
+                Owner::Homebrew,
+            ),
+            (
+                RequirementId::GithubAuth,
+                FindingState::Unverified {
+                    reason: "could not reach GitHub within 10 s".into(),
+                },
+                Owner::Mise,
+            ),
+        ]
+        .into_iter()
+        .map(|(id, state, owner)| Finding {
+            requirement: requirements
+                .iter()
+                .find(|requirement| requirement.id == id)
+                .unwrap()
+                .clone(),
+            state,
+            location: None,
+            owner,
+            managers: vec![],
+            shadowing: None,
+            detail: None,
+            version: None,
+        })
+        .collect();
+        let location = |entry: &str, path: &str, off_path| ToolLocation {
+            entry: entry.into(),
+            path: path.into(),
+            off_path,
+        };
+        findings[0].location = Some(location("/fixture/bin/git", "/fixture/brew/bin/git", false));
+        findings[0].version = Some("git 2.53.0".into());
+        findings[1].managers = vec![Manager::Nvm, Manager::Fnm];
+        findings[1].detail = Some("Node is managed; install it through its provider.".into());
+        findings[2].location = Some(location(
+            "/fixture/bin/laravel",
+            "/fixture/herd-lite/laravel",
+            false,
+        ));
+        findings[2].managers = vec![Manager::HerdLite];
+        findings[2].shadowing = Some("/fixture/bin/laravel".into());
+        findings[2].version = Some("5.30.0".into());
+        findings[3].location = Some(location("/fixture/bin/php", "/fixture/brew/bin/php", false));
+        findings[4].location = Some(location(
+            "/fixture/composer/vendor/bin/composer",
+            "/fixture/composer/vendor/bin/composer",
+            true,
+        ));
+        findings[4].version = Some("Composer 2.10.2".into());
+        findings[5].location = findings[0].location.clone();
+        findings[6].location = Some(location("/fixture/bin/gh", "/fixture/mise/gh", false));
+        findings[6].managers = vec![Manager::Mise];
+        DetectionReport {
+            findings,
+            facts: MachineFacts {
+                homebrew: Some(Homebrew {
+                    binary: "/fixture/brew/bin/brew".into(),
+                    prefix: "/fixture/brew".into(),
+                    bin: "/fixture/brew/bin".into(),
+                    writable: false,
+                }),
+                composer_home: Some("/fixture/composer".into()),
+                composer_bin: Some("/fixture/composer/vendor/bin".into()),
+                managers: vec![
+                    Manager::Herd,
+                    Manager::HerdLite,
+                    Manager::Asdf,
+                    Manager::Mise,
+                    Manager::Nvm,
+                    Manager::Fnm,
+                ],
+                providers: BTreeMap::from([
+                    ("node".into(), vec![Manager::Nvm, Manager::Fnm]),
+                    ("php".into(), vec![Manager::Herd]),
+                ]),
+                command_line_tools: Some(false),
+            },
+            warnings: vec![DiscoveryWarning {
+                path: "/fixture/composer/config.json".into(),
+                message: "invalid config; using vendor/bin".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn doctor_json_schema_matches_golden() {
+        let report = json_contract_report();
+        let output = serde_json::to_value(DoctorReport::from_detection(
+            &report,
+            &[Purpose::Create, Purpose::Publish],
+        ))
+        .unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/doctor-v1.json")).unwrap();
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn doctor_json_error_schema_matches_golden() {
+        let output = serde_json::to_value([
+            DoctorReport::failed("could not inspect working directory"),
+            DoctorReport::invalid_input("--for must be create or publish"),
+        ])
+        .unwrap();
+        let expected: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/doctor-errors-v1.json")).unwrap();
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn doctor_json_exit_codes_follow_blocking_findings() {
+        let mut report = json_contract_report();
+        report.findings.truncate(1);
+        for (state, ready) in [
+            (
+                FindingState::Ok {
+                    path: "/tool".into(),
+                    version: "1".into(),
+                },
+                true,
+            ),
+            (FindingState::Missing, false),
+            (
+                FindingState::TooOld {
+                    found: "1".into(),
+                    need: "2".into(),
+                },
+                false,
+            ),
+            (broken(Path::new("/tool"), "failed"), false),
+            (
+                FindingState::OffPath {
+                    path: "/tool".into(),
+                    dir: "/bin".into(),
+                },
+                true,
+            ),
+            (
+                FindingState::Unverified {
+                    reason: "offline".into(),
+                },
+                true,
+            ),
+        ] {
+            report.findings[0].state = state;
+            for blocking in [true, false] {
+                report.findings[0].requirement.blocking = blocking;
+                let output =
+                    serde_json::to_value(DoctorReport::from_detection(&report, &[Purpose::Create]))
+                        .unwrap();
+                let ready = ready || !blocking;
+                assert_eq!(output["ready"], ready);
+                assert_eq!(output["exit_code"], if ready { 0 } else { 3 });
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_json_enum_names_are_stable() {
+        use serde_json::json;
+        assert_eq!(
+            serde_json::to_value([
+                Owner::Homebrew,
+                Owner::System,
+                Owner::Herd,
+                Owner::HerdLite,
+                Owner::Asdf,
+                Owner::Mise,
+                Owner::Nvm,
+                Owner::Fnm,
+                Owner::ComposerGlobal,
+                Owner::Unknown,
+            ])
+            .unwrap(),
+            json!([
+                "homebrew",
+                "system",
+                "herd",
+                "herd_lite",
+                "asdf",
+                "mise",
+                "nvm",
+                "fnm",
+                "composer_global",
+                "unknown"
+            ])
+        );
+        assert_eq!(
+            serde_json::to_value([
+                Manager::Herd,
+                Manager::HerdLite,
+                Manager::Asdf,
+                Manager::Mise,
+                Manager::Nvm,
+                Manager::Fnm,
+            ])
+            .unwrap(),
+            json!(["herd", "herd_lite", "asdf", "mise", "nvm", "fnm"])
+        );
+        assert_eq!(
+            serde_json::to_value([
+                RequirementId::Tool("php"),
+                RequirementId::Extension("ctype"),
+                RequirementId::Identity("user.name"),
+                RequirementId::Identity("user.email"),
+                RequirementId::GithubAuth,
+            ])
+            .unwrap(),
+            json!([
+                "php",
+                "php.ctype",
+                "git.user.name",
+                "git.user.email",
+                "github.auth"
+            ])
+        );
+    }
+
+    #[test]
+    fn doctor_json_handles_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = PathBuf::from(OsString::from_vec(b"/fixture/native-\xff".to_vec()));
+        let mut report = json_contract_report();
+        report.findings[0].state = FindingState::OffPath {
+            path: path.clone(),
+            dir: path.clone(),
+        };
+        report.findings[0].location = Some(ToolLocation {
+            entry: path.clone(),
+            path: path.clone(),
+            off_path: true,
+        });
+        report.findings[0].shadowing = Some(path.clone());
+        let brew = report.facts.homebrew.as_mut().unwrap();
+        brew.binary = path.clone();
+        brew.prefix = path.clone();
+        brew.bin = path.clone();
+        report.facts.composer_home = Some(path.clone());
+        report.facts.composer_bin = Some(path.clone());
+        report.warnings[0].path = path.clone();
+        let output =
+            serde_json::to_value(DoctorReport::from_detection(&report, &[Purpose::Create]))
+                .unwrap();
+        let display = path.to_string_lossy();
+        assert_eq!(output["findings"][0]["state"]["path"], display.as_ref());
+        assert_eq!(output["findings"][0]["state"]["dir"], display.as_ref());
+        assert_eq!(output["findings"][0]["location"]["entry"], display.as_ref());
+        assert_eq!(output["findings"][0]["location"]["path"], display.as_ref());
+        assert_eq!(output["findings"][0]["shadowing"], display.as_ref());
+        for field in ["binary", "prefix", "bin"] {
+            assert_eq!(output["facts"]["homebrew"][field], display.as_ref());
+        }
+        for field in ["composer_home", "composer_bin"] {
+            assert_eq!(output["facts"][field], display.as_ref());
+        }
+        assert_eq!(output["warnings"][0]["path"], display.as_ref());
+    }
+
+    #[test]
+    fn doctor_json_escapes_control_characters() {
+        let message = "offline\n\"quoted\"\t\u{1b}[31m";
+        let output = serde_json::to_string(&DoctorReport::failed(message)).unwrap();
+        assert!(!output.contains(['\n', '\t', '\u{1b}']));
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["error"], message);
     }
 
     #[test]
