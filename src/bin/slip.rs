@@ -105,6 +105,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         Action::New(args) => return new::run(args).await,
         Action::Publish(args) => return publish::run(args).await,
         Action::Doctor(args) => return setup::run(args).await,
+        Action::Setup(args) => return setup::run_setup(args).await,
         action => action,
     };
     let config = LoadedConfig::load(&std::env::current_dir()?, command.config.as_deref())?;
@@ -121,7 +122,11 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
     let trust_path = default_trust_path()?;
     let receipts_root = default_receipts_root()?;
     let (environment, plan, token_source) = match action {
-        Action::Init | Action::New(_) | Action::Publish(_) | Action::Doctor(_) => {
+        Action::Init
+        | Action::New(_)
+        | Action::Publish(_)
+        | Action::Doctor(_)
+        | Action::Setup(_) => {
             unreachable!("local setup runs before the config is loaded")
         }
         Action::Trust { environment } => {
@@ -289,16 +294,29 @@ impl Interrupts {
     /// Runs `work` to the end. The first Ctrl-C prints `notice` and is
     /// remembered in `pending`; another one exits at once.
     async fn defer<F: Future>(&mut self, work: F, notice: &str) -> F::Output {
+        self.defer_with(work, notice, || {}).await
+    }
+
+    async fn defer_with<F: Future>(
+        &mut self,
+        work: F,
+        notice: &str,
+        mut on_interrupt: impl FnMut(),
+    ) -> F::Output {
         tokio::pin!(work);
         loop {
             tokio::select! {
+                biased;
                 output = &mut work => return output,
                 () = self.recv() => {
                     if self.pending {
                         exit_interrupted();
                     }
                     self.pending = true;
-                    eprintln!("\n{notice}");
+                    on_interrupt();
+                    if !notice.is_empty() {
+                        eprintln!("\n{notice}");
+                    }
                 }
             }
         }
@@ -702,20 +720,24 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
             action: Action::Publish(publish::Args::parse(&args[index..])?),
         }));
     }
-    if action == "doctor" {
+    if matches!(action.as_str(), "doctor" | "setup") {
         if config.is_some()
             || args[index..]
                 .iter()
                 .any(|arg| arg == "--config" || arg.starts_with("--config="))
         {
-            return Err(invalid_input(
-                "doctor does not use a deploy config; omit --config and unset SHIPSLIP_CONFIG",
-            )
+            return Err(invalid_input(format!(
+                "{action} does not use a deploy config; omit --config and unset SHIPSLIP_CONFIG"
+            ))
             .into());
         }
         return Ok(Some(Command {
             config: None,
-            action: Action::Doctor(setup::Args::parse(&args[index..])?),
+            action: if action == "doctor" {
+                Action::Doctor(setup::Args::parse(&args[index..])?)
+            } else {
+                Action::Setup(setup::RepairArgs::parse(&args[index..])?)
+            },
         }));
     }
     if action == "trust" {
@@ -976,6 +998,7 @@ fn print_help() {
          Usage:\n\
          \x20 slip [--config FILE] <deploy|rerun|from-step> <ENV> [STEP]\n\
          \x20 slip doctor [--for create|publish] [--json]\n\
+         \x20 slip setup [--for create|publish]\n\
          \x20 slip init\n\
          \x20 slip new <name|.> [OPTIONS]\n\
          \x20 slip publish github [--owner OWNER] [--repo NAME] [--visibility private|public]\n\
@@ -990,6 +1013,7 @@ fn print_help() {
          \x20 rerun ENV          Run all recipe steps on the already-deployed commit\n\
          \x20 from-step ENV STEP Run recipe steps starting at STEP (steps start at 1)\n\
          \x20 doctor             Check local creation and GitHub publishing prerequisites\n\
+         \x20 setup              Preview and repair local toolchain prerequisites\n\
          \x20 init               Create .shipslip.toml by answering a few questions\n\
          \x20 new <name|.>       Create, verify and commit a new Laravel project\n\
          \x20 publish github     Publish reviewed Git history to GitHub (default private)\n\
@@ -1725,6 +1749,7 @@ enum Action {
     New(new::Args),
     Publish(publish::Args),
     Doctor(setup::Args),
+    Setup(setup::RepairArgs),
     Run {
         environment: String,
         plan: RunPlan,

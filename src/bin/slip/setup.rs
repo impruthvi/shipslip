@@ -1,5 +1,5 @@
 use std::error::Error;
-use std::io;
+use std::io::{self, IsTerminal};
 use std::process::ExitCode;
 
 use shipslip::logs::escape;
@@ -7,7 +7,7 @@ use shipslip::setup::{
     self, DetectionContext, DetectionOptions, DetectionReport, DoctorReport, FindingState, Purpose,
 };
 
-use super::invalid_input;
+use super::{ask_typed, ask_value, ask_yes_no, invalid_input, Interrupts, INTERRUPTED};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Args {
@@ -203,3 +203,371 @@ pub(super) fn report_exit_code(report: &DetectionReport) -> ExitCode {
         ExitCode::from(3)
     }
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct RepairArgs {
+    pub(super) purpose: Option<Purpose>,
+}
+impl RepairArgs {
+    pub(super) fn parse(args: &[String]) -> io::Result<Self> {
+        let parsed = Args::parse(args)
+            .map_err(|error| invalid_input(error.to_string().replace("doctor", "setup")))?;
+        if parsed.json {
+            return Err(invalid_input("unknown setup option --json"));
+        }
+        Ok(Self {
+            purpose: parsed.purpose,
+        })
+    }
+}
+
+pub(super) fn render_plan(plan: &setup::SetupPlan) -> String {
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let mut lines = vec!["Setup plan:".into()];
+    for (index, action) in plan.actions.iter().enumerate() {
+        let environment = action
+            .environment
+            .iter()
+            .map(|(key, value)| format!("{key}={}", quote(value)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let command = std::iter::once(quote(&action.binary.to_string_lossy()))
+            .chain(action.args.iter().map(|arg| quote(arg)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!(
+            "  {}. {}{}{}",
+            index + 1,
+            environment,
+            if environment.is_empty() { "" } else { " " },
+            escape(&command)
+        ));
+        lines.push(format!(
+            "     Runs as {:?}; {:?}",
+            action.runs_as, action.kind
+        ));
+        for precondition in &action.preconditions {
+            lines.push(format!(
+                "     Requires executable: {}",
+                escape(&precondition.path.display().to_string())
+            ));
+        }
+        if !action.environment.is_empty() {
+            lines.push(
+                "     Homebrew may install or upgrade the new formula's own dependencies.".into(),
+            );
+        }
+    }
+    if !plan.actions.is_empty() {
+        lines
+            .push("Approved tools take precedence in each command; your PATH follows them.".into());
+        lines.push("PATH additions:".into());
+        for path in &plan.path_additions {
+            lines.push(format!("  {}", escape(&path.display().to_string())));
+        }
+    }
+    for guidance in &plan.guidance {
+        lines.push(format!(
+            "Guidance{}: {}",
+            guidance
+                .requirement
+                .map(|id| format!(" for {id}"))
+                .unwrap_or_default(),
+            escape(&guidance.message)
+        ));
+        for command in &guidance.commands {
+            lines.push(format!("  {}", escape(command)));
+        }
+    }
+    lines.join("\n")
+}
+
+trait SetupPrompts {
+    async fn identity(
+        &mut self,
+        field: &'static str,
+        interrupts: &mut Interrupts,
+    ) -> io::Result<Option<String>>;
+    async fn confirm(
+        &mut self,
+        plan: &setup::SetupPlan,
+        interrupts: &mut Interrupts,
+    ) -> io::Result<Option<bool>>;
+}
+struct TerminalPrompts;
+impl SetupPrompts for TerminalPrompts {
+    async fn identity(
+        &mut self,
+        field: &'static str,
+        interrupts: &mut Interrupts,
+    ) -> io::Result<Option<String>> {
+        ask_typed(
+            move || {
+                ask_value(
+                    &mut io::stdin().lock(),
+                    &mut io::stdout(),
+                    &format!("Git {field}"),
+                    None,
+                    setup::validate_identity,
+                )
+            },
+            interrupts,
+        )
+        .await
+    }
+    async fn confirm(
+        &mut self,
+        _plan: &setup::SetupPlan,
+        interrupts: &mut Interrupts,
+    ) -> io::Result<Option<bool>> {
+        ask_typed(
+            || {
+                ask_yes_no(
+                    &mut io::stdin().lock(),
+                    &mut io::stdout(),
+                    "Apply this setup plan?",
+                    false,
+                )
+            },
+            interrupts,
+        )
+        .await
+    }
+}
+
+pub(super) async fn run_setup(args: RepairArgs) -> Result<ExitCode, Box<dyn Error>> {
+    if !io::stdin().is_terminal() {
+        return Err(invalid_input(
+            "setup asks for confirmation; run it in an interactive terminal",
+        )
+        .into());
+    }
+    let context = DetectionContext::from_environment();
+    let mut interrupts = Interrupts::listen();
+    let code = run_setup_flow(
+        args,
+        &context,
+        std::env::current_dir()?,
+        shipslip::create::default_operations_root()?,
+        &mut interrupts,
+        &mut TerminalPrompts,
+    )
+    .await?;
+    if code == ExitCode::from(INTERRUPTED) {
+        // A cancelled terminal prompt still owns a blocking stdin reader.
+        super::exit_interrupted();
+    }
+    Ok(code)
+}
+
+fn rerun(args: &RepairArgs) -> String {
+    format!(
+        "slip setup{}",
+        match args.purpose {
+            None => "",
+            Some(Purpose::Create) => " --for create",
+            Some(Purpose::Publish) => " --for publish",
+        }
+    )
+}
+
+fn finish_setup(
+    code: u8,
+    args: &RepairArgs,
+    path: &std::path::Path,
+    error: Option<&str>,
+) -> ExitCode {
+    println!("Operation record: {}", escape(&path.display().to_string()));
+    if let Some(error) = error {
+        eprintln!("{}", escape(error));
+    }
+    if code == INTERRUPTED {
+        println!("Setup was interrupted; run `{}` again", rerun(args));
+    } else if code != 0 {
+        println!(
+            "Run `{}` again after resolving the remaining requirements.",
+            rerun(args)
+        );
+    }
+    ExitCode::from(code)
+}
+
+fn finish_prompt_error(
+    args: &RepairArgs,
+    operations_root: &std::path::Path,
+    plan: &setup::SetupPlan,
+    report: &DetectionReport,
+    error: io::Error,
+) -> Result<ExitCode, setup::SetupError> {
+    let code = if error.kind() == io::ErrorKind::InvalidInput {
+        2
+    } else {
+        1
+    };
+    let path =
+        setup::record_setup_outcome(operations_root, plan, report, code, Some(error.to_string()))?;
+    Ok(finish_setup(code, args, &path, Some(&error.to_string())))
+}
+
+async fn run_setup_flow(
+    args: RepairArgs,
+    context: &DetectionContext,
+    root: std::path::PathBuf,
+    operations_root: std::path::PathBuf,
+    interrupts: &mut Interrupts,
+    prompts: &mut impl SetupPrompts,
+) -> Result<ExitCode, Box<dyn Error>> {
+    let options = DetectionOptions {
+        purposes: args.purpose.map_or_else(
+            || vec![Purpose::Create, Purpose::Publish],
+            |purpose| vec![purpose],
+        ),
+        root,
+        installer_options: None,
+    };
+    let mut report = interrupts.defer(setup::detect(context, &options), "Setup was interrupted; waiting for the current check. Press Ctrl-C again to exit immediately.").await?;
+    let mut inputs = setup::SetupInputs::default();
+    let mut session = None;
+    loop {
+        println!("{}", render(&report, &options.purposes));
+        let mut plan = setup::plan_setup(context, &report, &inputs)?;
+        if interrupts.pending {
+            let path =
+                setup::record_setup_outcome(&operations_root, &plan, &report, INTERRUPTED, None)?;
+            return Ok(finish_setup(INTERRUPTED, &args, &path, None));
+        }
+        for field in plan.inputs_needed.clone() {
+            let answer = match prompts.identity(field, interrupts).await {
+                Ok(answer) => answer,
+                Err(error) => {
+                    return Ok(finish_prompt_error(
+                        &args,
+                        &operations_root,
+                        &plan,
+                        &report,
+                        error,
+                    )?)
+                }
+            };
+            let Some(value) = answer else {
+                let path = setup::record_setup_outcome(
+                    &operations_root,
+                    &plan,
+                    &report,
+                    INTERRUPTED,
+                    None,
+                )?;
+                return Ok(finish_setup(INTERRUPTED, &args, &path, None));
+            };
+            match field {
+                "user.name" => inputs.name = Some(value),
+                "user.email" => inputs.email = Some(value),
+                _ => unreachable!(),
+            }
+        }
+        plan = setup::plan_setup(context, &report, &inputs)?;
+        println!("{}", render_plan(&plan));
+        let code = if plan.actions.is_empty() {
+            Some(if report.ready() { 0 } else { 3 })
+        } else {
+            let answer = match prompts.confirm(&plan, interrupts).await {
+                Ok(answer) => answer,
+                Err(error) => {
+                    return Ok(finish_prompt_error(
+                        &args,
+                        &operations_root,
+                        &plan,
+                        &report,
+                        error,
+                    )?)
+                }
+            };
+            match answer {
+                Some(true) => None,
+                Some(false) => Some(3),
+                None => Some(INTERRUPTED),
+            }
+        };
+        if let Some(code) = code {
+            let path = setup::record_setup_outcome(&operations_root, &plan, &report, code, None)?;
+            return Ok(finish_setup(code, &args, &path, None));
+        }
+        if session.is_none() {
+            match setup::SetupSession::acquire(&operations_root) {
+                Ok(acquired) => session = Some(acquired),
+                Err(error) => {
+                    let path = setup::record_setup_outcome(
+                        &operations_root,
+                        &plan,
+                        &report,
+                        1,
+                        Some(error.to_string()),
+                    )?;
+                    return Ok(finish_setup(1, &args, &path, Some(&error.to_string())));
+                }
+            }
+        }
+        let (signal, receiver) = tokio::sync::watch::channel(false);
+        let applying = session.as_ref().unwrap().apply(
+            &plan,
+            plan.confirm(),
+            setup::SetupEnvironment {
+                context,
+                options: &options,
+            },
+            receiver,
+            |event| match event {
+                setup::SetupEvent::ActionStarted { index } => {
+                    println!("\nRunning setup action {}…", index + 1)
+                }
+                setup::SetupEvent::Output { line, .. } => println!("  {}", escape(&line)),
+                setup::SetupEvent::Interrupted { .. } => eprintln!("\nSetup was interrupted; waiting for the current command. Press Ctrl-C again to exit immediately."),
+                _ => {}
+            },
+        );
+        let result = interrupts
+            .defer_with(applying, "", || {
+                let _ = signal.send(true);
+            })
+            .await;
+        match result {
+            Ok(setup::SetupApplyResult::Changed {
+                report: changed,
+                record_path,
+            }) => {
+                println!("Your machine changed since this plan was shown.");
+                println!(
+                    "Operation record: {}",
+                    escape(&record_path.display().to_string())
+                );
+                report = *changed;
+            }
+            Ok(setup::SetupApplyResult::Finished(outcome)) => {
+                if let Some(report) = &outcome.report {
+                    println!("{}", render(report, &options.purposes));
+                }
+                return Ok(finish_setup(
+                    outcome.exit_code,
+                    &args,
+                    &outcome.record_path,
+                    outcome.error.as_deref(),
+                ));
+            }
+            Err(error) => {
+                let code = if interrupts.pending { INTERRUPTED } else { 1 };
+                let path = setup::record_setup_outcome(
+                    &operations_root,
+                    &plan,
+                    &report,
+                    code,
+                    Some(error.to_string()),
+                )?;
+                return Ok(finish_setup(code, &args, &path, Some(&error.to_string())));
+            }
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+#[path = "setup_tests.rs"]
+mod tests;

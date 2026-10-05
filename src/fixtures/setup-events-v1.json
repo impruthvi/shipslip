@@ -1,0 +1,9 @@
+[
+  {"event":"record","path":"/fixture/ops/setup/run.json"},
+  {"event":"action_started","index":0},
+  {"event":"output","index":0,"line":"brew output"},
+  {"event":"interrupted","index":0},
+  {"event":"action_finished","index":0,"exit_code":0,"state":"interrupted"},
+  {"event":"action_finished","index":1,"exit_code":null,"state":"failed"},
+  {"event":"finished","exit_code":130}
+]
