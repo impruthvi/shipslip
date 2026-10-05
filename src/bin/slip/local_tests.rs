@@ -619,10 +619,34 @@ impl DoctorFixture {
         format!("'{}'", value.replace('\'', "'\\''"))
     }
     fn script(&self, path: &Path, body: &str) {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::process::{Command, Stdio};
         fs::create_dir_all(path.parent().unwrap()).unwrap();
-        fs::write(path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        // Keep writable script descriptors out of the parallel test runner.
+        let mut writer = Command::new("/bin/sh")
+            .args([
+                "-c",
+                "umask 077; /bin/cat > \"$1\" && /bin/chmod 700 \"$1\"",
+                "shipslip-fixture-writer",
+            ])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        writer
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("#!/bin/sh\nset -eu\n{body}\n").as_bytes())
+            .unwrap();
+        let output = writer.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
     async fn report(&self) -> shipslip::setup::DetectionReport {
         shipslip::setup::detect(

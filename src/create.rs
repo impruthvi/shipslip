@@ -242,7 +242,6 @@ impl ToolPath {
             let shim = binding.path.join(name);
             #[cfg(unix)]
             {
-                use std::os::unix::fs::OpenOptionsExt;
                 let mut wrapper = b"#!/bin/sh\nexec '".to_vec();
                 for byte in target.as_os_str().as_encoded_bytes() {
                     if *byte == b'\'' {
@@ -252,14 +251,7 @@ impl ToolPath {
                     }
                 }
                 wrapper.extend_from_slice(b"' \"$@\"\n");
-                let mut file = OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o700)
-                    .open(&shim)
-                    .map_err(|error| io_error(&shim, error))?;
-                file.write_all(&wrapper)
-                    .map_err(|error| io_error(&shim, error))?;
+                write_tool_wrapper(&shim, &wrapper).map_err(|error| io_error(&shim, error))?;
             }
             #[cfg(not(unix))]
             {
@@ -272,6 +264,40 @@ impl ToolPath {
         Ok(binding)
     }
 }
+
+#[cfg(unix)]
+pub(crate) fn write_tool_wrapper(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // A concurrent fork can inherit a writable script FD even with CLOEXEC,
+    // making Linux exec return ETXTBSY until that child execs. Keep the writable
+    // FD in a separate process and wait for it to close before using the script.
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .args([
+            "-c",
+            "set -C; umask 077; /bin/cat > \"$1\" && /bin/chmod 700 \"$1\"",
+            "shipslip-wrapper-writer",
+        ])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    for key in TOKEN_ENV {
+        command.env_remove(key);
+    }
+    let mut writer = command.spawn()?;
+    let written = writer.stdin.take().unwrap().write_all(bytes);
+    let output = writer.wait_with_output()?;
+    written?;
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "could not write tool wrapper {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
 impl Drop for ToolPath {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.path);

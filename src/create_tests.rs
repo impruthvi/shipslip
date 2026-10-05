@@ -74,8 +74,7 @@ impl Fixture {
     }
 
     fn script(&self, path: &Path, body: &str) {
-        fs::write(path, format!("#!/bin/sh\nset -eu\n{body}")).unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        crate::git::test_support::Fixture::script(path, &format!("#!/bin/sh\nset -eu\n{body}"));
     }
 
     fn installer(&self, body: &str) {
@@ -751,12 +750,10 @@ async fn reviewed_tool_bindings_win_over_conflicting_interpreters_and_helpers() 
     let composer_dir = fixture.root.join("reviewed composer");
     fs::create_dir(&composer_dir).unwrap();
     fixture.tools.composer = composer_dir.join("composer");
-    fs::write(
+    crate::git::test_support::Fixture::script(
         &fixture.tools.composer,
         "#!/usr/bin/env php\ncomposer script\n",
-    )
-    .unwrap();
-    fs::set_permissions(&fixture.tools.composer, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     fixture.script(
         &fixture.tools.php,
         r#"
@@ -770,7 +767,7 @@ case "$1" in */composer) echo 'Composer using reviewed PHP';; *) exit 90;; esac
         "echo 'Composer shadow'",
     );
     // npm's env shebang must also find the reviewed Node, despite the older sibling binary.
-    fs::write(&fixture.tools.npm, "#!/usr/bin/env node\n").unwrap();
+    crate::git::test_support::Fixture::script(&fixture.tools.npm, "#!/usr/bin/env node\n");
     let body = format!("node --version\ncomposer --version\nnpm --version\n{SCAFFOLD}");
     fixture.installer(&body);
     let preview = fixture.preview("app").await;
@@ -818,6 +815,35 @@ fn tool_bindings_are_private_and_removed_on_drop() {
     let mut tools = fixture.tools.clone();
     tools.npm = fixture.root.join("missing npm");
     assert!(ToolPath::new(&tools).is_err());
+}
+
+#[test]
+fn tool_wrapper_writer_refuses_existing_files() {
+    let fixture = Fixture::new();
+    let path = fixture.root.join("wrapper");
+    write_tool_wrapper(&path, b"#!/bin/sh\necho original\n").unwrap();
+    assert!(write_tool_wrapper(&path, b"#!/bin/sh\necho overwritten\n").is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"#!/bin/sh\necho original\n");
+}
+
+#[test]
+fn tool_wrappers_execute_immediately_during_parallel_creation() {
+    let fixture = Fixture::new();
+    std::thread::scope(|scope| {
+        for _ in 0..4 {
+            let node = &fixture.tools.node;
+            scope.spawn(move || {
+                for _ in 0..16 {
+                    let binding = ToolPath::from_paths([("node", node.as_path())]).unwrap();
+                    let output = std::process::Command::new(binding.path.join("node"))
+                        .output()
+                        .unwrap();
+                    assert!(output.status.success());
+                    assert_eq!(output.stdout, b"fake tool 1.0\n");
+                }
+            });
+        }
+    });
 }
 
 #[test]

@@ -1147,8 +1147,10 @@ mod tests {
         }
         fn script(&self, path: &Path, body: &str) {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+            crate::git::test_support::Fixture::script(
+                path,
+                &format!("#!/bin/sh\nset -eu\n{body}\n"),
+            );
         }
         fn tool(&self, name: &str, body: &str) {
             self.script(&self.root.join("bin").join(name), body);
