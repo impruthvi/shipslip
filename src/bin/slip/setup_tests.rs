@@ -213,7 +213,7 @@ async fn preview_shows_exact_commands_environment_privilege_and_path_additions()
         assert!(text.contains(&format!("{key}='1'")));
     }
     assert!(text.contains("own dependencies"));
-    assert!(text.contains("CurrentUser; Captured"));
+    assert!(text.contains("Runs as you; output shown below"));
     assert!(text.contains("Requires executable:"));
     assert!(text.contains("PATH additions:"));
     assert!(text.contains(
@@ -258,7 +258,7 @@ async fn frontend_first_interrupt_records_child_that_traps_and_exits_zero_as_130
     fixture.brew(&format!(
         r#"
 trap 'exit 0' INT
-echo $$ > {root}/pid
+echo $$ > {root}/pid.tmp && /bin/mv {root}/pid.tmp {root}/pid
 while :; do /bin/sleep 0.02; done
 "#
     ));

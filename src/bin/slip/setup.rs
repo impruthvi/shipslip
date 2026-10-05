@@ -4,7 +4,8 @@ use std::process::ExitCode;
 
 use shipslip::logs::escape;
 use shipslip::setup::{
-    self, DetectionContext, DetectionOptions, DetectionReport, DoctorReport, FindingState, Purpose,
+    self, DetectionContext, DetectionOptions, DetectionReport, DoctorReport, Finding, FindingState,
+    Manager, Owner, Purpose, RequirementId, RunAs,
 };
 
 use super::{ask_typed, ask_value, ask_yes_no, invalid_input, Interrupts, INTERRUPTED};
@@ -92,58 +93,127 @@ pub(super) fn render_state(state: &FindingState) -> String {
     }
 }
 
+fn owner_label(owner: Owner) -> &'static str {
+    match owner {
+        Owner::Homebrew => "Homebrew",
+        Owner::System => "system",
+        Owner::Herd => "Herd",
+        Owner::HerdLite => "php.new",
+        Owner::Asdf => "asdf",
+        Owner::Mise => "mise",
+        Owner::Nvm => "nvm",
+        Owner::Fnm => "fnm",
+        Owner::ComposerGlobal => "Composer global",
+        Owner::Unknown => "unknown source",
+    }
+}
+
+fn manager_label(manager: Manager) -> &'static str {
+    match manager {
+        Manager::Herd => "Herd",
+        Manager::HerdLite => "php.new",
+        Manager::Asdf => "asdf",
+        Manager::Mise => "mise",
+        Manager::Nvm => "nvm",
+        Manager::Fnm => "fnm",
+    }
+}
+
+fn finding_lines(finding: &Finding, lines: &mut Vec<String>) {
+    let status = render_state(&finding.state);
+    lines.push(format!("  {}: {}", finding.requirement.id, escape(&status)));
+    if let (RequirementId::Tool(_), Some(location)) = (finding.requirement.id, &finding.location) {
+        lines.push(format!(
+            "    {} ({})",
+            escape(&location.entry.display().to_string()),
+            owner_label(finding.owner)
+        ));
+    }
+    if let FindingState::OffPath { dir, .. } = &finding.state {
+        lines.push(format!(
+            "    Add to your shell startup file: {}",
+            escape(&shell_line(dir))
+        ));
+    }
+    if let Some(detail) = &finding.detail {
+        lines.push(format!("    {}", escape(detail)));
+    }
+    if finding.state.is_failure() && !finding.managers.is_empty() {
+        let managers: Vec<_> = finding
+            .managers
+            .iter()
+            .copied()
+            .map(manager_label)
+            .collect();
+        lines.push(format!("    Provided by: {}", managers.join(", ")));
+    }
+    if let Some(path) = &finding.shadowing {
+        lines.push(format!(
+            "    Shadowing path: {}",
+            escape(&path.display().to_string())
+        ));
+    }
+}
+
+/// The full report. Loaded PHP extensions collapse into one line.
 pub(super) fn render(report: &DetectionReport, purposes: &[Purpose]) -> String {
+    render_with(report, purposes, false)
+}
+
+/// Only findings that need attention; empty when everything is ready.
+pub(super) fn render_attention(report: &DetectionReport, purposes: &[Purpose]) -> String {
+    render_with(report, purposes, true)
+}
+
+fn render_with(report: &DetectionReport, purposes: &[Purpose], attention: bool) -> String {
     let mut lines = Vec::new();
     for purpose in purposes {
+        let findings: Vec<&Finding> = report
+            .findings
+            .iter()
+            .filter(|finding| finding.requirement.purposes.contains(purpose))
+            .collect();
+        let loaded = |finding: &Finding| {
+            matches!(finding.requirement.id, RequirementId::Extension(_))
+                && matches!(finding.state, FindingState::Ok { .. })
+        };
+        let extensions = findings.iter().filter(|finding| loaded(finding)).count();
+        let shown: Vec<&Finding> = findings
+            .into_iter()
+            .filter(|finding| !attention || !matches!(finding.state, FindingState::Ok { .. }))
+            .collect();
+        if shown.is_empty() {
+            continue;
+        }
         lines.push(match purpose {
             Purpose::Create => "Project creation:".into(),
             Purpose::Publish => "GitHub publishing:".into(),
         });
-        for finding in report
-            .findings
-            .iter()
-            .filter(|finding| finding.requirement.purposes.contains(purpose))
-        {
-            let status = render_state(&finding.state);
-            lines.push(format!("  {}: {}", finding.requirement.id, escape(&status)));
-            if let Some(location) = &finding.location {
-                lines.push(format!(
-                    "    {} ({:?})",
-                    escape(&location.path.display().to_string()),
-                    finding.owner
-                ));
+        let mut summarized = false;
+        for finding in shown {
+            if loaded(finding) {
+                if !summarized {
+                    lines.push(format!("  php extensions: {extensions} loaded"));
+                    summarized = true;
+                }
+                continue;
             }
-            if let FindingState::OffPath { dir, .. } = &finding.state {
-                lines.push(format!(
-                    "    Add to your shell startup file: {}",
-                    escape(&shell_line(dir))
-                ));
-            }
-            if let Some(detail) = &finding.detail {
-                lines.push(format!("    {}", escape(detail)));
-            }
-            if !finding.managers.is_empty() {
-                lines.push(format!("    Installed providers: {:?}", finding.managers));
-            }
-            if let Some(path) = &finding.shadowing {
-                lines.push(format!(
-                    "    Shadowing path: {}",
-                    escape(&path.display().to_string())
-                ));
-            }
+            finding_lines(finding, &mut lines);
         }
     }
     if let Some(brew) = &report.facts.homebrew {
-        lines.push(format!(
-            "Homebrew: {} (prefix {}; {})",
-            escape(&brew.binary.display().to_string()),
-            escape(&brew.prefix.display().to_string()),
-            if brew.writable {
-                "writable"
-            } else {
-                "not writable by this user"
-            }
-        ));
+        if !attention || !brew.writable {
+            lines.push(format!(
+                "Homebrew: {} (prefix {}; {})",
+                escape(&brew.binary.display().to_string()),
+                escape(&brew.prefix.display().to_string()),
+                if brew.writable {
+                    "writable"
+                } else {
+                    "not writable by this user"
+                }
+            ));
+        }
     }
     if report.facts.command_line_tools == Some(false) {
         lines.push("Command Line Tools not installed; run xcode-select --install.".into());
@@ -155,14 +225,11 @@ pub(super) fn render(report: &DetectionReport, purposes: &[Purpose]) -> String {
             escape(&warning.message)
         ));
     }
-    lines.push(
-        if report.ready() {
-            "Ready (warnings may remain)."
-        } else {
-            "Not ready: resolve the blocking findings above."
-        }
-        .into(),
-    );
+    if !report.ready() {
+        lines.push("Not ready: resolve the blocking findings above.".into());
+    } else if !attention {
+        lines.push("Ready (warnings may remain).".into());
+    }
     lines.join("\n")
 }
 
@@ -245,8 +312,15 @@ pub(super) fn render_plan(plan: &setup::SetupPlan) -> String {
             escape(&command)
         ));
         lines.push(format!(
-            "     Runs as {:?}; {:?}",
-            action.runs_as, action.kind
+            "     {}; {}",
+            match action.runs_as {
+                RunAs::CurrentUser => "Runs as you",
+                RunAs::Sudo => "Runs with sudo",
+            },
+            match action.kind {
+                setup::ActionKind::Captured => "output shown below",
+                setup::ActionKind::Attached => "uses this terminal",
+            }
         ));
         for precondition in &action.preconditions {
             lines.push(format!(
@@ -508,7 +582,14 @@ pub(super) async fn repair_with_prompts(
                 println!("\n{heading}");
             }
         }
-        println!("{}", render(&report, &options.purposes));
+        let text = if heading.is_some() {
+            render_attention(&report, &options.purposes)
+        } else {
+            render(&report, &options.purposes)
+        };
+        if !text.is_empty() {
+            println!("{text}");
+        }
         if !warnings.is_empty() {
             println!("{warnings}");
         }
@@ -573,6 +654,9 @@ pub(super) async fn repair_with_prompts(
                 None => Some(INTERRUPTED),
             }
         };
+        if code == Some(0) {
+            return Ok(RepairOutcome::Ready);
+        }
         if let Some(code) = code {
             let path = setup::record_setup_outcome(&operations_root, &plan, &report, code, None)?;
             let outcome = finish_repair(code, &rerun, &path, None);
@@ -634,7 +718,14 @@ pub(super) async fn repair_with_prompts(
             }
             Ok(setup::SetupApplyResult::Finished(outcome)) => {
                 if let Some(report) = &outcome.report {
-                    println!("{}", render(report, &options.purposes));
+                    let text = if heading.is_some() {
+                        render_attention(report, &options.purposes)
+                    } else {
+                        render(report, &options.purposes)
+                    };
+                    if !text.is_empty() {
+                        println!("{text}");
+                    }
                 }
                 return Ok(finish_repair(
                     outcome.exit_code,

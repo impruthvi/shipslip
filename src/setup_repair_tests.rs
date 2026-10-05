@@ -192,6 +192,24 @@ async fn absent_or_unwritable_brew_and_missing_clt_never_plan_brew_actions() {
 }
 
 #[tokio::test]
+async fn read_only_prefix_is_writable_when_cellar_and_bin_are() {
+    let fixture = Fixture::new();
+    fixture.complete();
+    let prefix = fixture.root.join("brew");
+    fs::create_dir(prefix.join("Cellar")).unwrap();
+    let mode =
+        |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    mode(&prefix, 0o555);
+    let intel_layout = fixture.detect().await.facts.homebrew.unwrap().writable;
+    mode(&prefix.join("Cellar"), 0o555);
+    let cellar_locked = fixture.detect().await.facts.homebrew.unwrap().writable;
+    mode(&prefix.join("Cellar"), 0o755);
+    mode(&prefix, 0o755);
+    assert!(intel_layout);
+    assert!(!cellar_locked);
+}
+
+#[tokio::test]
 async fn linux_setup_remains_guidance_only() {
     let mut fixture = Fixture::new();
     fixture.context.macos = false;
@@ -200,6 +218,19 @@ async fn linux_setup_remains_guidance_only() {
     assert!(plan.actions.is_empty());
     assert!(plan.inputs_needed.is_empty());
     assert!(!plan.guidance.is_empty());
+
+    fixture.complete();
+    fs::remove_file(fixture.root.join("email")).unwrap();
+    let report = fixture.detect().await;
+    let plan = plan_setup(&fixture.context, &report, &SetupInputs::default()).unwrap();
+    assert!(plan.actions.is_empty());
+    assert!(plan.inputs_needed.is_empty());
+    let email = plan
+        .guidance
+        .iter()
+        .find(|guidance| guidance.requirement == Some(RequirementId::Identity("user.email")))
+        .unwrap();
+    assert_eq!(email.commands, ["git config --global user.email <value>"]);
 }
 
 #[tokio::test]
@@ -616,7 +647,7 @@ async fn trapping_brew_records_interrupt_before_exit_and_returns_130_even_for_ze
     fixture.brew(&format!(r#"
 {SCRUBBED}
 trap 'echo trapped > {root}/trapped; while [ ! -f {root}/release ]; do /bin/sleep 0.02; done; exit 0' INT
-echo $$ > {root}/pid
+echo $$ > {root}/pid.tmp && /bin/mv {root}/pid.tmp {root}/pid
 while :; do /bin/sleep 0.02; done
 "#));
     let plan = plan_setup(&fixture.context, &fixture.detect().await, &fixture.inputs()).unwrap();

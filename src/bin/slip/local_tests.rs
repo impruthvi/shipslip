@@ -1221,6 +1221,41 @@ fn doctor_unverified_only_exits_zero() {
 }
 
 #[test]
+fn doctor_collapses_loaded_extensions_and_in_flow_shows_only_attention() {
+    let fixture = DoctorFixture::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut report = runtime.block_on(fixture.report());
+    let create = [shipslip::setup::Purpose::Create];
+    assert!(report.ready());
+    let full = setup::render(&report, &create);
+    let loaded = format!(
+        "php extensions: {} loaded",
+        shipslip::setup::PHP_EXTENSIONS.len()
+    );
+    assert!(full.contains(&loaded), "{full}");
+    assert!(!full.contains("php.ctype"), "{full}");
+    assert!(full.contains("Ready"), "{full}");
+    assert_eq!(setup::render_attention(&report, &create), "");
+
+    let node = report
+        .findings
+        .iter_mut()
+        .find(|finding| finding.requirement.id == shipslip::setup::RequirementId::Tool("node"))
+        .unwrap();
+    node.state = shipslip::setup::FindingState::Missing;
+    node.managers = vec![shipslip::setup::Manager::Nvm];
+    let attention = setup::render_attention(&report, &create);
+    assert!(attention.contains("node: missing"), "{attention}");
+    assert!(attention.contains("Provided by: nvm"), "{attention}");
+    assert!(attention.contains("Not ready:"), "{attention}");
+    assert!(!attention.contains("php: ok"), "{attention}");
+    assert!(!attention.contains("php extensions"), "{attention}");
+}
+
+#[test]
 fn doctor_internal_failure_exits_one() {
     let fixture = DoctorFixture::new();
     let runtime = tokio::runtime::Builder::new_current_thread()
