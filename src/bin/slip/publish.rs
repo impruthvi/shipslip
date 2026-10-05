@@ -9,6 +9,7 @@ use shipslip::logs::escape;
 use shipslip::publish::{
     self, PublishError, PublishEvent, PublishRequest, PublishResult, PublishTools, Visibility,
 };
+use shipslip::setup::{DetectionContext, DetectionOptions, Purpose};
 
 use super::{ask_typed, ask_value, invalid_input, new::yes_no, Interrupts, INTERRUPTED};
 
@@ -124,23 +125,124 @@ pub(super) struct Publication {
     visibility: Visibility,
 }
 
+#[derive(Debug)]
+pub(super) enum PublishOutcome {
+    Published(Publication),
+    NotReady,
+    Declined,
+    Failed,
+    Invalid,
+    Interrupted,
+}
+impl PublishOutcome {
+    pub(super) fn exit_code(&self) -> ExitCode {
+        match self {
+            Self::Published(_) => ExitCode::SUCCESS,
+            Self::NotReady | Self::Declined => ExitCode::from(3),
+            Self::Failed => ExitCode::FAILURE,
+            Self::Invalid => ExitCode::from(2),
+            Self::Interrupted => ExitCode::from(INTERRUPTED),
+        }
+    }
+    fn from_repair(outcome: super::setup::RepairOutcome) -> Option<Self> {
+        use super::setup::RepairOutcome;
+        Some(match outcome {
+            RepairOutcome::Ready => return None,
+            RepairOutcome::NotReady => Self::NotReady,
+            RepairOutcome::Declined => Self::Declined,
+            RepairOutcome::Failed => Self::Failed,
+            RepairOutcome::Invalid => Self::Invalid,
+            RepairOutcome::Interrupted => Self::Interrupted,
+        })
+    }
+}
+
+fn rerun_command(args: &Args) -> String {
+    let mut command = "slip publish github".to_string();
+    for (flag, value) in [
+        ("--owner", args.owner.clone()),
+        ("--repo", args.name.clone()),
+        (
+            "--visibility",
+            args.visibility.map(|value| value.to_string()),
+        ),
+    ] {
+        if let Some(value) = value {
+            command.push_str(&format!(" {flag} '{}'", value.replace('\'', "'\\''")));
+        }
+    }
+    command
+}
+
+fn rerun_at(args: &Args, root: &Path) -> String {
+    let command = rerun_command(args);
+    if std::env::current_dir().ok().as_deref() == Some(root) {
+        command
+    } else {
+        format!(
+            "cd '{}' && {command}",
+            root.to_string_lossy().replace('\'', "'\\''")
+        )
+    }
+}
+
+trait PublishPrompts {
+    async fn value(
+        &mut self,
+        question: &str,
+        default: &str,
+        check: fn(&str) -> Result<(), &'static str>,
+        interrupts: &mut Interrupts,
+    ) -> io::Result<String>;
+    async fn confirm(
+        &mut self,
+        question: &str,
+        interrupts: &mut Interrupts,
+    ) -> io::Result<Option<bool>>;
+}
+impl PublishPrompts for super::setup::TerminalPrompts {
+    async fn value(
+        &mut self,
+        question: &str,
+        default: &str,
+        check: fn(&str) -> Result<(), &'static str>,
+        interrupts: &mut Interrupts,
+    ) -> io::Result<String> {
+        prompt(question, default, check, interrupts).await
+    }
+    async fn confirm(
+        &mut self,
+        question: &str,
+        interrupts: &mut Interrupts,
+    ) -> io::Result<Option<bool>> {
+        yes_no(question, false, interrupts).await
+    }
+}
+
 pub(super) async fn run(args: Args) -> Result<ExitCode, Box<dyn Error>> {
     let mut interrupts = Interrupts::listen();
-    run_at(args, &std::env::current_dir()?, &mut interrupts).await?;
-    Ok(if interrupts.pending {
-        ExitCode::from(INTERRUPTED)
-    } else {
-        ExitCode::SUCCESS
-    })
+    Ok(run_at(args, &std::env::current_dir()?, &mut interrupts)
+        .await?
+        .exit_code())
 }
 
 pub(super) async fn run_at(
-    args: Args,
+    mut args: Args,
     start: &Path,
     interrupts: &mut Interrupts,
-) -> Result<Option<Publication>, Box<dyn Error>> {
+) -> Result<PublishOutcome, Box<dyn Error>> {
+    check_terminal(&args)?;
     let mut reviewed = false;
-    let result = run_at_inner(args, start, interrupts, &mut reviewed).await;
+    let result = run_at_inner(
+        &mut args,
+        start,
+        interrupts,
+        &mut reviewed,
+        &DetectionContext::from_environment(),
+        default_operations_root()?,
+        &mut super::setup::TerminalPrompts,
+    )
+    .await;
     if reviewed && result.is_err() {
         eprintln!(
             "Publication was not verified by this invocation. Any completed pushes and created GitHub repositories are retained."
@@ -150,15 +252,19 @@ pub(super) async fn run_at(
             escape(&start.display().to_string())
         );
     }
+    if !matches!(result, Ok(PublishOutcome::Published(_))) {
+        println!(
+            "Run `{}` again to review or resume publication.",
+            escape(&rerun_at(&args, start))
+        );
+    }
+    if matches!(result, Ok(PublishOutcome::Interrupted)) {
+        super::exit_interrupted();
+    }
     result
 }
 
-async fn run_at_inner(
-    mut args: Args,
-    start: &Path,
-    interrupts: &mut Interrupts,
-    reviewed: &mut bool,
-) -> Result<Option<Publication>, Box<dyn Error>> {
+fn check_terminal(args: &Args) -> io::Result<()> {
     if !io::stdin().is_terminal() {
         let flag = if args.name.is_none() {
             Some("--repo")
@@ -173,52 +279,84 @@ async fn run_at_inner(
                 "publish needs an interactive terminal to review and confirm GitHub publication"
                     .into()
             }
-        })
-        .into());
+        }));
     }
-    let tools = tools()?;
+    Ok(())
+}
+
+async fn run_at_inner(
+    args: &mut Args,
+    start: &Path,
+    interrupts: &mut Interrupts,
+    reviewed: &mut bool,
+    context: &DetectionContext,
+    operations_root: std::path::PathBuf,
+    prompts: &mut (impl super::setup::SetupPrompts + PublishPrompts),
+) -> Result<PublishOutcome, Box<dyn Error>> {
+    let request = super::setup::RepairRequest {
+        options: DetectionOptions {
+            purposes: vec![Purpose::Publish],
+            root: start.into(),
+            installer_options: None,
+        },
+        operations_root: operations_root.clone(),
+        report: None,
+        heading: Some("Missing for GitHub publishing"),
+        warnings: String::new(),
+        confirmation: "Apply setup and continue publishing?".into(),
+        rerun: rerun_at(args, start),
+    };
+    if let Some(outcome) = PublishOutcome::from_repair(
+        super::setup::repair_with_prompts(request, context, interrupts, prompts).await?,
+    ) {
+        return Ok(outcome);
+    }
+    let tools = shipslip::setup::detect_tools(context, &["git", "gh"]).publish_tools()?;
     let root = tools.git.repository_root(start)?;
     let default_name = root
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("my-app");
-    let mut name = match args.name.take() {
+    let mut name = match args.name.clone() {
         Some(name) => name,
         None => {
-            prompt(
-                "GitHub repository name",
-                default_name,
-                name_check,
-                interrupts,
-            )
-            .await?
+            prompts
+                .value(
+                    "GitHub repository name",
+                    default_name,
+                    name_check,
+                    interrupts,
+                )
+                .await?
         }
     };
+    args.name = Some(name.clone());
     let visibility = match args.visibility {
         Some(visibility) => visibility,
         None => {
-            match prompt(
-                "Visibility (private/public)",
-                "private",
-                |value| {
-                    if matches!(value, "private" | "public") {
-                        Ok(())
-                    } else {
-                        Err("Choose private or public.")
-                    }
-                },
-                interrupts,
-            )
-            .await?
-            .as_str()
+            match prompts
+                .value(
+                    "Visibility (private/public)",
+                    "private",
+                    |value| {
+                        if matches!(value, "private" | "public") {
+                            Ok(())
+                        } else {
+                            Err("Choose private or public.")
+                        }
+                    },
+                    interrupts,
+                )
+                .await?
+                .as_str()
             {
                 "public" => Visibility::Public,
                 _ => Visibility::Private,
             }
         }
     };
+    args.visibility = Some(visibility);
     loop {
-        let operations_root = default_operations_root()?;
         let preview_work = publish::preview(
             PublishRequest {
                 root: root.clone(),
@@ -234,7 +372,7 @@ async fn run_at_inner(
             () = interrupts.recv() => {
                 interrupts.pending = true;
                 println!("Publication review cancelled.");
-                return Ok(None);
+                return Ok(PublishOutcome::Interrupted);
             }
         };
         *reviewed = true;
@@ -273,16 +411,20 @@ async fn run_at_inner(
                 escape(&status)
             );
         }
-        if yes_no(
+        if PublishPrompts::confirm(
+            prompts,
             "Create/resume this repository and publish the reviewed commit?",
-            false,
             interrupts,
         )
         .await?
             != Some(true)
         {
             println!("Reviewed commit was not published; local commits remain available.");
-            return Ok(None);
+            return Ok(if interrupts.pending {
+                PublishOutcome::Interrupted
+            } else {
+                PublishOutcome::Declined
+            });
         }
         let confirmation = preview.confirm();
         let result = interrupts.defer(publish::execute_publish(&preview, confirmation, &tools, |event| println!("{}", match event {
@@ -295,7 +437,11 @@ async fn run_at_inner(
                     escape(&result.url),
                     escape(&result.head)
                 );
-                return Ok(Some(Publication { result, visibility }));
+                return Ok(if interrupts.pending {
+                    PublishOutcome::Interrupted
+                } else {
+                    PublishOutcome::Published(Publication { result, visibility })
+                });
             }
             Err(PublishError::Unresolved(repository)) => {
                 drop(preview);
@@ -304,18 +450,21 @@ async fn run_at_inner(
                     escape(&repository)
                 );
                 if interrupts.pending
-                    || yes_no("Choose a new repository name?", false, interrupts).await?
+                    || PublishPrompts::confirm(prompts, "Choose a new repository name?", interrupts)
+                        .await?
                         != Some(true)
                 {
                     return Err(PublishError::Unresolved(repository).into());
                 }
-                name = prompt(
-                    "New GitHub repository name",
-                    &format!("{name}-new"),
-                    name_check,
-                    interrupts,
-                )
-                .await?;
+                name = prompts
+                    .value(
+                        "New GitHub repository name",
+                        &format!("{name}-new"),
+                        name_check,
+                        interrupts,
+                    )
+                    .await?;
+                args.name = Some(name.clone());
             }
             Err(error) => return Err(error.into()),
         }
@@ -390,7 +539,7 @@ pub(super) async fn offer_config_commit(
             return Err(error);
         }
     };
-    if published.is_none() {
+    if !matches!(published, PublishOutcome::Published(_)) {
         println!("Deployment config commit remains local-only.");
     }
     Ok(())
@@ -433,3 +582,7 @@ mod tests {
         assert!(error.to_string().contains("--repo"));
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "publish_setup_tests.rs"]
+mod setup_tests;

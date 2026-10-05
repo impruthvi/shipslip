@@ -5,10 +5,11 @@ use std::process::ExitCode;
 use std::str::FromStr;
 use std::time::Duration;
 
-use shipslip::create::{self, CreateError, CreateEvent, CreateRequest, Tools};
+use shipslip::create::{self, CreateError, CreateEvent, CreateRequest};
 use shipslip::git::Git;
 use shipslip::laravel::{Auth, Database, InstallerOptions, StarterKit, Testing};
 use shipslip::logs::escape;
+use shipslip::setup::{DetectionContext, DetectionOptions, DetectionReport, FindingState, Purpose};
 use tokio::sync::watch;
 
 use super::{ask_typed, ask_value, ask_yes_no, invalid_input, Interrupts, INTERRUPTED};
@@ -274,13 +275,29 @@ pub(super) async fn run(args: Args) -> Result<ExitCode, Box<dyn Error>> {
         },
         branch: args.branch,
     };
-    let preview = create::preview(
+    let rerun = rerun_command(&request);
+    let preview = match prepare_creation(
         request,
         &std::env::current_dir()?,
-        Tools::resolve()?,
+        &DetectionContext::from_environment(),
         create::default_operations_root()?,
+        &mut interrupts,
+        &mut super::setup::TerminalPrompts,
     )
-    .await?;
+    .await
+    {
+        Ok(CreationPreparation::Ready(preview)) => preview,
+        Ok(CreationPreparation::Stopped(outcome)) => {
+            if outcome == super::setup::RepairOutcome::Interrupted {
+                super::exit_interrupted();
+            }
+            return Ok(outcome.exit_code());
+        }
+        Err(error) => {
+            println!("Run `{rerun}` again to resume.");
+            return Err(error);
+        }
+    };
     println!("\nCreate Laravel project");
     println!(
         "Destination: {}",
@@ -307,6 +324,7 @@ pub(super) async fn run(args: Args) -> Result<ExitCode, Box<dyn Error>> {
         return Ok(ExitCode::SUCCESS);
     }
     let confirmation = preview.confirm();
+    let preview = *preview;
     let branch = preview.request.branch.clone();
     let (cancel, receiver) = watch::channel(false);
     let creating = create::execute_create(preview, confirmation, receiver, |event| match event {
@@ -340,6 +358,7 @@ pub(super) async fn run(args: Args) -> Result<ExitCode, Box<dyn Error>> {
         Ok(project) => project,
         Err(error) => {
             eprintln!("slip: {}", escape(&error.to_string()));
+            println!("Run `{rerun}` again to resume creation.");
             let cancelled = matches!(error, CreateError::Cancelled(_));
             let staging = match &error {
                 CreateError::Cancelled(path) => Some(path),
@@ -369,6 +388,105 @@ pub(super) async fn run(args: Args) -> Result<ExitCode, Box<dyn Error>> {
         }
     };
     finish_created_project(project, &branch, &mut interrupts).await
+}
+
+fn rerun_command(request: &CreateRequest) -> String {
+    format!(
+        "slip new {} --starter-kit {} --auth {} --database {} --testing {} --branch {} {}",
+        shell_quote(request.name.as_ref()),
+        request.options.starter_kit,
+        request.options.auth,
+        request.options.database,
+        request.options.testing,
+        shell_quote(request.branch.as_ref()),
+        if request.options.boost {
+            "--boost"
+        } else {
+            "--no-boost"
+        }
+    )
+}
+
+fn publish_warnings(report: &DetectionReport) -> String {
+    let mut lines = vec!["Publishing later will need:".into()];
+    for finding in report.findings.iter().filter(|finding| {
+        finding.requirement.purposes.contains(&Purpose::Publish)
+            && !matches!(finding.state, FindingState::Ok { .. })
+    }) {
+        lines.push(format!(
+            "  {}: {}",
+            finding.requirement.id,
+            escape(&super::setup::render_state(&finding.state))
+        ));
+        if let Some(detail) = &finding.detail {
+            lines.push(format!("    {}", escape(detail)));
+        }
+    }
+    if lines.len() == 1 {
+        String::new()
+    } else {
+        lines.join("\n")
+    }
+}
+
+enum CreationPreparation {
+    Ready(Box<create::CreatePreview>),
+    Stopped(super::setup::RepairOutcome),
+}
+
+async fn prepare_creation(
+    request: CreateRequest,
+    start: &Path,
+    context: &DetectionContext,
+    operations_root: PathBuf,
+    interrupts: &mut Interrupts,
+    prompts: &mut impl super::setup::SetupPrompts,
+) -> Result<CreationPreparation, Box<dyn Error>> {
+    request.check(start)?;
+    let options = DetectionOptions {
+        purposes: vec![Purpose::Create, Purpose::Publish],
+        root: start.into(),
+        installer_options: Some(request.options.clone()),
+    };
+    let notice = format!("Creation checks were interrupted; waiting for the current check. Press Ctrl-C again to exit immediately. Resume with `{}`.", rerun_command(&request));
+    let report = interrupts
+        .defer(shipslip::setup::detect(context, &options), &notice)
+        .await?;
+    let warnings = publish_warnings(&report);
+    let mut creation = report;
+    creation
+        .findings
+        .retain(|finding| finding.requirement.purposes.contains(&Purpose::Create));
+    for finding in &mut creation.findings {
+        finding.requirement.purposes = vec![Purpose::Create];
+    }
+    let repair = super::setup::RepairRequest {
+        options: DetectionOptions {
+            purposes: vec![Purpose::Create],
+            ..options
+        },
+        operations_root: operations_root.clone(),
+        report: Some(creation),
+        heading: Some("Missing for project creation"),
+        warnings,
+        confirmation: format!(
+            "Apply setup and continue creating {}?",
+            escape(&request.name)
+        ),
+        rerun: rerun_command(&request),
+    };
+    let outcome = super::setup::repair_with_prompts(repair, context, interrupts, prompts).await?;
+    if outcome != super::setup::RepairOutcome::Ready {
+        return Ok(CreationPreparation::Stopped(outcome));
+    }
+    let tools = shipslip::setup::detect_tools(
+        context,
+        &["php", "composer", "laravel", "git", "node", "npm"],
+    )
+    .creation_tools()?;
+    Ok(CreationPreparation::Ready(Box::new(
+        create::preview(request, start, tools, operations_root).await?,
+    )))
 }
 
 pub(super) async fn finish_created_project(
@@ -413,6 +531,57 @@ async fn finish_created_project_inner(
     }
     let root = project.root.clone();
     drop(project);
+    finish_local_project(&root, committed, interrupts, &mut TerminalProjectPrompts).await
+}
+
+trait ProjectPrompts {
+    async fn confirm(
+        &mut self,
+        question: &str,
+        interrupts: &mut Interrupts,
+    ) -> io::Result<Option<bool>>;
+    async fn publish(
+        &mut self,
+        root: &Path,
+        interrupts: &mut Interrupts,
+    ) -> Result<super::publish::PublishOutcome, Box<dyn Error>>;
+    async fn server(
+        &mut self,
+        root: &Path,
+        interrupts: &mut Interrupts,
+    ) -> Result<Option<PathBuf>, Box<dyn Error>>;
+}
+struct TerminalProjectPrompts;
+impl ProjectPrompts for TerminalProjectPrompts {
+    async fn confirm(
+        &mut self,
+        question: &str,
+        interrupts: &mut Interrupts,
+    ) -> io::Result<Option<bool>> {
+        yes_no(question, false, interrupts).await
+    }
+    async fn publish(
+        &mut self,
+        root: &Path,
+        interrupts: &mut Interrupts,
+    ) -> Result<super::publish::PublishOutcome, Box<dyn Error>> {
+        super::publish::run_at(super::publish::Args::default(), root, interrupts).await
+    }
+    async fn server(
+        &mut self,
+        root: &Path,
+        interrupts: &mut Interrupts,
+    ) -> Result<Option<PathBuf>, Box<dyn Error>> {
+        configure_server(root, interrupts).await
+    }
+}
+
+async fn finish_local_project(
+    root: &Path,
+    committed: bool,
+    interrupts: &mut Interrupts,
+    prompts: &mut impl ProjectPrompts,
+) -> Result<ExitCode, Box<dyn Error>> {
     println!(
         "\nLocal project verified: {}",
         escape(&root.display().to_string())
@@ -422,17 +591,29 @@ async fn finish_created_project_inner(
         shell_quote(root.as_os_str())
     );
     let mut published = None;
-    if committed && yes_no("Publish to GitHub now?", false, interrupts).await? == Some(true) {
-        published =
-            super::publish::run_at(super::publish::Args::default(), &root, interrupts).await?;
+    if committed
+        && prompts
+            .confirm("Publish to GitHub now?", interrupts)
+            .await?
+            == Some(true)
+    {
+        let outcome = prompts.publish(root, interrupts).await?;
+        published = match chained_publication(root, outcome, interrupts) {
+            Ok(publication) => publication,
+            Err(code) => return Ok(code),
+        };
     }
     if interrupts.pending {
         return Ok(ExitCode::from(INTERRUPTED));
     }
-    if yes_no("Configure a server now?", false, interrupts).await? == Some(true) {
-        if let Some(path) = configure_server(&root, interrupts).await? {
+    if prompts
+        .confirm("Configure a server now?", interrupts)
+        .await?
+        == Some(true)
+    {
+        if let Some(path) = prompts.server(root, interrupts).await? {
             if let Some(publication) = published {
-                super::publish::offer_config_commit(&root, &path, &publication, interrupts).await?;
+                super::publish::offer_config_commit(root, &path, &publication, interrupts).await?;
             } else {
                 println!("Deployment config remains local. Review and commit it when ready.");
             }
@@ -443,6 +624,27 @@ async fn finish_created_project_inner(
     } else {
         ExitCode::SUCCESS
     })
+}
+
+fn chained_publication(
+    root: &Path,
+    outcome: super::publish::PublishOutcome,
+    interrupts: &mut Interrupts,
+) -> Result<Option<super::publish::Publication>, ExitCode> {
+    match outcome {
+        super::publish::PublishOutcome::Published(publication) => Ok(Some(publication)),
+        outcome => {
+            if matches!(outcome, super::publish::PublishOutcome::Interrupted) {
+                interrupts.pending = true;
+            }
+            println!("The verified local project is retained. Run `cd {} && slip publish github` to publish later.", shell_quote(root.as_os_str()));
+            match outcome {
+                super::publish::PublishOutcome::NotReady
+                | super::publish::PublishOutcome::Declined => Ok(None),
+                _ => Err(outcome.exit_code()),
+            }
+        }
+    }
 }
 
 fn retained_project_guidance(root: &Path) -> String {
@@ -563,3 +765,7 @@ mod tests {
         assert!(error.to_string().contains("pass --auth"));
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "new_setup_tests.rs"]
+mod setup_tests;

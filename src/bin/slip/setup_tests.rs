@@ -1,9 +1,7 @@
 use super::*;
-use shipslip::setup as setup_api;
 use std::fs;
 
-#[path = "../../fixtures/setup_fixture.rs"]
-mod fixture;
+use super::super::setup_fixture as fixture;
 use fixture::Fixture;
 
 #[derive(Default)]
@@ -33,6 +31,7 @@ impl SetupPrompts for Prompts {
     async fn confirm(
         &mut self,
         plan: &setup::SetupPlan,
+        _question: &str,
         _interrupts: &mut Interrupts,
     ) -> io::Result<Option<bool>> {
         assert!(plan.inputs_needed.is_empty());
@@ -237,14 +236,14 @@ async fn prompt_failures_preserve_exit_codes_and_do_not_run_actions() {
         (io::ErrorKind::InvalidInput, 2),
     ] {
         let code = finish_prompt_error(
-            &RepairArgs::default(),
+            "slip setup",
             &fixture.root.join("ops"),
             &plan,
             &report,
             io::Error::new(kind, "prompt failed"),
         )
         .unwrap();
-        assert_eq!(code, ExitCode::from(expected));
+        assert_eq!(code.exit_code(), ExitCode::from(expected));
     }
     let records = records(&fixture);
     assert!(records.iter().any(|record| record["exit_code"] == 1));

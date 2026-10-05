@@ -460,6 +460,15 @@ pub struct CreateRequest {
     pub options: InstallerOptions,
     pub branch: String,
 }
+impl CreateRequest {
+    pub fn check(&self, start: &Path) -> Result<Destination, CreateError> {
+        self.options.validate()?;
+        if !crate::config::is_branch_name(&self.branch) {
+            return Err(CreateError::Invalid("invalid --branch".into()));
+        }
+        Destination::check(start, &self.name)
+    }
+}
 #[derive(Debug)]
 pub struct CreatePreview {
     pub destination: Destination,
@@ -501,11 +510,7 @@ pub async fn preview(
     tools: Tools,
     operations_root: PathBuf,
 ) -> Result<CreatePreview, CreateError> {
-    request.options.validate()?;
-    if !crate::config::is_branch_name(&request.branch) {
-        return Err(CreateError::Invalid("invalid --branch".into()));
-    }
-    let destination = Destination::check(start, &request.name)?;
+    let destination = request.check(start)?;
     crate::git::Git::new(tools.git.clone())
         .validate_branch(start, &request.branch)
         .map_err(|error| CreateError::Invalid(error.to_string()))?;

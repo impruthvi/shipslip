@@ -39,6 +39,11 @@ mod new;
 mod publish;
 #[path = "slip/setup.rs"]
 mod setup;
+#[cfg(all(test, unix))]
+use shipslip::setup as setup_api;
+#[cfg(all(test, unix))]
+#[path = "../fixtures/setup_fixture.rs"]
+mod setup_fixture;
 
 fn main() -> ExitCode {
     // Capture and remove ambient token variables before starting any threads.
