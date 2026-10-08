@@ -126,6 +126,14 @@ fn list_rows_stay_on_one_line() {
     assert!(text.contains("staging\\x0abbbb0002  forged"));
     assert!(text.contains("unreadable: expected value\\x0aat line 1"));
     assert!(text.contains("4 older receipts; use --all to list them."));
+    // The header names the zone the times are in.
+    let header = text.lines().find(|line| line.starts_with("ID ")).unwrap();
+    let zone = header
+        .split("STARTED (")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .unwrap();
+    assert!(!zone.is_empty() && !zone.contains(' '), "{header}");
     assert_eq!(
         render_list(
             "app",

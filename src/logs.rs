@@ -279,7 +279,7 @@ impl Format {
             Self::Recognized => "Laravel".into(),
             Self::Partial(percent) => format!("partly recognized ({percent}% of lines)"),
             Self::Unrecognized => "format not recognized".into(),
-            Self::Empty => "empty".into(),
+            Self::Empty => "no lines in this window".into(),
             Self::NotRead => "not read".into(),
         }
     }
@@ -1705,8 +1705,11 @@ fn short_path<'a>(snapshot: &Snapshot, path: &'a str) -> &'a str {
             .and_then(|path| path.strip_prefix('/'))
             .unwrap_or(path);
     }
-    // Laravel application frames still identify app/ when log paths are relative.
-    path.rfind("/app/")
+    // Laravel source directories still identify the root when log paths are relative.
+    ["/app/", "/database/", "/routes/", "/config/", "/resources/"]
+        .iter()
+        .filter_map(|dir| path.rfind(dir))
+        .max()
         .map(|at| &path[at + 1..])
         .unwrap_or(path)
 }
@@ -2422,7 +2425,7 @@ mod tests {
         let mut snapshot = snapshot_of("", true);
         snapshot.channels[0].name = "app".into();
         snapshot.channels[0].format = Format::Empty;
-        let expected = "production · app · times UTC\nsince 24h (2026-10-01 00:00:00)\n\nCHANNEL        KIND    FILES  SIZE\napp (laravel)  single      1   0 B\n    LAST WRITE: 2026-10-01 10:00:00\n    FORMAT: empty\n    COVERAGE: full\n    BASELINE: none\n\n";
+        let expected = "production · app · times UTC\nsince 24h (2026-10-01 00:00:00)\n\nCHANNEL        KIND    FILES  SIZE\napp (laravel)  single      1   0 B\n    LAST WRITE: 2026-10-01 10:00:00\n    FORMAT: no lines in this window\n    COVERAGE: full\n    BASELINE: none\n\n";
         assert_eq!(render_channels(&snapshot), expected);
     }
 
@@ -2446,6 +2449,10 @@ mod tests {
         assert_eq!(
             short_path(&snapshot, "/opt/external/src/Failure.php"),
             "/opt/external/src/Failure.php"
+        );
+        assert_eq!(
+            short_path(&snapshot, "/var/www/laravel/database/migrations/x.php"),
+            "database/migrations/x.php"
         );
         snapshot.channels[0].files = vec!["/srv/app/storage/logs/laravel.log".into()];
         assert_eq!(

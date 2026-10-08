@@ -6,6 +6,16 @@ change the library API.
 
 ## [Unreleased]
 
+### Changed
+
+- Log watch and `slip logs` find the source file of errors thrown in
+  `database/`, `routes/`, `config/`, and `resources/` (for example a failing
+  migration), not only `app/`; `vendor/` is still skipped. Such errors now
+  group by file, so they may be reported as new once.
+- The `slip receipts` list names its time zone (`STARTED (IST)`), since
+  `slip logs` shows UTC.
+- `slip logs --channels` says `no lines in this window` instead of `empty`.
+
 ## [0.5.2] - 2026-10-08
 
 ### Fixed
