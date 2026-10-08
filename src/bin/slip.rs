@@ -13,7 +13,7 @@ use shipslip::config::{
 };
 use shipslip::github_auth::discover_repository;
 use shipslip::logs::{self, Level, Lookup, Since};
-use shipslip::receipt::{default_receipts_root, find_open, ReceiptJournal};
+use shipslip::receipt::{default_receipts_root, find_open, strip_color, ReceiptJournal};
 use shipslip::transport::SshTransport;
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute_recorded, lock_status,
@@ -550,8 +550,10 @@ async fn follow_events(
         };
         stage = next_stage(stage, &event);
         match event {
-            DeployEvent::StepStarted { index, name } => println!("\nStep {index}: {name}"),
-            DeployEvent::Output { line, .. } => println!("  {line}"),
+            DeployEvent::StepStarted { index, name } => {
+                println!("\nStep {index}: {}", server_field(&name))
+            }
+            DeployEvent::Output { line, .. } => println!("  {}", server_line(&line)),
             DeployEvent::StepFinished {
                 index,
                 status,
@@ -560,7 +562,7 @@ async fn follow_events(
             DeployEvent::MaintenanceStarted { phase } => {
                 println!("\nMaintenance mode: {}", phase_name(phase));
             }
-            DeployEvent::MaintenanceOutput { line, .. } => println!("  {line}"),
+            DeployEvent::MaintenanceOutput { line, .. } => println!("  {}", server_line(&line)),
             DeployEvent::MaintenanceFinished {
                 phase,
                 status,
@@ -581,7 +583,7 @@ async fn follow_events(
             DeployEvent::ServerState { head, tree_dirty } => {
                 println!(
                     "Server state: HEAD={}, working tree {}",
-                    head.as_deref().unwrap_or("unknown"),
+                    server_field(head.as_deref().unwrap_or("unknown")),
                     match tree_dirty {
                         Some(true) => "dirty",
                         Some(false) => "clean",
@@ -594,9 +596,9 @@ async fn follow_events(
                 message,
                 file_line,
             } => {
-                println!("New log error ({phase:?}): {message}");
+                println!("New log error ({phase:?}): {}", server_field(&message));
                 if let Some(file_line) = file_line {
-                    println!("  at {file_line}");
+                    println!("  at {}", server_field(&file_line));
                 }
             }
             DeployEvent::WatchStarted { window } => {
@@ -614,7 +616,7 @@ async fn follow_events(
                 progress = None;
                 println!("{}", watch_summary(&result));
                 for warning in result.warnings {
-                    eprintln!("  {warning}");
+                    eprintln!("  {}", server_field(&warning));
                 }
             }
             DeployEvent::SmokeFinished(result) => match result {
@@ -622,10 +624,11 @@ async fn follow_events(
                     println!("Smoke check: HTTP {status} in {latency_ms} ms")
                 }
                 SmokeResult::Failed { status, reason } => eprintln!(
-                    "Smoke check failed{}: {reason}",
+                    "Smoke check failed{}: {}",
                     status
                         .map(|code| format!(" (HTTP {code})"))
-                        .unwrap_or_default()
+                        .unwrap_or_default(),
+                    server_field(&reason)
                 ),
                 SmokeResult::Skipped => println!("Smoke check: skipped"),
                 SmokeResult::NotConfigured => {}
@@ -638,9 +641,14 @@ async fn follow_events(
                 );
             }
             DeployEvent::Interrupted { index, reason } => {
-                eprintln!("Lost contact while observing step {index}: {reason}");
+                eprintln!(
+                    "Lost contact while observing step {index}: {}",
+                    server_field(&reason)
+                );
             }
-            DeployEvent::RunError { reason } => eprintln!("Deploy could not finish: {reason}"),
+            DeployEvent::RunError { reason } => {
+                eprintln!("Deploy could not finish: {}", server_field(&reason))
+            }
             DeployEvent::Warning { reason } => eprintln!("Warning: {}", logs::escape(&reason)),
             DeployEvent::Finished(outcome) => {
                 succeeded = matches!(&outcome, DeployOutcome::Succeeded);
@@ -1093,7 +1101,7 @@ fn show_preview(preview: &shipslip::Preview) {
     if preview.run_plan() == RunPlan::Deploy && !preview.commits().is_empty() {
         println!("Commits to deploy:");
         for commit in preview.commits() {
-            println!("  {commit}");
+            println!("  {}", server_field(commit));
         }
     }
     let first_step = preview.run_plan().first_recipe_step();
@@ -1712,8 +1720,19 @@ fn show_outcome(outcome: &DeployOutcome) {
     if *outcome == DeployOutcome::Succeeded {
         println!("{}", outcome.summary());
     } else {
-        eprintln!("{}", outcome.summary());
+        eprintln!("{}", server_field(&outcome.summary()));
     }
+}
+
+/// A line of server command output: color codes removed, other control
+/// characters escaped so output cannot move the cursor or retitle the terminal.
+fn server_line(line: &str) -> String {
+    logs::escape(&strip_color(line))
+}
+
+/// Server or error text shown inside one labeled line.
+fn server_field(text: &str) -> String {
+    logs::escape_field(text)
 }
 
 fn phase_name(phase: MaintenancePhase) -> &'static str {
