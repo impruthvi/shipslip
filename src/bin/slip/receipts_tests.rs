@@ -147,7 +147,9 @@ fn next_steps_use_only_recorded_facts() {
     });
     let text = render_show(&failed);
     assert!(text.contains("Server HEAD at end: not recorded"));
+    assert!(text.contains("If the cause was on the server"), "{text}");
     assert!(text.contains("`slip from-step staging 1`"));
+    assert!(text.contains("If it needs a code change, push the fix and run `slip deploy staging`."));
 
     let unfinished = receipt(|value| {
         value["status"] = json!("InProgress");
@@ -169,4 +171,68 @@ fn next_steps_use_only_recorded_facts() {
         value["outcome"] = json!({"StoppedAfterStep": {"step": 2, "reason": "Requested"}});
     });
     assert!(next_steps(&stopped).is_empty());
+}
+
+struct TempRoot(PathBuf);
+
+impl TempRoot {
+    fn new(name: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "shipslip-cli-receipts-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        Self(path)
+    }
+
+    fn save(&self, started_at_ms: u64, receipt: &Receipt) {
+        let dir = self.0.join("app").join("staging");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{started_at_ms}-{}.json", receipt.run_id));
+        std::fs::write(path, serde_json::to_vec(receipt).unwrap()).unwrap();
+    }
+}
+
+impl Drop for TempRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn up_to_date_hint_points_at_a_failed_last_run() {
+    let root = TempRoot::new("failed");
+    assert_eq!(up_to_date_hint(&root.0, "app", "staging"), None);
+
+    let failed = receipt(|value| {
+        value["run_id"] = json!("bbbb0002-0");
+        value["outcome"] = json!({"FailedAtStep": {"step": 2, "partial_update": false}});
+        value["app_left_down"] = json!(true);
+    });
+    root.save(2000, &failed);
+    // A later run that stopped before changing anything does not hide it.
+    let cancelled = receipt(|value| {
+        value["run_id"] = json!("cccc0003-0");
+        value["outcome"] = json!("CancelledBeforeChanges");
+        value["mutation_started"] = json!(false);
+    });
+    root.save(3000, &cancelled);
+
+    let hint = up_to_date_hint(&root.0, "app", "staging").unwrap();
+    assert_eq!(
+        hint.lines().collect::<Vec<_>>(),
+        [
+            "The last run here (bbbb0002) did not succeed: Failed at step 2. See `slip receipts show bbbb0002`.",
+            "If the cause was on the server (permissions, .env, database), fix it there, then `slip from-step staging 2` runs the remaining steps on the deployed commit.",
+            "If it needs a code change, push the fix and run `slip deploy staging`.",
+            "The app may still be in maintenance mode; `slip up staging` turns it off.",
+        ]
+    );
+}
+
+#[test]
+fn up_to_date_hint_is_silent_after_a_successful_run() {
+    let root = TempRoot::new("ok");
+    root.save(1000, &receipt(|_| {}));
+    assert_eq!(up_to_date_hint(&root.0, "app", "staging"), None);
 }

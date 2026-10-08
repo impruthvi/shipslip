@@ -14,6 +14,17 @@ change the library API.
   fast-forward. `slip receipts show` then reports where the server ended up.
   A failed read leaves it `not recorded` and never changes the outcome.
 
+### Fixed
+
+- After a failed step, `slip receipts show` no longer suggests only
+  `slip from-step`, which reruns the same commit. It separates a server cause
+  (fix it there, then `slip from-step`) from a code cause (push the fix, then
+  `slip deploy`).
+- When `slip deploy` is blocked as already up to date and the last run on that
+  commit failed, is unknown, did not finish, or left the app in maintenance
+  mode, the message says so and points to `slip receipts show`, `slip
+  from-step`, and `slip up`.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added
