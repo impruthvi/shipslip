@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-08
+
 ### Added
 
 - `slip receipts [ENV] [--all]` lists saved receipts newest first, with the
@@ -248,6 +250,8 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.5.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.5.0
+[0.4.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.4.0
 [0.3.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.3.0
 [0.2.2]: https://github.com/impruthvi/shipslip/releases/tag/v0.2.2
 [0.2.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.2.0
