@@ -1369,3 +1369,39 @@ fn server_text_cannot_control_the_terminal() {
         "disk full\\x0aDeploy run succeeded.\\x1b[31m"
     );
 }
+
+#[test]
+fn trust_review_shows_settings_without_debug_syntax() {
+    let snapshot = TrustSnapshot {
+        ssh_alias: "app-staging".into(),
+        path: "/srv/app".into(),
+        branch: "main".into(),
+        production: false,
+        maintenance: true,
+        log: None,
+        log_daily: false,
+        smoke_url: Some("https://staging.example.test/".into()),
+        timezone: None,
+        logs: BTreeMap::new(),
+        steps: vec!["php artisan migrate --force".into()],
+    };
+    let lines = trust_changes(None, &snapshot);
+    for expected in [
+        "  log: not set (Laravel default)",
+        "  smoke_url: https://staging.example.test/",
+        "  timezone: not set (UTC)",
+        "    1. php artisan migrate --force",
+    ] {
+        assert!(lines.iter().any(|line| line == expected), "{lines:#?}");
+    }
+    assert!(!lines
+        .iter()
+        .any(|line| line.contains("Some(") || line.contains("None")));
+
+    let mut changed = snapshot.clone();
+    changed.smoke_url = None;
+    assert_eq!(
+        trust_changes(Some(&snapshot), &changed),
+        ["  smoke_url: https://staging.example.test/ -> not set"]
+    );
+}

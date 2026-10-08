@@ -15,6 +15,9 @@ change the library API.
 - The `slip receipts` list names its time zone (`STARTED (IST)`), since
   `slip logs` shows UTC.
 - `slip logs --channels` says `no lines in this window` instead of `empty`.
+- `slip trust` shows optional settings as values or `not set` (with the
+  default that applies) instead of `None` / `Some("…")`. Existing approvals
+  are unaffected.
 
 ## [0.5.2] - 2026-10-08
 
