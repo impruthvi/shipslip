@@ -129,7 +129,10 @@ fn render_list(project: &str, env: Option<&str>, listing: &receipt::Listing) -> 
     }
     let mut rows = vec![[
         "ID".to_string(),
-        "STARTED".into(),
+        match local_zone() {
+            Some(zone) => format!("STARTED ({zone})"),
+            None => "STARTED (UTC)".into(),
+        },
         "ENV".into(),
         "FROM → TARGET".into(),
         "OUTCOME".into(),
@@ -547,6 +550,18 @@ fn step_line(
 
 fn short(sha: &str) -> String {
     escape_field(sha.get(..12).unwrap_or(sha))
+}
+
+/// The local time zone's abbreviation, e.g. `IST`; `None` where times fall
+/// back to UTC.
+fn local_zone() -> Option<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis())
+        .unwrap_or_default();
+    let zone = local_time(now, true);
+    // `2026-10-08 16:30:00 IST`: the zone is the third field.
+    zone.split(' ').nth(2).map(str::to_string)
 }
 
 /// Local time, `2026-10-07 19:32` or with seconds and zone.

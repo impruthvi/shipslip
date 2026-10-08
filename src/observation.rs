@@ -673,9 +673,10 @@ fn patterns() -> &'static (Regex, Regex, Regex, Regex, Regex) {
     static RE: OnceLock<(Regex, Regex, Regex, Regex, Regex)> = OnceLock::new();
     RE.get_or_init(|| {
         (
-            // `app/` must be a whole path segment: `/srv/my-app/vendor/...` is not an app file.
+            // A Laravel source directory must be a whole path segment:
+            // `/srv/my-app/vendor/...` is not an app file.
             Regex::new(
-                r"(?:^|[^A-Za-z0-9_.-])((?:/?[A-Za-z0-9_.-]+/)*?app/[A-Za-z0-9_./-]+\.php)(?::(\d+)|\((\d+)\))",
+                r"(?:^|[^A-Za-z0-9_.-])((?:/?[A-Za-z0-9_.-]+/)*?(?:app|database|routes|config|resources)/[A-Za-z0-9_./-]+\.php)(?::(\d+)|\((\d+)\))",
             )
             .unwrap(),
             Regex::new(r"[0-9a-fA-F]{8}-[0-9a-fA-F-]{27,}").unwrap(),
@@ -1203,6 +1204,31 @@ mod tests {
             file("RuntimeException at /var/www/html/vendor/acme/pkg/app/Thing.php:5"),
             None
         );
+        // Laravel's other source directories count too (found in a staging
+        // test: a failing migration showed no file).
+        assert_eq!(
+            file(
+                "RuntimeException(code: 0): fails on purpose. at \
+                 /var/www/laravel/database/migrations/2026_10_08_000000_x.php:10)"
+            ),
+            Some("/var/www/laravel/database/migrations/2026_10_08_000000_x.php".into())
+        );
+        for dir in [
+            "routes/web.php",
+            "config/app.php",
+            "resources/views/x.blade.php",
+        ] {
+            assert_eq!(
+                file(&format!("ErrorException at /srv/site/{dir}:3")),
+                Some(format!("/srv/site/{dir}")),
+                "{dir}"
+            );
+        }
+        assert_eq!(
+            file("RuntimeException at /srv/site/vendor/acme/pkg/config/x.php:5"),
+            None
+        );
+        assert_eq!(file("RuntimeException at /srv/my-config/lib/x.php:5"), None);
         assert_eq!(
             signature(
                 "ERROR",
