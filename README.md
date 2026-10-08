@@ -15,8 +15,10 @@ Shipslip creates a verified Laravel project, optionally publishes it to GitHub,
 and runs a configured deploy recipe over SSH. Each stage shows a preview and
 asks for confirmation. Production deploys require typing the environment name.
 
-New teammate? Follow the [staging setup guide](docs/setup.md) for installation,
-SSH access, project configuration, deployment, and recovery.
+First time? [Try Shipslip](docs/try-shipslip.md) walks through a first staging
+deploy in about 15 minutes. New teammate? Follow the
+[staging setup guide](docs/setup.md) for installation, SSH access, project
+configuration, deployment, and recovery.
 
 ## Quick start
 
