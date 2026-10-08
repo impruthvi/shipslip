@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-08
+
 ### Changed
 
 - After any failed recipe step, or one whose exit code was lost, the deploy
@@ -269,6 +271,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.5.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.5.1
 [0.5.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.5.0
 [0.4.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.4.0
 [0.3.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.3.0
