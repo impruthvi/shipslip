@@ -246,7 +246,9 @@ impl Receipt {
             (
                 ReceiptStatus::Final,
                 Some(
-                    DeployOutcome::CancelledBeforeChanges | DeployOutcome::AbortedBeforeChanges(_)
+                    DeployOutcome::CancelledBeforeChanges
+                        | DeployOutcome::AbortedBeforeChanges(_)
+                        | DeployOutcome::StoppedInMaintenance(_)
                 )
             )
         );

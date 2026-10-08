@@ -94,6 +94,8 @@ pub enum AbortReason {
     ConnectFailed(String),
     CheckFailed(String),
     JournalFailed(String),
+    /// The user stopped the run.
+    Cancelled,
 }
 
 impl fmt::Display for AbortReason {
@@ -117,6 +119,7 @@ impl fmt::Display for AbortReason {
             Self::ConnectFailed(reason) => write!(f, "could not reach the server: {reason}"),
             Self::CheckFailed(reason) => write!(f, "could not check the server: {reason}"),
             Self::JournalFailed(reason) => write!(f, "could not save the receipt: {reason}"),
+            Self::Cancelled => write!(f, "the run was cancelled"),
         }
     }
 }

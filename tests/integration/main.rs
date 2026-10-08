@@ -1891,6 +1891,32 @@ async fn detached_step_keeps_running_on_the_server() {
     assert_eq!(result, "ok\n0");
 }
 
+/// Detaching as soon as a step is announced lands during its launch. The
+/// launch must complete, so "it continues on the server" is true.
+#[tokio::test]
+async fn detach_at_step_start_never_abandons_the_launch() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    let step = "sleep 1; echo ok > ~/launch-marker";
+
+    let (events, running) = deploy_until(ssh, target(&path, &[step]), |event| {
+        matches!(event, DeployEvent::StepStarted { index: 1, .. })
+    })
+    .await;
+    running.handle.detach();
+    let run_id = running.run_id.clone();
+    let events = running.rest(events).await;
+    assert_eq!(events.last(), Some(&DeployEvent::Detached { index: 1 }));
+
+    let exit_file = format!("~/.shipslip/runs/{run_id}/step-1/exit");
+    let result = server.exec(
+        &format!("for _ in $(seq 50); do [ -e {exit_file} ] && break; sleep 0.1; done; cat ~/launch-marker {exit_file}"),
+        "",
+    );
+    assert_eq!(result, "ok\n0");
+}
+
 #[tokio::test]
 async fn attach_recovers_a_detached_run_without_relaunching_the_step() {
     let server = Server::start().await;
@@ -2403,7 +2429,7 @@ async fn maintenance_down_failure_aborts_before_fast_forward() {
 
     let events = deploy(ssh, maintenance_target(&path, &["echo never"])).await;
     assert!(
-        events.contains(&DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
+        events.contains(&DeployEvent::Finished(DeployOutcome::StoppedInMaintenance(
             AbortReason::MaintenanceDownFailed(9)
         )))
     );

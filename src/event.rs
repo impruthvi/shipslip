@@ -68,6 +68,9 @@ pub enum DeployOutcome {
     },
     CancelledBeforeChanges,
     AbortedBeforeChanges(AbortReason),
+    /// Maintenance mode may have been turned on, then the run stopped before
+    /// any deploy step ran, so the app may still be in maintenance mode.
+    StoppedInMaintenance(AbortReason),
     Unknown {
         step: usize,
         reason: String,
@@ -97,6 +100,9 @@ impl DeployOutcome {
             Self::AbortedBeforeChanges(reason) => {
                 format!("Deploy was aborted before changes: {reason}.")
             }
+            Self::StoppedInMaintenance(reason) => format!(
+                "Deploy stopped after maintenance mode was turned on; no deploy steps ran: {reason}."
+            ),
             Self::Unknown { step, reason } => {
                 format!("Outcome of step {step} is unknown: {reason}")
             }
@@ -115,6 +121,7 @@ impl DeployOutcome {
             Self::StoppedAfterStep { step, .. } => format!("Stopped after step {step}"),
             Self::CancelledBeforeChanges => "Cancelled before changes".into(),
             Self::AbortedBeforeChanges(_) => "Aborted before changes".into(),
+            Self::StoppedInMaintenance(_) => "Stopped in maintenance mode, no steps ran".into(),
             Self::Unknown { step, .. } => format!("Unknown at step {step}"),
         }
     }
@@ -236,6 +243,11 @@ mod tests {
                 DeployOutcome::AbortedBeforeChanges(AbortReason::LockLost),
                 "Deploy was aborted before changes: the deploy lock was taken over.",
                 "Aborted before changes",
+            ),
+            (
+                DeployOutcome::StoppedInMaintenance(AbortReason::Cancelled),
+                "Deploy stopped after maintenance mode was turned on; no deploy steps ran: the run was cancelled.",
+                "Stopped in maintenance mode, no steps ran",
             ),
             (
                 DeployOutcome::Unknown {

@@ -466,6 +466,9 @@ fn next_steps(receipt: &Receipt) -> Vec<String> {
                 step + 1
             ))
         }
+        Some(DeployOutcome::StoppedInMaintenance(_)) => lines.push(
+            "No deploy steps ran, so the code on the server did not change.".into(),
+        ),
         Some(DeployOutcome::Unknown { step, .. }) => lines.push(format!(
             "The result of step {step} is unknown. Check the server before running anything again."
         )),
