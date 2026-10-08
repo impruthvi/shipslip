@@ -6,6 +6,14 @@ change the library API.
 
 ## [Unreleased]
 
+### Changed
+
+- After any failed recipe step, or one whose exit code was lost, the deploy
+  reads the server's commit and working-tree state (read-only, best effort)
+  and records it in the receipt and output, as it already did for a failed
+  fast-forward. `slip receipts show` then reports where the server ended up.
+  A failed read leaves it `not recorded` and never changes the outcome.
+
 ## [0.5.0] - 2026-10-08
 
 ### Added
