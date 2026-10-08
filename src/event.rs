@@ -74,6 +74,52 @@ pub enum DeployOutcome {
     },
 }
 
+impl DeployOutcome {
+    /// One sentence, including any recorded reason.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Succeeded => "Deploy run succeeded.".into(),
+            Self::FailedAtStep {
+                step,
+                partial_update,
+            } => format!(
+                "Deploy failed at step {step}{}.",
+                if *partial_update {
+                    "; the server may have been partially updated"
+                } else {
+                    ""
+                }
+            ),
+            Self::StoppedAfterStep { step, reason } => {
+                format!("Deploy stopped after step {step}: {reason}.")
+            }
+            Self::CancelledBeforeChanges => "Deploy was cancelled before changes.".into(),
+            Self::AbortedBeforeChanges(reason) => {
+                format!("Deploy was aborted before changes: {reason}.")
+            }
+            Self::Unknown { step, reason } => {
+                format!("Outcome of step {step} is unknown: {reason}")
+            }
+        }
+    }
+
+    /// A short label without reasons, which may contain server text.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Succeeded => "Succeeded".into(),
+            Self::FailedAtStep {
+                step,
+                partial_update: true,
+            } => format!("Failed at step {step} (partial update)"),
+            Self::FailedAtStep { step, .. } => format!("Failed at step {step}"),
+            Self::StoppedAfterStep { step, .. } => format!("Stopped after step {step}"),
+            Self::CancelledBeforeChanges => "Cancelled before changes".into(),
+            Self::AbortedBeforeChanges(_) => "Aborted before changes".into(),
+            Self::Unknown { step, .. } => format!("Unknown at step {step}"),
+        }
+    }
+}
+
 /// Progress reported by [`crate::execute`], in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -143,4 +189,66 @@ pub enum DeployEvent {
     WatchFinished(WatchResult),
     SmokeFinished(SmokeResult),
     Finished(DeployOutcome),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outcome_wording_is_stable() {
+        let cases = [
+            (
+                DeployOutcome::Succeeded,
+                "Deploy run succeeded.",
+                "Succeeded",
+            ),
+            (
+                DeployOutcome::FailedAtStep {
+                    step: 2,
+                    partial_update: false,
+                },
+                "Deploy failed at step 2.",
+                "Failed at step 2",
+            ),
+            (
+                DeployOutcome::FailedAtStep {
+                    step: 0,
+                    partial_update: true,
+                },
+                "Deploy failed at step 0; the server may have been partially updated.",
+                "Failed at step 0 (partial update)",
+            ),
+            (
+                DeployOutcome::StoppedAfterStep {
+                    step: 1,
+                    reason: StopReason::ConnectFailed("timed out".into()),
+                },
+                "Deploy stopped after step 1: could not reach the server: timed out.",
+                "Stopped after step 1",
+            ),
+            (
+                DeployOutcome::CancelledBeforeChanges,
+                "Deploy was cancelled before changes.",
+                "Cancelled before changes",
+            ),
+            (
+                DeployOutcome::AbortedBeforeChanges(AbortReason::LockLost),
+                "Deploy was aborted before changes: the deploy lock was taken over.",
+                "Aborted before changes",
+            ),
+            (
+                DeployOutcome::Unknown {
+                    step: 3,
+                    reason: "connection lost".into(),
+                },
+                "Outcome of step 3 is unknown: connection lost",
+                "Unknown at step 3",
+            ),
+        ];
+        for (outcome, summary, label) in cases {
+            assert_eq!(outcome.summary(), summary);
+            assert_eq!(outcome.label(), label);
+        }
+    }
 }

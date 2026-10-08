@@ -391,8 +391,33 @@ Each CLI run saves a local receipt before it starts a remote command. On macOS,
 receipts live under `~/Library/Application Support/Shipslip/receipts/` in a
 directory for the project and environment. The receipt records the approved
 plan, exact commits, step results, recent step output, log watch, smoke result,
-and final outcome.
+and final outcome. New receipts also record who started the run: the local
+user and the checkout's Git name and email.
 Treat receipts as private: command output can contain secrets.
+
+List and read receipts without contacting the server:
+
+```sh
+slip receipts                 # newest 20 for this project; --all lists every one
+slip receipts staging         # one environment
+slip receipts show 18dab54b   # one run, by the ID shown in the list
+slip receipts show 18dab54b --md
+```
+
+Each row shows the outcome with flags for anything that needs a look:
+`⚠ N new error groups`, `⚠ smoke 500`, `ⓘ log not fully observed`,
+`ⓘ log not recorded`, `ⓘ smoke not recorded`, and `⛔ app in maintenance mode`.
+A run that never finished reads `Unfinished (last recorded: …)`, never as its
+saved outcome. `show` prints the steps (including maintenance on/off) with exit
+codes and saved output, the log watch and smoke results, and what to check
+next. It only states what the receipt recorded; for example, it shows the
+server's commit after a failure as `not recorded` unless the run read it.
+
+`--md` prints Markdown with statuses, exit codes, commits, commands, and error
+classes and counts, but no server output, log messages, warnings, or reasons,
+and names who started the run without their email address.
+`--md --with-details` adds them; review that output for secrets before sharing
+it. Server text is escaped in both the terminal and Markdown.
 
 Ctrl-C at the confirmation prompt cancels the run and releases the deploy
 lock. During the steps, Ctrl-C starts no new step and stops following the

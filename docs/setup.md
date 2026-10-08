@@ -393,6 +393,10 @@ Shipslip saves a receipt on your computer. On macOS, look under
 `~/.local/share/shipslip/receipts/`. Receipts can contain command output and
 should be treated as private.
 
+To see past runs, use `slip receipts`, then `slip receipts show ID` for one
+run. `slip receipts show ID --md` prints a Markdown summary without server
+output or error text, for pasting into a pull request or chat.
+
 ## 5. Read logs
 
 From the same local project checkout, inspect logs without deploying:

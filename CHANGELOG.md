@@ -6,6 +6,24 @@ change the library API.
 
 ## [Unreleased]
 
+### Added
+
+- `slip receipts [ENV] [--all]` lists saved receipts newest first, with the
+  outcome and flags for new log errors, failed smoke checks, incomplete or
+  unrecorded checks, and an app left in maintenance mode. Unfinished runs read
+  as unfinished. Unreadable receipts and receipts from a newer Shipslip are
+  listed, not hidden. Only the newest 20 are read unless `--all` is given.
+- `slip receipts show ID` prints one run: steps with maintenance on/off, exit
+  codes, saved output, log watch, smoke check, and next steps based only on
+  recorded facts. `--md` prints Markdown without server output, log messages,
+  warnings, reasons, or the deployer's email; `--md --with-details` includes
+  them.
+- New receipts record who started the run: the local user and the checkout's
+  Git name and email. Older receipts show `not recorded`.
+- Library: `receipt::{list, find, read, markdown}`, `Receipt::badge`,
+  `DeployOutcome::summary` and `DeployOutcome::label`, and
+  `logs::escape_field`.
+
 ## [0.4.0] - 2026-10-05
 
 ### Added
