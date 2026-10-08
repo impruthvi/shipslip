@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-10-08
+
 ### Changed
 
 - Log watch and `slip logs` find the source file of errors thrown in
@@ -304,6 +306,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.5.3]: https://github.com/impruthvi/shipslip/releases/tag/v0.5.3
 [0.5.2]: https://github.com/impruthvi/shipslip/releases/tag/v0.5.2
 [0.5.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.5.1
 [0.5.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.5.0
