@@ -411,8 +411,10 @@ Each row shows the outcome with flags for anything that needs a look:
 A run that never finished reads `Unfinished (last recorded: …)`, never as its
 saved outcome. `show` prints the steps (including maintenance on/off) with exit
 codes and saved output, the log watch and smoke results, and what to check
-next. It only states what the receipt recorded; for example, it shows the
-server's commit after a failure as `not recorded` unless the run read it.
+next. It only states what the receipt recorded. After a failed step, or one
+whose result is unknown, Shipslip reads the server's commit and whether the
+checkout has uncommitted changes (read-only, best effort); if that read fails,
+`show` says `not recorded`.
 
 `--md` prints Markdown with statuses, exit codes, commits, commands, and error
 classes and counts, but no server output, log messages, warnings, or reasons,

@@ -1453,16 +1453,12 @@ async fn run_steps_locked<T: Transport>(
         let (status, exit_code, outcome) = match result {
             StepResult::Exited(0) => (StepStatus::Ok, Some(0), None),
             StepResult::Exited(code) => {
+                let (head, tree_dirty) = observe_state(transport, path).await;
                 // A failed fast-forward can still leave some files updated.
-                let partial_update = index == 0 && {
-                    let state = read_state(transport, path).await.ok();
-                    let head = state.as_ref().map(|s| s.head.clone());
-                    let tree_dirty = state.as_ref().map(|s| !s.dirty.is_empty());
-                    let unchanged = head.as_deref() == Some(preview.from_sha.as_str())
-                        && tree_dirty == Some(false);
-                    server_state = Some(DeployEvent::ServerState { head, tree_dirty });
-                    !unchanged
-                };
+                let partial_update = index == 0
+                    && !(head.as_deref() == Some(preview.from_sha.as_str())
+                        && tree_dirty == Some(false));
+                server_state = Some(DeployEvent::ServerState { head, tree_dirty });
                 (
                     StepStatus::Failed,
                     Some(code),
@@ -1482,14 +1478,18 @@ async fn run_steps_locked<T: Transport>(
                     StopReason::ConnectFailed(reason),
                 )),
             ),
-            StepResult::Gone => (
-                StepStatus::Unknown,
-                None,
-                Some(DeployOutcome::Unknown {
-                    step: index,
-                    reason: "the step's process ended without recording an exit code".into(),
-                }),
-            ),
+            StepResult::Gone => {
+                let (head, tree_dirty) = observe_state(transport, path).await;
+                server_state = Some(DeployEvent::ServerState { head, tree_dirty });
+                (
+                    StepStatus::Unknown,
+                    None,
+                    Some(DeployOutcome::Unknown {
+                        step: index,
+                        reason: "the step's process ended without recording an exit code".into(),
+                    }),
+                )
+            }
             StepResult::Interrupted(reason) => return End::Interrupted { index, reason },
         };
         if let Some(journal) = journal {
@@ -1727,6 +1727,16 @@ fn stopped_before_plan(
 }
 
 /// Reads the checkout's state, reconnecting once if the server did not answer.
+/// The server's checkout after a step failed or ended without an exit code,
+/// for the receipt. Read-only and best effort: `None` where it could not be read.
+async fn observe_state<T: Transport>(transport: &T, path: &str) -> (Option<String>, Option<bool>) {
+    let state = read_state(transport, path).await.ok();
+    (
+        state.as_ref().map(|s| s.head.clone()),
+        state.as_ref().map(|s| !s.dirty.is_empty()),
+    )
+}
+
 async fn read_state<T: Transport>(transport: &T, path: &str) -> Result<State, AbortReason> {
     let script = preflight::state_script(path);
     let mut run = run_collect(transport, &script).await;
@@ -2957,6 +2967,60 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    async fn recorded_failure(fake: Arc<Fake>) -> (Vec<DeployEvent>, Receipt) {
+        let preview = prepared(&fake, false, &["php artisan migrate --force"]).await;
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, _h) = execute_recorded(preview, confirmation, fake, journal.clone()).unwrap();
+        let events = collect(rx).await;
+        (events, journal.snapshot())
+    }
+
+    #[tokio::test]
+    async fn failed_or_unknown_recipe_step_records_server_state() {
+        for fake in [
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .on("migrate", &[], 1),
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .vanishes("migrate"),
+        ] {
+            let (events, receipt) = recorded_failure(Arc::new(fake)).await;
+            // The fast-forward succeeded, so the server is on the target.
+            let state = DeployEvent::ServerState {
+                head: Some(TO.into()),
+                tree_dirty: Some(false),
+            };
+            assert!(events.contains(&state), "{events:?}");
+            assert_eq!(receipt.server_head_at_end.as_deref(), Some(TO));
+            assert_eq!(receipt.tree_dirty, Some(false));
+        }
+    }
+
+    #[tokio::test]
+    async fn unreadable_server_state_after_failure_keeps_the_outcome() {
+        let fake = preflight()
+            .on("git merge --ff-only", &[], 0)
+            .on("migrate", &[], 1)
+            .server(|s| s.inspect_fails = true);
+        let (events, receipt) = recorded_failure(Arc::new(fake)).await;
+        assert!(events.contains(&DeployEvent::ServerState {
+            head: None,
+            tree_dirty: None
+        }));
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                step: 1,
+                partial_update: false
+            }))
+        );
+        assert_eq!(receipt.server_head_at_end, None);
     }
 
     #[tokio::test(start_paused = true)]
