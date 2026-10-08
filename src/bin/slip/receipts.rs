@@ -454,9 +454,10 @@ fn next_steps(receipt: &Receipt) -> Vec<String> {
         Some(DeployOutcome::FailedAtStep { step: 0, .. }) => lines.push(
             "The fast-forward failed. Check the server checkout before deploying again.".into(),
         ),
-        Some(DeployOutcome::FailedAtStep { step, .. }) => lines.push(format!(
-            "Step {step} failed and later steps did not run. After fixing the cause, `slip from-step {env} {step}` runs them again on the deployed commit."
-        )),
+        Some(DeployOutcome::FailedAtStep { step, .. }) => {
+            lines.push(format!("Step {step} failed and later steps did not run."));
+            lines.extend(failed_step_options(&env, *step));
+        }
         Some(DeployOutcome::StoppedAfterStep { step, .. })
             if *step < receipt.target.steps.len() =>
         {
@@ -476,6 +477,50 @@ fn next_steps(receipt: &Receipt) -> Vec<String> {
         ));
     }
     lines
+}
+
+/// Retrying the same commit only helps when the cause was outside the code.
+fn failed_step_options(env: &str, step: usize) -> [String; 2] {
+    [
+        format!(
+            "If the cause was on the server (permissions, .env, database), fix it there, then `slip from-step {env} {step}` runs the remaining steps on the deployed commit."
+        ),
+        format!(
+            "If it needs a code change, push the fix and run `slip deploy {env}`."
+        ),
+    ]
+}
+
+/// Explains an "already up to date" block when the deployed commit's last run
+/// did not succeed, so a retry does not hide a broken or down app.
+pub(super) fn up_to_date_hint(root: &Path, project: &str, env: &str) -> Option<String> {
+    let listing = receipt::list(root, project, Some(env), Some(10)).ok()?;
+    let (id, receipt) = listing.rows.iter().find_map(|row| match row {
+        Listed::Receipt { id, receipt, .. } if receipt.mutation_started => Some((id, receipt)),
+        _ => None,
+    })?;
+    let needs_attention = receipt.status == ReceiptStatus::InProgress
+        || receipt.ended_in_failure()
+        || receipt.app_left_down;
+    if !needs_attention {
+        return None;
+    }
+    let env = escape_field(env);
+    let mut lines = vec![format!(
+        "The last run here ({id}) did not succeed: {}. See `slip receipts show {id}`.",
+        receipt.badge().headline()
+    )];
+    if let Some(DeployOutcome::FailedAtStep { step, .. }) = &receipt.outcome {
+        if *step > 0 {
+            lines.extend(failed_step_options(&env, *step));
+        }
+    }
+    if receipt.app_left_down {
+        lines.push(format!(
+            "The app may still be in maintenance mode; `slip up {env}` turns it off."
+        ));
+    }
+    Some(lines.join("\n"))
 }
 
 fn step_line(

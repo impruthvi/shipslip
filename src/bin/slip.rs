@@ -17,10 +17,10 @@ use shipslip::receipt::{default_receipts_root, find_open, strip_color, ReceiptJo
 use shipslip::transport::SshTransport;
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute_recorded, lock_status,
-    prepare_with_github_token, prepare_with_plan, BreakLockError, BringUpError, Confirmation,
-    DeployEvent, DeployOutcome, DeployTarget, ExecuteRejected, ExecutionHandle, LogChannel,
-    MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus, WatchResult, WatchStatus,
-    POST_DEPLOY_WATCH,
+    prepare_with_github_token, prepare_with_plan, BlockReason, BreakLockError, BringUpError,
+    Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecuteRejected, ExecutionHandle,
+    LogChannel, MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus, WatchResult,
+    WatchStatus, POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -221,6 +221,12 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         println!("Repository fetch access: verified");
     }
     let preview = preview.map_err(|error| match error {
+        PrepareError::Blocked(BlockReason::UpToDate) => {
+            match receipts::up_to_date_hint(&receipts_root, config.project_name(), &environment) {
+                Some(hint) => format!("blocked: already up to date\n{hint}").into(),
+                None => Box::<dyn Error>::from(PrepareError::Blocked(BlockReason::UpToDate)),
+            }
+        }
         PrepareError::LockHeld(info) => format!(
             "deploy lock is {info}; run `slip attach {environment}` to resume an unfinished \
                  run, or check the server and run `slip break-lock {environment}` if it is stale"
