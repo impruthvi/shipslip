@@ -817,6 +817,10 @@ async fn run_steps<T: Transport>(
         end = run_steps_locked(&preview, &*transport, &events, &stop, detach, &mut app_down, journal.as_deref(), resume.as_ref(), observer.as_ref()) => end,
         () = heartbeat_forever(&*transport, path, run_id) => unreachable!("heartbeat never ends"),
     };
+    let end = match end {
+        End::Finished(outcome) if app_down => End::Finished(in_maintenance(outcome)),
+        end => end,
+    };
     if app_down {
         let _ = events.send(DeployEvent::AppLeftDown);
     }
@@ -846,7 +850,9 @@ async fn run_steps<T: Transport>(
     } else if matches!(
         &end,
         End::Finished(
-            DeployOutcome::CancelledBeforeChanges | DeployOutcome::AbortedBeforeChanges(_)
+            DeployOutcome::CancelledBeforeChanges
+                | DeployOutcome::AbortedBeforeChanges(_)
+                | DeployOutcome::StoppedInMaintenance(_)
         )
     ) {
         WatchStatus::NotRun
@@ -933,9 +939,15 @@ async fn run_steps<T: Transport>(
             if !matches!(outcome, DeployOutcome::Unknown { .. }) {
                 let marker_outcome = match &outcome {
                     DeployOutcome::Succeeded => "succeeded",
-                    DeployOutcome::FailedAtStep { .. } | DeployOutcome::AbortedBeforeChanges(_) => {
-                        "failed"
-                    }
+                    DeployOutcome::FailedAtStep { .. }
+                    | DeployOutcome::AbortedBeforeChanges(_)
+                    | DeployOutcome::StoppedInMaintenance(
+                        AbortReason::LockLost
+                        | AbortReason::MaintenanceDownFailed(_)
+                        | AbortReason::ConnectFailed(_)
+                        | AbortReason::CheckFailed(_)
+                        | AbortReason::JournalFailed(_),
+                    ) => "failed",
                     _ => "cancelled",
                 };
                 match lock::release_after_run(&*transport, path, run_id, marker_outcome).await {
@@ -1343,6 +1355,30 @@ async fn run_steps_locked<T: Transport>(
                     journal,
                 )
                 .await;
+                let down = match down {
+                    Followed::Done(result) => Some(result),
+                    Followed::Detached => None,
+                    Followed::NotLaunched => {
+                        *app_down = false;
+                        if let Some(journal) = journal {
+                            if let Err(error) = journal.finish_maintenance(
+                                MaintenancePhase::Down,
+                                StepStatus::NotStarted,
+                                None,
+                            ) {
+                                return End::RunError(format!(
+                                    "could not save maintenance down result: {error}"
+                                ));
+                            }
+                        }
+                        return End::Finished(stopped_before_plan(
+                            index,
+                            first_index,
+                            preview.run_plan,
+                            StopReason::Requested,
+                        ));
+                    }
+                };
                 if let Some(result) = down.as_ref() {
                     *app_down = down_may_have_started(&result_status(result).0);
                 }
@@ -1429,7 +1465,7 @@ async fn run_steps_locked<T: Transport>(
         let _ = events.send(DeployEvent::StepStarted { index, name });
         let key = format!("step-{index}");
         let output = |line| DeployEvent::Output { index, line };
-        let Some(result) = follow(
+        let result = match follow(
             transport,
             preview,
             &key,
@@ -1445,8 +1481,27 @@ async fn run_steps_locked<T: Transport>(
             journal,
         )
         .await
-        else {
-            return End::Detached(index);
+        {
+            Followed::Done(result) => result,
+            Followed::Detached => return End::Detached(index),
+            Followed::NotLaunched => {
+                if let Some(journal) = journal {
+                    if let Err(error) = journal.finish_step(index, StepStatus::NotStarted, None) {
+                        return End::RunError(format!("could not save step result: {error}"));
+                    }
+                }
+                let _ = events.send(DeployEvent::StepFinished {
+                    index,
+                    status: StepStatus::NotStarted,
+                    exit_code: None,
+                });
+                return End::Finished(stopped_before_plan(
+                    index,
+                    first_index,
+                    preview.run_plan,
+                    StopReason::Requested,
+                ));
+            }
         };
 
         let mut server_state = None;
@@ -1559,6 +1614,11 @@ async fn run_steps_locked<T: Transport>(
             journal,
         )
         .await;
+        // Not detachable, so it always ends with a result.
+        let up = match up {
+            Followed::Done(result) => Some(result),
+            Followed::Detached | Followed::NotLaunched => None,
+        };
         if let (Some(journal), Some(result)) = (journal, up.as_ref()) {
             if !matches!(result, StepResult::Interrupted(_)) {
                 let (status, code) = result_status(result);
@@ -1588,14 +1648,24 @@ async fn run_steps_locked<T: Transport>(
     End::Finished(DeployOutcome::Succeeded)
 }
 
-/// Runs `body` detached on the server as `key`, turning its output lines
-/// into events. `None` if the front-end detached meanwhile.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FollowMode {
     Launch,
     Attach,
 }
 
+#[allow(clippy::too_many_arguments)]
+/// How following a step ended.
+enum Followed {
+    Done(StepResult),
+    /// Detached after the step was confirmed on the server; it keeps running.
+    Detached,
+    /// A stop or detach was already requested, so the step was not launched.
+    NotLaunched,
+}
+
+/// Runs `body` detached on the server as `key`, turning its output lines
+/// into events.
 #[allow(clippy::too_many_arguments)]
 async fn follow<T: Transport>(
     transport: &T,
@@ -1607,14 +1677,27 @@ async fn follow<T: Transport>(
     to_event: impl Fn(String) -> DeployEvent,
     mode: FollowMode,
     journal: Option<&ReceiptJournal>,
-) -> Option<StepResult> {
+) -> Followed {
+    let mut reattaches = 0;
+    if mode == FollowMode::Launch {
+        if detach.as_ref().is_some_and(|detach| *detach.borrow()) {
+            return Followed::NotLaunched;
+        }
+        // A launch interrupted midway leaves unknown whether the step
+        // started, so it always runs to completion before a detach applies.
+        let script = wrap_step(&preview.target.path, body);
+        if let Err(result) =
+            runner::launch_step(transport, &preview.run_id, key, &script, &mut reattaches).await
+        {
+            return Followed::Done(result);
+        }
+    }
     let (line_tx, mut line_rx) = mpsc::unbounded_channel();
     let step = async {
         let tx = line_tx;
         match mode {
             FollowMode::Launch => {
-                let script = wrap_step(&preview.target.path, body);
-                runner::run_step(transport, &preview.run_id, key, &script, &tx).await
+                runner::follow_existing(transport, &preview.run_id, key, &tx, &mut reattaches).await
             }
             FollowMode::Attach => runner::attach_step(transport, &preview.run_id, key, &tx).await,
         }
@@ -1631,12 +1714,12 @@ async fn follow<T: Transport>(
     if let Some(detach) = detach {
         tokio::select! {
             biased;
-            _ = wait_for_detach(detach) => None,
-            (result, ()) = async { tokio::join!(step, forward) } => Some(result),
+            _ = wait_for_detach(detach) => Followed::Detached,
+            (result, ()) = async { tokio::join!(step, forward) } => Followed::Done(result),
         }
     } else {
         let (result, ()) = tokio::join!(step, forward);
-        Some(result)
+        Followed::Done(result)
     }
 }
 
@@ -1650,14 +1733,14 @@ async fn maintenance<T: Transport>(
     detachable: bool,
     mode: FollowMode,
     journal: Option<&ReceiptJournal>,
-) -> Option<StepResult> {
+) -> Followed {
     let (key, command) = match phase {
         MaintenancePhase::Down => ("maintenance-down", "php artisan down"),
         MaintenancePhase::Up => ("maintenance-up", "php artisan up"),
     };
     let _ = events.send(DeployEvent::MaintenanceStarted { phase });
     let output = |line| DeployEvent::MaintenanceOutput { phase, line };
-    let Some(result) = follow(
+    let followed = follow(
         transport,
         preview,
         key,
@@ -1668,22 +1751,18 @@ async fn maintenance<T: Transport>(
         mode,
         journal,
     )
-    .await
-    else {
-        let _ = events.send(DeployEvent::MaintenanceFinished {
-            phase,
-            status: StepStatus::Unknown,
-            exit_code: None,
-        });
-        return None;
+    .await;
+    let (status, exit_code) = match &followed {
+        Followed::Done(result) => result_status(result),
+        Followed::Detached => (StepStatus::Unknown, None),
+        Followed::NotLaunched => (StepStatus::NotStarted, None),
     };
-    let (status, exit_code) = result_status(&result);
     let _ = events.send(DeployEvent::MaintenanceFinished {
         phase,
         status,
         exit_code,
     });
-    Some(result)
+    followed
 }
 
 fn result_status(result: &StepResult) -> (StepStatus, Option<i32>) {
@@ -1692,6 +1771,18 @@ fn result_status(result: &StepResult) -> (StepStatus, Option<i32>) {
         StepResult::Exited(code) => (StepStatus::Failed, Some(*code)),
         StepResult::NotStarted(_) => (StepStatus::NotStarted, None),
         StepResult::Gone | StepResult::Interrupted(_) => (StepStatus::Unknown, None),
+    }
+}
+
+/// A stop before any deploy step is not "before changes" once maintenance
+/// mode may have been turned on.
+fn in_maintenance(outcome: DeployOutcome) -> DeployOutcome {
+    match outcome {
+        DeployOutcome::CancelledBeforeChanges => {
+            DeployOutcome::StoppedInMaintenance(AbortReason::Cancelled)
+        }
+        DeployOutcome::AbortedBeforeChanges(reason) => DeployOutcome::StoppedInMaintenance(reason),
+        outcome => outcome,
     }
 }
 
@@ -1964,6 +2055,8 @@ mod tests {
         drop_after: Mutex<Option<usize>>,
         vanishes: bool,
         gate: Option<Arc<Notify>>,
+        /// Holds the launch itself (before the step exists) until notified.
+        launch_gate: Option<Arc<Notify>>,
         on_run: Option<Box<dyn Fn() + Send + Sync>>,
     }
 
@@ -2058,6 +2151,12 @@ mod tests {
         fn gated(mut self, needle: &'static str, gate: Arc<Notify>) -> Self {
             self = self.rule(needle, &[], 0);
             self.last().gate = Some(gate);
+            self
+        }
+
+        fn launch_gated(mut self, needle: &'static str, gate: Arc<Notify>) -> Self {
+            self = self.rule(needle, &[], 0);
+            self.last().launch_gate = Some(gate);
             self
         }
 
@@ -2276,6 +2375,10 @@ mod tests {
                     Ok(0)
                 }
             } else if script.contains("setsid") {
+                let gate = self.rules[self.matching(script)].launch_gate.clone();
+                if let Some(gate) = gate {
+                    gate.notified().await;
+                }
                 self.launch_step(script)
             } else if script.contains(runner::LOG_START) {
                 self.observe(script, &output).await
@@ -2663,7 +2766,7 @@ mod tests {
 
         assert_eq!(
             events.last(),
-            Some(&DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
+            Some(&DeployEvent::Finished(DeployOutcome::StoppedInMaintenance(
                 AbortReason::MaintenanceDownFailed(9)
             )))
         );
@@ -2767,9 +2870,9 @@ mod tests {
         assert!(events.contains(&DeployEvent::AppLeftDown));
         assert_eq!(
             events.last(),
-            Some(&DeployEvent::Finished(
-                DeployOutcome::CancelledBeforeChanges
-            ))
+            Some(&DeployEvent::Finished(DeployOutcome::StoppedInMaintenance(
+                AbortReason::Cancelled
+            )))
         );
     }
 
@@ -2966,6 +3069,101 @@ mod tests {
                 step: 1,
                 ..
             }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn detach_during_launch_finishes_the_launch_first() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .launch_gated("migrate", gate.clone()),
+        );
+        let p = prepared(&fake, false, &["php artisan migrate --force"]).await;
+        let c = Confirmation::from(&p, None).unwrap();
+        let (rx, handle) = execute(p, c, fake.clone()).unwrap();
+        while fake.launched("migrate") == 0 {
+            tokio::task::yield_now().await;
+        }
+        // The launch is in flight on the server when the user detaches.
+        handle.detach();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+        gate.notify_one();
+        let events = collect(rx).await;
+
+        assert_eq!(events.last(), Some(&DeployEvent::Detached { index: 1 }));
+        // "It continues on the server" is true: the step exists there.
+        assert!(fake.launched.lock().unwrap().contains_key("step-1"));
+    }
+
+    #[tokio::test]
+    async fn follow_does_not_launch_after_a_detach_request() {
+        let fake = Arc::new(preflight().on("migrate", &[], 0));
+        let p = prepared(&fake, false, &["php artisan migrate --force"]).await;
+        let (events, _rx) = mpsc::unbounded_channel();
+        let (_tx, mut detach) = watch::channel(true);
+        let followed = follow(
+            &*fake,
+            &p,
+            "step-1",
+            "php artisan migrate --force",
+            &events,
+            Some(&mut detach),
+            |line| DeployEvent::Output { index: 1, line },
+            FollowMode::Launch,
+            None,
+        )
+        .await;
+        assert!(matches!(followed, Followed::NotLaunched));
+        assert_eq!(fake.launched("migrate"), 0);
+    }
+
+    #[tokio::test]
+    async fn attach_after_maintenance_on_never_reports_before_changes() {
+        let fake = Arc::new(
+            preflight()
+                .server(|s| s.head = TO.into())
+                .on("php artisan down", &[], 0)
+                .on("composer install", &[], 0),
+        );
+        let mut target = maintenance_target(false, &["composer install"]);
+        target.steps = vec!["composer install".into()];
+        let preview = prepare_with_plan(target, RunPlan::Rerun, &*fake)
+            .await
+            .unwrap();
+        let dir = TempReceipts::new();
+        let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        journal.confirm().unwrap();
+        journal.begin_maintenance(MaintenancePhase::Down).unwrap();
+        journal
+            .finish_maintenance(MaintenancePhase::Down, StepStatus::Ok, Some(0))
+            .unwrap();
+        // Shipslip exited before step 1 was launched.
+        journal.begin_step(1).unwrap();
+        let path = journal.path().to_path_buf();
+        drop(journal);
+
+        let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (events, _handle) = attach(resumed.clone(), fake.clone()).unwrap();
+        let events = collect(events).await;
+        assert!(events.contains(&DeployEvent::AppLeftDown));
+        assert!(
+            matches!(
+                events.last(),
+                Some(DeployEvent::Finished(DeployOutcome::StoppedInMaintenance(
+                    AbortReason::ConnectFailed(_)
+                )))
+            ),
+            "{events:?}"
+        );
+        let receipt = resumed.snapshot();
+        assert!(receipt.app_left_down);
+        assert!(matches!(
+            receipt.outcome,
+            Some(DeployOutcome::StoppedInMaintenance(_))
         ));
     }
 

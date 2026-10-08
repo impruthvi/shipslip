@@ -152,17 +152,34 @@ pub(crate) async fn run_step<T: Transport>(
     script: &str,
     output: &mpsc::UnboundedSender<String>,
 ) -> StepResult {
+    let mut reattaches = 0;
+    if let Err(result) = launch_step(transport, run_id, key, script, &mut reattaches).await {
+        return result;
+    }
+    follow_existing(transport, run_id, key, output, &mut reattaches).await
+}
+
+/// Sends the step's launch once and settles whether it started. `Ok` means
+/// the step is on the server (running or already ended); follow it with
+/// [`follow_existing`]. Callers must not cancel this midway, or whether the
+/// step started is unknown.
+pub(crate) async fn launch_step<T: Transport>(
+    transport: &T,
+    run_id: &str,
+    key: &str,
+    script: &str,
+    reattaches: &mut usize,
+) -> Result<(), StepResult> {
     let (launch, launch_output) = run_collect(transport, &launch_script(run_id, key, script)).await;
     if let Err(e @ TransportError::Connect(_)) = &launch {
-        return StepResult::NotStarted(e.to_string());
+        return Err(StepResult::NotStarted(e.to_string()));
     }
-    let mut reattaches = 0;
     if launch != Ok(0) {
         // Unclear whether the step started: ask the server. Never launch again.
         let mut last = launch.clone();
         loop {
-            if let Err(reason) = reconnect_if_lost(transport, &last, &mut reattaches).await {
-                return StepResult::Interrupted(reason);
+            if let Err(reason) = reconnect_if_lost(transport, &last, reattaches).await {
+                return Err(StepResult::Interrupted(reason));
             }
             let (result, lines) = run_collect(transport, &probe_script(run_id, key)).await;
             if result.is_err() {
@@ -171,20 +188,19 @@ pub(crate) async fn run_step<T: Transport>(
             }
             match parse_probe(&lines) {
                 Some(Probe::NotStarted) => {
-                    return StepResult::NotStarted(match &launch {
+                    return Err(StepResult::NotStarted(match &launch {
                         Err(e) => e.to_string(),
                         Ok(code) => {
                             format!("launcher exited with {code}: {}", launch_output.join("\n"))
                         }
-                    })
+                    }))
                 }
                 Some(_) => break,
-                None => return unexpected(&lines),
+                None => return Err(unexpected(&lines)),
             }
         }
     }
-
-    follow_existing(transport, run_id, key, output, &mut reattaches).await
+    Ok(())
 }
 
 /// Observes a previously launched step without sending its command again.
@@ -217,7 +233,7 @@ pub(crate) async fn attach_step<T: Transport>(
     follow_existing(transport, run_id, key, output, &mut reattaches).await
 }
 
-async fn follow_existing<T: Transport>(
+pub(crate) async fn follow_existing<T: Transport>(
     transport: &T,
     run_id: &str,
     key: &str,

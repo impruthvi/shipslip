@@ -6,6 +6,24 @@ change the library API.
 
 ## [Unreleased]
 
+### Fixed
+
+- Ctrl-C while a step, `php artisan down`, or `php artisan up` was being
+  launched could interrupt the launch and still report "it continues on the
+  server", although the step never started. A launch now always completes
+  before a detach applies, and a Ctrl-C pressed before the launch is sent
+  starts no step.
+- A run that stopped after maintenance mode was turned on, but before any deploy
+  step ran, reported "cancelled/aborted before changes" while the app was down.
+  It now reports the new outcome "Stopped in maintenance mode, no steps ran",
+  and `slip receipts show` points to `slip up`. Receipts with this outcome are
+  shown as unreadable by Shipslip 0.5.1 and earlier.
+
+### Changed
+
+- Library: `DeployOutcome::StoppedInMaintenance(AbortReason)` and
+  `AbortReason::Cancelled`.
+
 ## [0.5.1] - 2026-10-08
 
 ### Changed
