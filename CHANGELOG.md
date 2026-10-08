@@ -24,6 +24,14 @@ change the library API.
   `DeployOutcome::summary` and `DeployOutcome::label`, and
   `logs::escape_field`.
 
+### Fixed
+
+- Deploy output no longer passes server text to the terminal unescaped. Step
+  and maintenance output show without color codes, and other control
+  characters, as well as those in log errors, server state, reasons, warnings
+  and commit subjects, print as visible escapes such as `\x1b`, so server
+  output cannot move the cursor, clear the screen or retitle the terminal.
+
 ## [0.4.0] - 2026-10-05
 
 ### Added

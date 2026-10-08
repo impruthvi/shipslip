@@ -1357,3 +1357,15 @@ fn fresh_process_finds_custom_composer_bin_dir() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[test]
+fn server_text_cannot_control_the_terminal() {
+    assert_eq!(
+        server_line("\u{1b}[32;1mDONE\u{1b}[39;22m \u{1b}]0;pwned\u{7}\u{1b}[2J\tok"),
+        "DONE \\x1b]0;pwned\\x07\\x1b[2J\tok"
+    );
+    assert_eq!(
+        server_field("disk full\nDeploy run succeeded.\u{1b}[31m"),
+        "disk full\\x0aDeploy run succeeded.\\x1b[31m"
+    );
+}
