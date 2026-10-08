@@ -1637,8 +1637,9 @@ pub fn escape(text: &str) -> String {
     out
 }
 
-// Names and paths occupy one table/header field, unlike multiline log text.
-fn escape_field(text: &str) -> String {
+/// Like [`escape`], but also escapes newlines and tabs, for text that must
+/// stay on one line, such as a table cell or a labeled field.
+pub fn escape_field(text: &str) -> String {
     escape(text).replace('\n', "\\x0a").replace('\t', "\\x09")
 }
 

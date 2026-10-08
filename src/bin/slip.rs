@@ -37,6 +37,8 @@ use github_token::{LocalTokens, TokenSource};
 mod new;
 #[path = "slip/publish.rs"]
 mod publish;
+#[path = "slip/receipts.rs"]
+mod receipts;
 #[path = "slip/setup.rs"]
 mod setup;
 #[cfg(all(test, unix))]
@@ -121,6 +123,9 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
     {
         return logs_command(&config, &default_trust_path()?, &environment, options).await;
     }
+    if let Action::Receipts(args) = action {
+        return receipts::run(&config, &default_receipts_root()?, args);
+    }
     if config.uses_default_recipe() {
         eprintln!("Using the default Laravel deploy recipe; add [recipe.deploy] to customize it.");
     }
@@ -147,6 +152,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
             return up_command(&config, &trust_path, &environment).await;
         }
         Action::Logs { .. } => unreachable!("logs runs before deploy setup"),
+        Action::Receipts(_) => unreachable!("receipts runs before deploy setup"),
         Action::Run {
             environment,
             plan,
@@ -769,6 +775,12 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
             },
         }));
     }
+    if action == "receipts" {
+        return Ok(Some(Command {
+            config,
+            action: Action::Receipts(receipts::Args::parse(&args[index..])?),
+        }));
+    }
     if matches!(action.as_str(), "attach" | "break-lock" | "up") {
         let environment = args
             .get(index)
@@ -1012,6 +1024,8 @@ fn print_help() {
          \x20 slip [--config FILE] break-lock ENV\n\
          \x20 slip [--config FILE] up ENV\n\
          \x20 slip [--config FILE] logs ENV [ID|ROW] [OPTIONS]\n\
+         \x20 slip [--config FILE] receipts [ENV] [--all]\n\
+         \x20 slip [--config FILE] receipts show ID [--md [--with-details]]\n\
          \x20 slip --version\n\n\
          Commands:\n\
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\
@@ -1026,7 +1040,8 @@ fn print_help() {
          \x20 attach ENV         Resume an unfinished run without relaunching its active step\n\
          \x20 break-lock ENV     Clear a stale deploy lock after checking the old run\n\
          \x20 up ENV             Run `php artisan up` under a new deploy lock\n\
-         \x20 logs ENV           Group recent log errors; read-only\n\n\
+         \x20 logs ENV           Group recent log errors; read-only\n\
+         \x20 receipts [ENV]     List saved deploy receipts, newest first; read-only\n\n\
          New project options:\n\
          \x20 --starter-kit none|react|vue|svelte|livewire\n\
          \x20 --auth laravel|none  --database sqlite|mysql|mariadb|pgsql|sqlsrv\n\
@@ -1049,6 +1064,12 @@ fn print_help() {
          \x20 --all              Show every group, not just the first 20\n\
          \x20 --max-bytes SIZE   Window read limit, like 20m (default 12m total, 4m/channel)\n\
          \x20                    Baseline has a separate 6m total, 2m/channel limit\n\n\
+         Receipts options:\n\
+         \x20 --all              List every receipt, not just the newest 20\n\
+         \x20 show ID            Show one receipt by its ID (a prefix is enough)\n\
+         \x20 --md               Print it as Markdown with statuses only\n\
+         \x20 --with-details     Add server output, log messages and reasons to --md;\n\
+         \x20                    review for secrets before sharing\n\n\
          Config is discovered from the current directory up to the git root.\n\
          SHIPSLIP_CONFIG can select a different file."
     );
@@ -1688,29 +1709,10 @@ fn show_step_result(index: usize, status: StepStatus, exit_code: Option<i32>) {
 }
 
 fn show_outcome(outcome: &DeployOutcome) {
-    match outcome {
-        DeployOutcome::Succeeded => println!("Deploy run succeeded."),
-        DeployOutcome::FailedAtStep {
-            step,
-            partial_update,
-        } => eprintln!(
-            "Deploy failed at step {step}{}.",
-            if *partial_update {
-                "; the server may have been partially updated"
-            } else {
-                ""
-            }
-        ),
-        DeployOutcome::StoppedAfterStep { step, reason } => {
-            eprintln!("Deploy stopped after step {step}: {reason}.");
-        }
-        DeployOutcome::CancelledBeforeChanges => eprintln!("Deploy was cancelled before changes."),
-        DeployOutcome::AbortedBeforeChanges(reason) => {
-            eprintln!("Deploy was aborted before changes: {reason}.");
-        }
-        DeployOutcome::Unknown { step, reason } => {
-            eprintln!("Outcome of step {step} is unknown: {reason}");
-        }
+    if *outcome == DeployOutcome::Succeeded {
+        println!("{}", outcome.summary());
+    } else {
+        eprintln!("{}", outcome.summary());
     }
 }
 
@@ -1776,6 +1778,7 @@ enum Action {
         environment: String,
         options: LogsOptions,
     },
+    Receipts(receipts::Args),
 }
 
 #[cfg(test)]

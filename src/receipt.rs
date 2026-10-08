@@ -14,6 +14,14 @@ use crate::{
     WatchResult,
 };
 
+mod history;
+mod markdown;
+
+pub use history::{
+    describe_plan, describe_watch, find, list, Badge, Flag, Found, Listed, Listing, MIN_ID_LEN,
+};
+pub use markdown::markdown;
+
 const VERSION: u32 = 1;
 const OUTPUT_LINES: usize = 200;
 const OUTPUT_LINE_BYTES: usize = 16 * 1024;
@@ -123,6 +131,35 @@ pub struct Receipt {
     pub watch: Option<WatchResult>,
     #[serde(default)]
     pub smoke: Option<SmokeResult>,
+    /// Who started the run; `None` in receipts written before it was recorded.
+    #[serde(default)]
+    pub actor: Option<Actor>,
+}
+
+/// The local user and Git identity that started a run. Each part is best
+/// effort and never blocks a deploy.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Actor {
+    pub user: Option<String>,
+    pub git_name: Option<String>,
+    pub git_email: Option<String>,
+}
+
+impl Actor {
+    pub fn local(repo_root: &Path) -> Self {
+        let git = crate::git::Git::new(PathBuf::from("git"));
+        let config = |key: &str| {
+            git.run(repo_root, &["config", "--get", key])
+                .ok()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        };
+        Self {
+            user: std::env::var("USER").ok().filter(|user| !user.is_empty()),
+            git_name: config("user.name"),
+            git_email: config("user.email"),
+        }
+    }
 }
 
 impl Receipt {
@@ -177,6 +214,7 @@ impl Receipt {
             warnings: Vec::new(),
             watch: None,
             smoke: None,
+            actor: Some(Actor::local(repo_root)),
         }
     }
 
@@ -506,16 +544,33 @@ pub fn find_open(
     }
 }
 
+/// Reads a receipt this version of Shipslip can fully interpret.
+pub fn read(path: &Path) -> Result<Receipt, ReceiptError> {
+    read_receipt(path)
+}
+
+#[derive(Deserialize)]
+struct VersionProbe {
+    version: u32,
+}
+
 fn read_receipt(path: &Path) -> Result<Receipt, ReceiptError> {
     let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
+    // Check the version first so a newer receipt reports its version
+    // instead of a field error.
+    let probe: VersionProbe =
+        serde_json::from_slice(&bytes).map_err(|source| ReceiptError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    if probe.version != VERSION {
+        return Err(ReceiptError::Version(probe.version));
+    }
     let receipt: Receipt =
         serde_json::from_slice(&bytes).map_err(|source| ReceiptError::Parse {
             path: path.to_path_buf(),
             source,
         })?;
-    if receipt.version != VERSION {
-        return Err(ReceiptError::Version(receipt.version));
-    }
     if receipt.run_id.is_empty()
         || !receipt
             .run_id
@@ -541,6 +596,63 @@ fn safe_component(value: &str) -> String {
         }
     }
     output
+}
+
+/// Removes color sequences (`ESC [ digits/semicolons m`) that tools like
+/// Composer and Artisan write, so stored output reads as plain text. Other
+/// control characters remain for the caller to escape.
+pub fn strip_color(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("\x1b[") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        let params = after
+            .find(|c: char| !(c.is_ascii_digit() || c == ';'))
+            .unwrap_or(after.len());
+        if after[params..].starts_with('m') {
+            rest = &after[params + 1..];
+        } else {
+            out.push('\x1b');
+            rest = &rest[start + 1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `2026-10-07 14:02:11Z`.
+pub fn format_utc(millis: u128) -> String {
+    let secs = millis / 1000;
+    let days = (secs / 86_400) as i64;
+    let time = secs % 86_400;
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}Z",
+        time / 3600,
+        time / 60 % 60,
+        time % 60
+    )
+}
+
+/// `2m 44s`, `1h 3m`, or `850 ms`.
+pub fn format_duration(millis: u128) -> String {
+    let secs = millis / 1000;
+    match secs {
+        0 => format!("{millis} ms"),
+        1..60 => format!("{secs}s"),
+        60..3600 => format!("{}m {}s", secs / 60, secs % 60),
+        _ => format!("{}h {}m", secs / 3600, secs / 60 % 60),
+    }
 }
 
 fn now_ms() -> u128 {
@@ -572,3 +684,6 @@ fn write_atomic(path: &Path, receipt: &Receipt) -> Result<(), ReceiptError> {
     bytes.push(b'\n');
     crate::private_file::write_atomic(path, &bytes).map_err(|source| io_error(path, source))
 }
+
+#[cfg(test)]
+mod tests;
