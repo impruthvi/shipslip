@@ -58,10 +58,14 @@ slip init
 Answer the questions (environment name, SSH alias, app path on the server,
 branch, production or not, maintenance mode, optional smoke URL). It writes
 `.shipslip.toml` with the deploy steps spelled out. **Read the steps before
-continuing**: the default recipe runs `php artisan migrate --force`. Edit them
-to match how you deploy today.
+continuing**: the default recipe runs `php artisan migrate --force`, and if
+your project has a `package-lock.json` with a `build` script it also runs
+`npm ci` and `npm run build`, which need Node.js and npm **on the server**.
+Edit the steps to match how you deploy today.
 
-Then approve the config:
+Then approve the config. Shipslip shows every setting and step; type the
+environment name (`staging`) to trust it. Anything else leaves it untrusted,
+and deploys stay blocked until you trust it:
 
 ```sh
 slip trust staging
