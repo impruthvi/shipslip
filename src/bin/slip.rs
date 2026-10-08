@@ -1533,6 +1533,12 @@ fn saved_target_matches_current(saved: &DeployTarget, current: &DeployTarget) ->
 }
 
 fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) {
+    for line in trust_changes(previous, current) {
+        println!("{line}");
+    }
+}
+
+fn trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) -> Vec<String> {
     // Destructured without `..` so a new setting must be shown here.
     let TrustSnapshot {
         ssh_alias,
@@ -1547,64 +1553,83 @@ fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot)
         logs,
         steps,
     } = current;
-    show_change(
+    let mut lines = Vec::new();
+    let mut change = |label: &str, previous: Option<String>, current: String| {
+        if previous.as_deref() == Some(current.as_str()) {
+            return;
+        }
+        lines.push(match previous {
+            Some(previous) => format!("  {label}: {previous} -> {current}"),
+            None => format!("  {label}: {current}"),
+        });
+    };
+    let log_setting = |log: &Option<String>| setting(log, "not set (Laravel default)");
+    let smoke_setting = |url: &Option<String>| setting(url, "not set");
+    let timezone_setting = |zone: &Option<String>| setting(zone, "not set (UTC)");
+    change(
         "ssh",
         previous.map(|old| old.ssh_alias.clone()),
         ssh_alias.clone(),
     );
-    show_change("path", previous.map(|old| old.path.clone()), path.clone());
-    show_change(
+    change("path", previous.map(|old| old.path.clone()), path.clone());
+    change(
         "branch",
         previous.map(|old| old.branch.clone()),
         branch.clone(),
     );
-    show_change(
+    change(
         "production",
         previous.map(|old| old.production.to_string()),
         production.to_string(),
     );
-    show_change(
+    change(
         "maintenance",
         previous.map(|old| old.maintenance.to_string()),
         maintenance.to_string(),
     );
-    show_change(
+    change(
         "log",
-        previous.map(|old| format!("{:?}", old.log)),
-        format!("{log:?}"),
+        previous.map(|old| log_setting(&old.log)),
+        log_setting(log),
     );
-    show_change(
+    change(
         "log_daily",
         previous.map(|old| old.log_daily.to_string()),
         log_daily.to_string(),
     );
-    show_change(
+    change(
         "smoke_url",
-        previous.map(|old| format!("{:?}", old.smoke_url)),
-        format!("{smoke_url:?}"),
+        previous.map(|old| smoke_setting(&old.smoke_url)),
+        smoke_setting(smoke_url),
     );
-    show_change(
+    change(
         "timezone",
-        previous.map(|old| format!("{:?}", old.timezone)),
-        format!("{timezone:?}"),
+        previous.map(|old| timezone_setting(&old.timezone)),
+        timezone_setting(timezone),
     );
-    show_change(
+    change(
         "logs",
         previous.map(|old| describe_log_channels(&old.logs)),
         describe_log_channels(logs),
     );
     if previous.is_none_or(|old| old.steps != *steps) {
         if let Some(old) = previous {
-            println!("  recipe steps before:");
+            lines.push("  recipe steps before:".into());
             for (index, step) in old.steps.iter().enumerate() {
-                println!("    {}. {step}", index + 1);
+                lines.push(format!("    {}. {step}", index + 1));
             }
         }
-        println!("  recipe steps now:");
+        lines.push("  recipe steps now:".into());
         for (index, step) in steps.iter().enumerate() {
-            println!("    {}. {step}", index + 1);
+            lines.push(format!("    {}. {step}", index + 1));
         }
     }
+    lines
+}
+
+/// An optional setting as the user wrote it, or what applies when unset.
+fn setting(value: &Option<String>, unset: &str) -> String {
+    value.clone().unwrap_or_else(|| unset.into())
 }
 
 fn describe_log_channels(channels: &BTreeMap<String, LogChannel>) -> String {
@@ -1628,16 +1653,6 @@ fn describe_log_channels(channels: &BTreeMap<String, LogChannel>) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
-}
-
-fn show_change(label: &str, previous: Option<String>, current: String) {
-    if previous.as_deref() == Some(current.as_str()) {
-        return;
-    }
-    match previous {
-        Some(previous) => println!("  {label}: {previous} -> {current}"),
-        None => println!("  {label}: {current}"),
-    }
 }
 
 async fn confirm(
