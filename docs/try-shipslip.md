@@ -94,6 +94,7 @@ read-only token at the hidden prompt; it is not saved.
 slip receipts                 # every run for this project, newest first
 slip receipts show <ID>       # one run: steps, exit codes, output, log watch, smoke
 slip receipts show <ID> --md  # a Markdown summary to paste into a PR or chat
+slip status                   # last recorded code of every app and env, from any folder
 ```
 
 Flags in the list tell you what needs a look: `⚠ N new error groups`,

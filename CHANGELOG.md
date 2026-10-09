@@ -6,6 +6,24 @@ change the library API.
 
 ## [Unreleased]
 
+### Added
+
+- `slip status` shows the last recorded code of every app and environment
+  from local receipts and approvals, from any folder and without contacting a
+  server. It only names a commit a receipt backs (fast-forward succeeded,
+  rerun checked it out, or server commit read after a failed step) and
+  otherwise says the code is not known. `--compare ENV ENV` counts commits
+  between two environments in the local checkout.
+- Library: `receipt::overview`, `receipt::compare_envs`, `Git::compare`, and
+  `Receipt::next_steps`, so other front-ends can show the same map and advice.
+
+### Changed
+
+- Log signature history moved from `receipts/signatures/` to a `signatures/`
+  directory beside `receipts/`, so a project named `signatures` cannot clash
+  with it. The old file is still read and is moved on the next deploy; old
+  folders are left in place.
+
 ## [0.5.3] - 2026-10-08
 
 ### Changed

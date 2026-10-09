@@ -418,6 +418,27 @@ whose result is unknown, Shipslip reads the server's commit and whether the
 checkout has uncommitted changes (read-only, best effort); if that read fails,
 `show` says `not recorded`.
 
+### What is on each server
+
+`slip status` reads every project's receipts and approvals and prints, for each
+checkout and environment, the last code they record. It works from any folder,
+needs no config, and never contacts a server.
+
+```sh
+slip status
+slip status --compare staging production   # commits between the two, per app
+```
+
+A commit is shown only when a receipt backs it: `code at …` when the
+fast-forward succeeded (`deploy incomplete` if a later step did not), `checked
+out at start` for reruns, and `observed …` when Shipslip read the server's
+commit after a failed step. Otherwise the line says `server code not known`,
+`never deployed`, or `target changed` when the environment now points at a
+different server or path. Each line also shows the last run and its flags, and
+warns when a newer receipt could not be read. `--compare` uses your local
+checkout to count commits and notes an incomplete deploy or dirty tree on
+either side.
+
 `--md` prints Markdown with statuses, exit codes, commits, commands, and error
 classes and counts, but no server output, log messages, warnings, or reasons,
 and names who started the run without their email address.

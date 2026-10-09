@@ -41,6 +41,8 @@ mod publish;
 mod receipts;
 #[path = "slip/setup.rs"]
 mod setup;
+#[path = "slip/status.rs"]
+mod status;
 #[cfg(all(test, unix))]
 use shipslip::setup as setup_api;
 #[cfg(all(test, unix))]
@@ -113,6 +115,9 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         Action::Publish(args) => return publish::run(args).await,
         Action::Doctor(args) => return setup::run(args).await,
         Action::Setup(args) => return setup::run_setup(args).await,
+        Action::Status(args) => {
+            return status::run(&default_receipts_root()?, &default_trust_path()?, args)
+        }
         action => action,
     };
     let config = LoadedConfig::load(&std::env::current_dir()?, command.config.as_deref())?;
@@ -136,8 +141,9 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         | Action::New(_)
         | Action::Publish(_)
         | Action::Doctor(_)
-        | Action::Setup(_) => {
-            unreachable!("local setup runs before the config is loaded")
+        | Action::Setup(_)
+        | Action::Status(_) => {
+            unreachable!("local commands run before the config is loaded")
         }
         Action::Trust { environment } => {
             return trust_command(&config, &trust_path, environment.as_deref());
@@ -765,6 +771,18 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
             },
         }));
     }
+    if action == "status" {
+        if config.is_some() {
+            return Err(invalid_input(
+                "status reads every project's receipts; omit --config and unset SHIPSLIP_CONFIG",
+            )
+            .into());
+        }
+        return Ok(Some(Command {
+            config: None,
+            action: Action::Status(status::Args::parse(&args[index..])?),
+        }));
+    }
     if action == "trust" {
         let environment = args.get(index).cloned();
         if index + usize::from(environment.is_some()) != args.len() {
@@ -1040,6 +1058,7 @@ fn print_help() {
          \x20 slip [--config FILE] logs ENV [ID|ROW] [OPTIONS]\n\
          \x20 slip [--config FILE] receipts [ENV] [--all]\n\
          \x20 slip [--config FILE] receipts show ID [--md [--with-details]]\n\
+         \x20 slip status [--compare ENV ENV]\n\
          \x20 slip --version\n\n\
          Commands:\n\
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\
@@ -1055,7 +1074,8 @@ fn print_help() {
          \x20 break-lock ENV     Clear a stale deploy lock after checking the old run\n\
          \x20 up ENV             Run `php artisan up` under a new deploy lock\n\
          \x20 logs ENV           Group recent log errors; read-only\n\
-         \x20 receipts [ENV]     List saved deploy receipts, newest first; read-only\n\n\
+         \x20 receipts [ENV]     List saved deploy receipts, newest first; read-only\n\
+         \x20 status             Last recorded code of every app and env; read-only\n\n\
          New project options:\n\
          \x20 --starter-kit none|react|vue|svelte|livewire\n\
          \x20 --auth laravel|none  --database sqlite|mysql|mariadb|pgsql|sqlsrv\n\
@@ -1819,6 +1839,7 @@ enum Action {
         options: LogsOptions,
     },
     Receipts(receipts::Args),
+    Status(status::Args),
 }
 
 #[cfg(test)]
