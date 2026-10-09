@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::{json, Value};
 
 use super::*;
+use crate::git::{Comparison, Git};
 use crate::receipt::Flag;
 
 const OLD: &str = "1111111111111111111111111111111111111111";
@@ -558,4 +559,77 @@ fn lock_files_are_never_opened() {
         cell(&overview, "/work/app", "staging").code,
         CodeState::Recorded { .. }
     ));
+}
+
+#[test]
+fn comparisons_carry_each_sides_caveat_and_refuse_unknown_code() {
+    let fixture = Fixture::new();
+    let cell = |env: &str, code: CodeState| EnvCell {
+        env: env.into(),
+        approved: false,
+        code,
+        last_attempt: None,
+        stale_hint: None,
+        target: None,
+    };
+    let mut row = RepoRow {
+        repo_root: fixture.0.to_string_lossy().into_owned(),
+        project: Some("app".into()),
+        label: "app".into(),
+        path_missing: false,
+        envs: vec![
+            cell("staging", recorded(NEW, false, Evidence::FastForward, 1)),
+            cell(
+                "production",
+                CodeState::Observed {
+                    sha: NEW.into(),
+                    dirty: Some(true),
+                    expected: NEW.into(),
+                    run_id: "00000002-0".into(),
+                    at_ms: 2500,
+                },
+            ),
+            cell("prod.eu", recorded(NEW, true, Evidence::FastForward, 3)),
+            cell(
+                "qa",
+                CodeState::NotKnown {
+                    run_id: None,
+                    reason: NotKnownReason::Unreadable,
+                },
+            ),
+        ],
+    };
+    let git = Git::new(PathBuf::from("/nonexistent/git"));
+
+    let both = compare_envs(&git, &row, "staging", "production");
+    assert_eq!(both.result, Comparison::Same);
+    assert_eq!(
+        both.notes,
+        [
+            ("staging".to_string(), Qualifier::DeployIncomplete),
+            ("production".to_string(), Qualifier::TreeDirty),
+        ]
+    );
+    let one = compare_envs(&git, &row, "prod.eu", "staging");
+    assert_eq!(
+        one.notes,
+        [("staging".to_string(), Qualifier::DeployIncomplete)]
+    );
+    assert!(compare_envs(&git, &row, "prod.eu", "prod.eu")
+        .notes
+        .is_empty());
+
+    assert_eq!(
+        compare_envs(&git, &row, "staging", "qa").result,
+        Comparison::Unavailable("no recorded code on qa".into())
+    );
+    assert_eq!(
+        compare_envs(&git, &row, "staging", "demo").result,
+        Comparison::Unavailable("no demo environment".into())
+    );
+    row.path_missing = true;
+    assert_eq!(
+        compare_envs(&git, &row, "staging", "production").result,
+        Comparison::Unavailable("checkout not found".into())
+    );
 }

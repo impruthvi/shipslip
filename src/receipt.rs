@@ -24,8 +24,8 @@ pub use history::{
 };
 pub use markdown::markdown;
 pub use overview::{
-    overview, AttemptSummary, CodeState, EnvCell, Evidence, NotKnownReason, Overview, Problem,
-    RepoRow, StaleHint, WALK_LIMIT,
+    compare_envs, overview, AttemptSummary, CodeState, EnvCell, EnvComparison, Evidence,
+    NotKnownReason, Overview, Problem, Qualifier, RepoRow, StaleHint, WALK_LIMIT,
 };
 
 const VERSION: u32 = 1;

@@ -26,6 +26,22 @@ pub enum GitError {
     ReviewChanged,
 }
 
+/// Commit `a` relative to commit `b`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Comparison {
+    Same,
+    /// `a` has this many commits `b` does not.
+    Ahead(usize),
+    /// `b` has this many commits `a` does not.
+    Behind(usize),
+    /// Each side has commits the other does not.
+    Diverged {
+        a: usize,
+        b: usize,
+    },
+    Unavailable(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct Git {
     pub binary: PathBuf,
@@ -193,6 +209,54 @@ impl Git {
             self.command(root).args(args).output()?,
             args.first().copied().unwrap_or(""),
         )
+    }
+    /// How commit `a` relates to commit `b` in the local checkout. Both must
+    /// be full SHAs: values read from receipts are never passed to git
+    /// otherwise.
+    pub fn compare(&self, root: &Path, a: &str, b: &str) -> Comparison {
+        if !valid_oid(a) || !valid_oid(b) {
+            return Comparison::Unavailable("recorded commit is not a valid SHA".into());
+        }
+        if a.eq_ignore_ascii_case(b) {
+            return Comparison::Same;
+        }
+        if !root.is_dir() {
+            return Comparison::Unavailable("checkout not found".into());
+        }
+        for sha in [a, b] {
+            let object = format!("{sha}^{{commit}}");
+            if self
+                .run(root, &["cat-file", "-e", "--end-of-options", &object])
+                .is_err()
+            {
+                return Comparison::Unavailable(format!(
+                    "commit {} is not in the local checkout",
+                    &sha[..12]
+                ));
+            }
+        }
+        let range = format!("{a}...{b}");
+        let counts = match self.run(
+            root,
+            &[
+                "rev-list",
+                "--left-right",
+                "--count",
+                "--end-of-options",
+                &range,
+            ],
+        ) {
+            Ok(counts) => counts,
+            Err(error) => return Comparison::Unavailable(error.to_string()),
+        };
+        let mut parts = counts.split_whitespace().map(str::parse::<usize>);
+        match (parts.next(), parts.next()) {
+            (Some(Ok(0)), Some(Ok(0))) => Comparison::Same,
+            (Some(Ok(ahead)), Some(Ok(0))) => Comparison::Ahead(ahead),
+            (Some(Ok(0)), Some(Ok(behind))) => Comparison::Behind(behind),
+            (Some(Ok(a)), Some(Ok(b))) => Comparison::Diverged { a, b },
+            _ => Comparison::Unavailable(format!("unexpected git output: {}", counts.trim())),
+        }
     }
     fn run_index(&self, root: &Path, index: &Path, args: &[&str]) -> Result<String, GitError> {
         collect_output(
@@ -924,6 +988,93 @@ exec /usr/bin/git "$@"
 mod tests {
     use super::test_support::Fixture;
     use super::*;
+    #[test]
+    fn compare_counts_commits_between_two_shas() {
+        let fixture = Fixture::new();
+        fixture.initialized();
+        let repo = &fixture.repo;
+        let head = || {
+            fixture
+                .git
+                .run(repo, &["rev-parse", "HEAD"])
+                .unwrap()
+                .trim()
+                .to_owned()
+        };
+        let commit = |message: &str| {
+            fixture
+                .git
+                .run(
+                    repo,
+                    &[
+                        "-c",
+                        "commit.gpgsign=false",
+                        "commit",
+                        "--allow-empty",
+                        "-q",
+                        "-m",
+                        message,
+                    ],
+                )
+                .unwrap();
+            head()
+        };
+        let base = head();
+        commit("one");
+        let main = commit("two");
+        fixture
+            .git
+            .run(repo, &["checkout", "-q", "-b", "side", &base])
+            .unwrap();
+        let side = commit("three");
+
+        let git = &fixture.git;
+        assert_eq!(git.compare(repo, &main, &base), Comparison::Ahead(2));
+        assert_eq!(git.compare(repo, &base, &main), Comparison::Behind(2));
+        assert_eq!(
+            git.compare(repo, &main, &side),
+            Comparison::Diverged { a: 2, b: 1 }
+        );
+        assert_eq!(
+            git.compare(repo, &base, &base.to_uppercase()),
+            Comparison::Same
+        );
+        let missing = "ab".repeat(20);
+        assert_eq!(
+            git.compare(repo, &main, &missing),
+            Comparison::Unavailable("commit abababababab is not in the local checkout".into())
+        );
+        assert_eq!(
+            git.compare(&fixture.root.join("gone"), &main, &base),
+            Comparison::Unavailable("checkout not found".into())
+        );
+    }
+    #[test]
+    fn compare_never_passes_an_invalid_sha_to_git() {
+        let fixture = Fixture::new();
+        let marker = fixture.root.join("git-ran");
+        let fake = fixture.root.join("fake-git");
+        Fixture::script(
+            &fake,
+            &format!(
+                "#!/bin/sh\ntouch {}\n",
+                crate::script::shell_quote(&marker.to_string_lossy())
+            ),
+        );
+        let git = Git::new(fake);
+        let valid = "a".repeat(40);
+        for bad in ["--output=/tmp/pwned", "abc1234", "", &"g".repeat(40)] {
+            assert_eq!(
+                git.compare(&fixture.root, bad, &valid),
+                Comparison::Unavailable("recorded commit is not a valid SHA".into())
+            );
+            assert_eq!(
+                git.compare(&fixture.root, &valid, bad),
+                Comparison::Unavailable("recorded commit is not a valid SHA".into())
+            );
+        }
+        assert!(!marker.exists());
+    }
     #[test]
     fn branch_validation_preserves_launch_errors_and_rejects_invalid_names() {
         let fixture = Fixture::new();

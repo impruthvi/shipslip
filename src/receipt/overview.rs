@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use super::history::{entries_in, Entry};
 use super::{io_error, read_receipt, safe_component, Badge, Receipt, ReceiptError, ReceiptStatus};
 use super::{ReceiptStepStatus, ReceiptSummary};
+use crate::git::{Comparison, Git};
 use crate::{DeployOutcome, RunPlan};
 
 /// Receipts of one cell read before it settles on "no code change".
@@ -458,6 +459,63 @@ fn code_of(receipt: &Receipt) -> Option<CodeState> {
         RunPlan::Rerun | RunPlan::FromStep(_) => receipt
             .mutation_started
             .then(|| recorded(Evidence::CheckedOutAtStart)),
+    }
+}
+
+/// Something about one side that the commit count alone would hide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Qualifier {
+    DeployIncomplete,
+    TreeDirty,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvComparison {
+    /// Env `a` relative to env `b`.
+    pub result: Comparison,
+    /// Env name and what to say next to the count.
+    pub notes: Vec<(String, Qualifier)>,
+}
+
+/// Compares the code two envs of one checkout are on. Only recorded or
+/// observed commits are compared.
+pub fn compare_envs(git: &Git, row: &RepoRow, a: &str, b: &str) -> EnvComparison {
+    let mut notes = Vec::new();
+    let unavailable = |reason: String| EnvComparison {
+        result: Comparison::Unavailable(reason),
+        notes: Vec::new(),
+    };
+    let mut shas = Vec::new();
+    for name in [a, b] {
+        let Some(cell) = row
+            .envs
+            .iter()
+            .find(|cell| safe_component(&cell.env) == safe_component(name))
+        else {
+            return unavailable(format!("no {name} environment"));
+        };
+        match &cell.code {
+            CodeState::Recorded { sha, complete, .. } => {
+                if !complete {
+                    notes.push((cell.env.clone(), Qualifier::DeployIncomplete));
+                }
+                shas.push(sha.clone());
+            }
+            CodeState::Observed { sha, dirty, .. } => {
+                if *dirty == Some(true) {
+                    notes.push((cell.env.clone(), Qualifier::TreeDirty));
+                }
+                shas.push(sha.clone());
+            }
+            _ => return unavailable(format!("no recorded code on {}", cell.env)),
+        }
+    }
+    if row.path_missing {
+        return unavailable("checkout not found".into());
+    }
+    EnvComparison {
+        result: git.compare(Path::new(&row.repo_root), &shas[0], &shas[1]),
+        notes,
     }
 }
 
