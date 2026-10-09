@@ -16,12 +16,17 @@ use crate::{
 
 mod history;
 mod markdown;
+mod overview;
 
 pub use history::{
     describe_plan, describe_watch, failed_step_options, find, list, Badge, Flag, Found, Listed,
     Listing, MIN_ID_LEN,
 };
 pub use markdown::markdown;
+pub use overview::{
+    overview, AttemptSummary, CodeState, EnvCell, Evidence, NotKnownReason, Overview, Problem,
+    RepoRow, StaleHint, WALK_LIMIT,
+};
 
 const VERSION: u32 = 1;
 const OUTPUT_LINES: usize = 200;
@@ -506,11 +511,14 @@ pub fn default_receipts_root() -> Result<PathBuf, ReceiptError> {
     Ok(path)
 }
 
-/// The fields [`find_open`] needs, readable from any receipt version.
+/// The fields [`find_open`] and the release map need, readable from any
+/// receipt version.
 #[derive(Deserialize)]
 struct ReceiptSummary {
     status: ReceiptStatus,
     repo_root: String,
+    #[serde(default)]
+    project: Option<String>,
 }
 
 pub fn find_open(
