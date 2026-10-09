@@ -80,6 +80,8 @@ pub enum CodeState {
         /// The commit the run was deploying.
         expected: String,
         run_id: String,
+        /// How that run ended, if it did.
+        outcome: Option<DeployOutcome>,
         at_ms: u128,
     },
     /// The code may have changed, but nothing recorded says to what.
@@ -123,6 +125,8 @@ pub struct AttemptSummary {
     pub started_at_ms: u128,
     pub run_plan: RunPlan,
     pub badge: Badge,
+    /// [`Receipt::next_steps`], already escaped.
+    pub next_steps: Vec<String>,
 }
 
 /// A receipt newer than the one that decided the cell could not be read, so
@@ -428,6 +432,7 @@ fn walk(owns: &[Own]) -> Walk {
                 started_at_ms: receipt.started_at_ms,
                 run_plan: receipt.run_plan,
                 badge: receipt.badge(),
+                next_steps: receipt.next_steps(),
             });
             current = Some(target.clone());
         }
@@ -469,6 +474,7 @@ fn code_of(receipt: &Receipt) -> Option<CodeState> {
             dirty: receipt.tree_dirty,
             expected: receipt.target_sha.clone(),
             run_id,
+            outcome: receipt.outcome.clone(),
             at_ms,
         });
     }

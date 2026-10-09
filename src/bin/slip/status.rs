@@ -9,6 +9,7 @@ use shipslip::receipt::{
     self, CodeState, EnvCell, EnvComparison, Evidence, NotKnownReason, Overview, Qualifier,
     ReceiptStepStatus, RepoRow, StaleHint,
 };
+use shipslip::DeployOutcome;
 
 use super::invalid_input;
 
@@ -96,10 +97,10 @@ fn render(
                     line.push_str("  ");
                     line.push_str(&flag.text());
                 }
-                if badge.unfinished {
-                    let _ = write!(line, "; if nothing is running, `slip attach {}`", cell.env);
-                }
                 let _ = writeln!(out, "{pad}{}", escape_field(&line));
+                for step in &attempt.next_steps {
+                    let _ = writeln!(out, "{pad}  → {}", escape_field(step));
+                }
             }
             if let Some(target) = &cell.target {
                 let _ = writeln!(out, "{pad}on {}", escape_field(target));
@@ -186,16 +187,24 @@ fn code_line(cell: &EnvCell, now_ms: u128) -> String {
             dirty,
             expected,
             run_id,
+            outcome,
             at_ms,
         } => {
-            let mut line = format!("observed {}", short(sha));
+            let mut line = format!("observed {} after run {}", short(sha), short_id(run_id));
+            match outcome {
+                Some(DeployOutcome::FailedAtStep { step, .. }) => {
+                    let _ = write!(line, " failed at step {step}");
+                }
+                Some(DeployOutcome::StoppedAfterStep { step, .. }) => {
+                    let _ = write!(line, " stopped after step {step}");
+                }
+                Some(DeployOutcome::Unknown { step, .. }) => {
+                    let _ = write!(line, " lost track of step {step}");
+                }
+                _ => {}
+            }
             if !sha.eq_ignore_ascii_case(expected) {
-                let _ = write!(
-                    line,
-                    " after run {}, expected {}",
-                    short_id(run_id),
-                    short(expected)
-                );
+                let _ = write!(line, ", expected {}", short(expected));
             }
             if *dirty == Some(true) {
                 line.push_str(", tree dirty");
