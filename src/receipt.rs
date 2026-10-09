@@ -18,7 +18,8 @@ mod history;
 mod markdown;
 
 pub use history::{
-    describe_plan, describe_watch, find, list, Badge, Flag, Found, Listed, Listing, MIN_ID_LEN,
+    describe_plan, describe_watch, failed_step_options, find, list, Badge, Flag, Found, Listed,
+    Listing, MIN_ID_LEN,
 };
 pub use markdown::markdown;
 
