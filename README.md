@@ -434,8 +434,9 @@ fast-forward succeeded (`deploy incomplete` if a later step did not), `checked
 out at start` for reruns, and `observed …` when Shipslip read the server's
 commit after a failed step. Otherwise the line says `server code not known`,
 `never deployed`, or `target changed` when the environment now points at a
-different server or path. Each line also shows the last run and its flags, and
-warns when a newer receipt could not be read. `--compare` uses your local
+different server or path. Each line also shows the last run and its flags. It
+warns when a newer receipt could not be read, and when another checkout ran a
+newer deploy on the same server path, since that run may have replaced the code. `--compare` uses your local
 checkout to count commits and notes an incomplete deploy or dirty tree on
 either side.
 

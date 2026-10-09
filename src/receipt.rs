@@ -25,7 +25,7 @@ pub use history::{
 pub use markdown::markdown;
 pub use overview::{
     compare_envs, overview, AttemptSummary, CodeState, EnvCell, EnvComparison, Evidence,
-    NotKnownReason, Overview, Problem, Qualifier, RepoRow, StaleHint, WALK_LIMIT,
+    NewerElsewhere, NotKnownReason, Overview, Problem, Qualifier, RepoRow, StaleHint, WALK_LIMIT,
 };
 
 const VERSION: u32 = 1;

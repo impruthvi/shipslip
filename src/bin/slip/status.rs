@@ -104,6 +104,16 @@ fn render(
             if let Some(target) = &cell.target {
                 let _ = writeln!(out, "{pad}on {}", escape_field(target));
             }
+            if let Some(other) = &cell.newer_elsewhere {
+                let line = format!(
+                    "⚠ a newer run ({}, {}) from {} ({}) used this server; this may be out of date",
+                    short_id(&other.run_id),
+                    age(now_ms, other.started_at_ms),
+                    other.repo_root,
+                    other.env
+                );
+                let _ = writeln!(out, "{pad}{}", escape_field(&line));
+            }
             match &cell.stale_hint {
                 Some(
                     StaleHint::NewestUnreadable { path } | StaleHint::UnattributedNewer { path },

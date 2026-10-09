@@ -1,5 +1,5 @@
 use super::*;
-use shipslip::receipt::{AttemptSummary, Badge, Flag, Problem};
+use shipslip::receipt::{AttemptSummary, Badge, Flag, NewerElsewhere, Problem};
 use shipslip::{DeployOutcome, RunPlan};
 
 const NOW: u128 = 10 * 86_400_000;
@@ -24,6 +24,7 @@ fn cell(env: &str, code: CodeState) -> EnvCell {
         last_attempt: None,
         stale_hint: None,
         target: None,
+        newer_elsewhere: None,
     }
 }
 
@@ -308,5 +309,31 @@ fn empty_map_says_how_to_start() {
     assert_eq!(
         text,
         "No deploys or approvals recorded yet. Run `slip trust ENV` and `slip deploy ENV` in a project.\n"
+    );
+}
+
+#[test]
+fn a_newer_run_from_another_checkout_is_called_out() {
+    let mut staging = cell("staging", recorded(true, Evidence::FastForward));
+    staging.newer_elsewhere = Some(NewerElsewhere {
+        repo_root: "/private/tmp/app".into(),
+        env: "staging".into(),
+        run_id: "ffff0006-0".into(),
+        started_at_ms: NOW - 3_600_000,
+    });
+    let text = render(
+        &Overview {
+            repos: vec![row("app", vec![staging])],
+            problems: vec![],
+        },
+        NOW,
+        None,
+        no_compare,
+    );
+    assert!(
+        text.contains(
+            "\n           ⚠ a newer run (ffff0006, 1h ago) from /private/tmp/app (staging) used this server; this may be out of date\n"
+        ),
+        "{text}"
     );
 }

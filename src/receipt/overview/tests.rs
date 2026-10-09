@@ -571,6 +571,7 @@ fn comparisons_carry_each_sides_caveat_and_refuse_unknown_code() {
         last_attempt: None,
         stale_hint: None,
         target: None,
+        newer_elsewhere: None,
     };
     let mut row = RepoRow {
         repo_root: fixture.0.to_string_lossy().into_owned(),
@@ -631,5 +632,38 @@ fn comparisons_carry_each_sides_caveat_and_refuse_unknown_code() {
     assert_eq!(
         compare_envs(&git, &row, "staging", "production").result,
         Comparison::Unavailable("checkout not found".into())
+    );
+}
+
+#[test]
+fn a_later_run_from_another_checkout_on_the_same_server_is_flagged() {
+    let fixture = Fixture::new();
+    let mut old = run(1, "staging");
+    old["repo_root"] = json!("/old/app");
+    fixture.save(&old);
+    fixture.save(&run(2, "staging"));
+    let mut elsewhere = run(3, "staging");
+    elsewhere["repo_root"] = json!("/other/app");
+    elsewhere["target"]["path"] = json!("/srv/other");
+    fixture.save(&elsewhere);
+
+    let overview = fixture.overview();
+    assert_eq!(
+        cell(&overview, "/old/app", "staging").newer_elsewhere,
+        Some(NewerElsewhere {
+            repo_root: "/work/app".into(),
+            env: "staging".into(),
+            run_id: "00000002-0".into(),
+            started_at_ms: 2000,
+        })
+    );
+    // The newest run on a server, and runs on other servers, are not flagged.
+    assert_eq!(
+        cell(&overview, "/work/app", "staging").newer_elsewhere,
+        None
+    );
+    assert_eq!(
+        cell(&overview, "/other/app", "staging").newer_elsewhere,
+        None
     );
 }

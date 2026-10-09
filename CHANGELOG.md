@@ -12,8 +12,9 @@ change the library API.
   from local receipts and approvals, from any folder and without contacting a
   server. It only names a commit a receipt backs (fast-forward succeeded,
   rerun checked it out, or server commit read after a failed step) and
-  otherwise says the code is not known. `--compare ENV ENV` counts commits
-  between two environments in the local checkout.
+  otherwise says the code is not known, and warns when another checkout ran
+  later on the same server path. `--compare ENV ENV` counts commits between
+  two environments in the local checkout.
 - Library: `receipt::overview`, `receipt::compare_envs`, `Git::compare`, and
   `Receipt::next_steps`, so other front-ends can show the same map and advice.
 

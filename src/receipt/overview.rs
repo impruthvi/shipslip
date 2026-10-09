@@ -49,6 +49,17 @@ pub struct EnvCell {
     pub stale_hint: Option<StaleHint>,
     /// `ssh_alias:path` of the newest readable run.
     pub target: Option<String>,
+    /// Another checkout ran on the same `ssh_alias:path` after this cell's
+    /// last run, so its code may have replaced this one.
+    pub newer_elsewhere: Option<NewerElsewhere>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewerElsewhere {
+    pub repo_root: String,
+    pub env: String,
+    pub run_id: String,
+    pub started_at_ms: u128,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,7 +270,43 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
             .cmp(&b.label)
             .then_with(|| a.repo_root.cmp(&b.repo_root))
     });
+    mark_newer_elsewhere(&mut repos);
     Ok(Overview { repos, problems })
+}
+
+/// Cells are per checkout, but two checkouts can deploy to one server path.
+fn mark_newer_elsewhere(repos: &mut [RepoRow]) {
+    let mut runs: BTreeMap<String, Vec<NewerElsewhere>> = BTreeMap::new();
+    for row in repos.iter() {
+        for cell in &row.envs {
+            if let (Some(target), Some(attempt)) = (&cell.target, &cell.last_attempt) {
+                runs.entry(target.clone())
+                    .or_default()
+                    .push(NewerElsewhere {
+                        repo_root: row.repo_root.clone(),
+                        env: cell.env.clone(),
+                        run_id: attempt.run_id.clone(),
+                        started_at_ms: attempt.started_at_ms,
+                    });
+            }
+        }
+    }
+    for row in repos.iter_mut() {
+        for cell in &mut row.envs {
+            let (Some(target), Some(attempt)) = (&cell.target, &cell.last_attempt) else {
+                continue;
+            };
+            cell.newer_elsewhere = runs
+                .get(target)
+                .into_iter()
+                .flatten()
+                .filter(|other| {
+                    other.repo_root != row.repo_root && other.started_at_ms > attempt.started_at_ms
+                })
+                .max_by_key(|other| other.started_at_ms)
+                .cloned();
+        }
+    }
 }
 
 fn project_dirs(root: &Path) -> Result<Vec<PathBuf>, ReceiptError> {
@@ -320,6 +367,7 @@ fn build_cell(
         last_attempt: walk.last_attempt,
         stale_hint,
         target: walk.target,
+        newer_elsewhere: None,
     }
 }
 
