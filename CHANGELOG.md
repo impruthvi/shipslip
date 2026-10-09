@@ -6,6 +6,15 @@ change the library API.
 
 ## [Unreleased]
 
+### Changed
+
+- `slip status` says how a run ended next to a commit it observed on the
+  server (`observed 2fa3f2490cb2 after run 18dcdde4 failed at step 2`), and
+  lists the same next steps as `slip receipts show` under a run that needs
+  attention, such as `slip from-step` or `slip up`.
+- Library: `CodeState::Observed` carries the run's outcome and
+  `AttemptSummary` carries its `next_steps`.
+
 ## [0.6.0] - 2026-10-09
 
 ### Added

@@ -94,20 +94,45 @@ fn every_code_state_has_its_own_words() {
         lines(recorded(true, Evidence::CheckedOutAtStart), false),
         "code at a1b2c3d4e5f6, checked out at start (recorded 3d ago)"
     );
-    let observed = |sha: &str, dirty| CodeState::Observed {
+    let observed = |sha: &str, dirty, outcome| CodeState::Observed {
         sha: sha.into(),
         dirty,
         expected: A.into(),
         run_id: "bbbb0002-0".into(),
+        outcome,
         at_ms: NOW - 2 * 3_600_000,
     };
     assert_eq!(
-        lines(observed(A, Some(true)), false),
-        "observed a1b2c3d4e5f6, tree dirty (2h ago)"
+        lines(observed(A, Some(true), None), false),
+        "observed a1b2c3d4e5f6 after run bbbb0002, tree dirty (2h ago)"
     );
     assert_eq!(
-        lines(observed(B, Some(false)), false),
-        "observed b1b2c3d4e5f6 after run bbbb0002, expected a1b2c3d4e5f6 (2h ago)"
+        lines(
+            observed(
+                B,
+                Some(false),
+                Some(DeployOutcome::FailedAtStep {
+                    step: 2,
+                    partial_update: false
+                })
+            ),
+            false
+        ),
+        "observed b1b2c3d4e5f6 after run bbbb0002 failed at step 2, expected a1b2c3d4e5f6 (2h ago)"
+    );
+    assert_eq!(
+        lines(
+            observed(
+                A,
+                None,
+                Some(DeployOutcome::Unknown {
+                    step: 1,
+                    reason: "connection lost".into()
+                })
+            ),
+            false
+        ),
+        "observed a1b2c3d4e5f6 after run bbbb0002 lost track of step 1 (2h ago)"
     );
     assert_eq!(
         lines(
@@ -163,6 +188,9 @@ fn map_shows_last_runs_targets_hints_and_problems() {
             outcome: Some(DeployOutcome::Succeeded),
             flags: vec![Flag::NewErrors(2)],
         },
+        next_steps: vec![
+            "The run did not finish. If no deploy is running, resume it from /work/shop with `slip attach production`.".into(),
+        ],
     });
     let mut staging = cell("staging", recorded(true, Evidence::FastForward));
     staging.stale_hint = Some(StaleHint::UnattributedNewer {
@@ -185,7 +213,8 @@ fn map_shows_last_runs_targets_hints_and_problems() {
          \n\
          shop  /work/shop\n\
          \x20 production  code at a1b2c3d4e5f6 (recorded 3d ago)\n\
-         \x20             last run eeee0005 (20m ago): Unfinished (last recorded: Succeeded)  ⚠ 2 new error groups; if nothing is running, `slip attach production`\n\
+         \x20             last run eeee0005 (20m ago): Unfinished (last recorded: Succeeded)  ⚠ 2 new error groups\n\
+         \x20               → The run did not finish. If no deploy is running, resume it from /work/shop with `slip attach production`.\n\
          \x20             on web1:/srv/shop\n\
          \x20 staging     code at a1b2c3d4e5f6 (recorded 3d ago)\n\
          \x20             ⚠ a newer receipt could not be read; this may be out of date: /r/shop/staging/9-x.json\n\

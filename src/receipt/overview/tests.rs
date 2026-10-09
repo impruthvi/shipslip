@@ -150,7 +150,12 @@ fn fast_forward_status_decides_the_code() {
         recorded(OTHER, false, Evidence::FastForward, 2)
     );
     assert_eq!(staging.target.as_deref(), Some("web1:/srv/app"));
-    assert_eq!(staging.last_attempt.as_ref().unwrap().run_id, "00000002-0");
+    let last = staging.last_attempt.as_ref().unwrap();
+    assert_eq!(last.run_id, "00000002-0");
+    assert_eq!(
+        last.next_steps[0],
+        "Step 2 failed and later steps did not run."
+    );
     assert!(!staging.approved);
 }
 
@@ -247,6 +252,10 @@ fn a_fast_forward_that_did_not_end_ok_is_not_known_unless_observed() {
             dirty: Some(true),
             expected: OTHER.into(),
             run_id: "00000002-0".into(),
+            outcome: Some(DeployOutcome::FailedAtStep {
+                step: 0,
+                partial_update: false,
+            }),
             at_ms: 2500,
         }
     );
@@ -281,6 +290,10 @@ fn an_observed_head_wins_over_a_successful_fast_forward() {
             dirty: Some(false),
             expected: NEW.into(),
             run_id: "00000001-0".into(),
+            outcome: Some(DeployOutcome::FailedAtStep {
+                step: 2,
+                partial_update: false,
+            }),
             at_ms: 1500,
         }
     );
@@ -587,6 +600,7 @@ fn comparisons_carry_each_sides_caveat_and_refuse_unknown_code() {
                     dirty: Some(true),
                     expected: NEW.into(),
                     run_id: "00000002-0".into(),
+                    outcome: None,
                     at_ms: 2500,
                 },
             ),
