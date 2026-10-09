@@ -1,7 +1,7 @@
 //! Bounded Laravel log observation and a local HTTP smoke check.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 
 use crate::event::DeployEvent;
+use crate::receipt::HistoryPaths;
 use crate::runner::run_collect;
 use crate::script::shell_quote;
 use crate::transport::Transport;
@@ -126,11 +127,11 @@ impl LogObserver {
         transport: Arc<T>,
         target: &DeployTarget,
         events: mpsc::UnboundedSender<DeployEvent>,
-        history_path: Option<PathBuf>,
+        history_path: Option<HistoryPaths>,
         cancel: Arc<AtomicBool>,
     ) -> Self {
         let spec = LogSpec::from_target(target);
-        let (history, history_error) = match history_path.as_deref().map(read_history) {
+        let (history, history_error) = match history_path.as_ref().map(read_history) {
             Some(Ok(history)) => (history, None),
             Some(Err(error)) => (Vec::new(), Some(error)),
             None => (Vec::new(), None),
@@ -732,7 +733,7 @@ async fn watch_loop<T: Transport>(
     transport: Arc<T>,
     spec: LogSpec,
     events: mpsc::UnboundedSender<DeployEvent>,
-    history_path: Option<PathBuf>,
+    history_path: Option<HistoryPaths>,
     mut state: LogState,
     mut control: watch::Receiver<Mode>,
     cancel: Arc<AtomicBool>,
@@ -744,7 +745,7 @@ async fn watch_loop<T: Transport>(
                 state,
                 WatchStatus::Cancelled,
                 &events,
-                history_path.as_deref(),
+                history_path.as_ref(),
             );
         }
         let mode = *control.borrow();
@@ -755,7 +756,7 @@ async fn watch_loop<T: Transport>(
             continue;
         }
         if let Mode::Stop(status) = mode {
-            return finalize_watch(state, status, &events, history_path.as_deref());
+            return finalize_watch(state, status, &events, history_path.as_ref());
         }
         let catch_up = if let Mode::After(deadline) = mode {
             if after_caught_up && Instant::now() >= deadline {
@@ -763,7 +764,7 @@ async fn watch_loop<T: Transport>(
                     state,
                     WatchStatus::Complete,
                     &events,
-                    history_path.as_deref(),
+                    history_path.as_ref(),
                 );
             }
             let needs_catch_up = !after_caught_up;
@@ -857,7 +858,7 @@ fn finalize_watch(
     state: LogState,
     status: WatchStatus,
     events: &mpsc::UnboundedSender<DeployEvent>,
-    history_path: Option<&Path>,
+    history_path: Option<&HistoryPaths>,
 ) -> WatchResult {
     let (mut result, signatures) = state.done(status, events);
     if status != WatchStatus::NotRun {
@@ -877,7 +878,15 @@ fn finalize_watch(
     result
 }
 
-fn read_history(path: &Path) -> Result<Vec<String>, std::io::Error> {
+/// Reads the current history file, or the legacy one when it is missing.
+fn read_history(paths: &HistoryPaths) -> Result<Vec<String>, std::io::Error> {
+    match read_history_file(&paths.current)? {
+        Some(history) => Ok(history),
+        None => Ok(read_history_file(&paths.legacy)?.unwrap_or_default()),
+    }
+}
+
+fn read_history_file(path: &Path) -> Result<Option<Vec<String>>, std::io::Error> {
     match std::fs::File::open(path) {
         Ok(mut file) => {
             use std::io::Read;
@@ -892,14 +901,17 @@ fn read_history(path: &Path) -> Result<Vec<String>, std::io::Error> {
                 return Err(std::io::Error::other("signature history is too large"));
             }
             let values: Vec<String> = serde_json::from_slice(&bytes)?;
-            Ok(values.into_iter().take(MAX_HISTORY).collect())
+            Ok(Some(values.into_iter().take(MAX_HISTORY).collect()))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
 }
 
-fn write_history(path: &Path, signatures: &[String]) -> Result<(), std::io::Error> {
+/// Writes the current history file. A legacy file is moved there first, so
+/// the old location stops being read; its directories are left in place.
+fn write_history(paths: &HistoryPaths, signatures: &[String]) -> Result<(), std::io::Error> {
+    let path = &paths.current;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         #[cfg(unix)]
@@ -909,6 +921,9 @@ fn write_history(path: &Path, signatures: &[String]) -> Result<(), std::io::Erro
                 std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
             }
         }
+    }
+    if !path.exists() {
+        let _ = std::fs::rename(&paths.legacy, path);
     }
     crate::private_file::write_atomic(path, &serde_json::to_vec(signatures)?)
 }
@@ -1249,6 +1264,39 @@ mod tests {
         assert_eq!(kept.iter().filter(|s| *s == "a-0003").count(), 1);
         assert!(kept.contains(&"a-4997".to_string()));
         assert!(!kept.contains(&"a-4999".to_string()));
+    }
+
+    #[test]
+    fn history_reads_the_legacy_file_then_moves_it_on_write() {
+        let base =
+            std::env::temp_dir().join(format!("shipslip-history-move-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let tail = Path::new("app/staging/history.json");
+        let paths = HistoryPaths {
+            current: base.join("signatures").join(tail),
+            legacy: base.join("receipts/signatures").join(tail),
+        };
+        assert!(read_history(&paths).unwrap().is_empty());
+
+        std::fs::create_dir_all(paths.legacy.parent().unwrap()).unwrap();
+        std::fs::write(&paths.legacy, br#"["old"]"#).unwrap();
+        assert_eq!(read_history(&paths).unwrap(), ["old"]);
+
+        write_history(&paths, &["new".into(), "old".into()]).unwrap();
+        assert!(!paths.legacy.exists());
+        assert!(
+            paths.legacy.parent().unwrap().is_dir(),
+            "no directory is removed"
+        );
+        assert_eq!(read_history(&paths).unwrap(), ["new", "old"]);
+
+        // Once the current file exists, a stray legacy file is ignored and kept.
+        std::fs::write(&paths.legacy, br#"["stale"]"#).unwrap();
+        assert_eq!(read_history(&paths).unwrap(), ["new", "old"]);
+        write_history(&paths, &["newer".into()]).unwrap();
+        assert!(paths.legacy.exists());
+        assert_eq!(read_history(&paths).unwrap(), ["newer"]);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
