@@ -152,6 +152,43 @@ fn list_is_newest_first_filters_by_env_and_limits() {
     assert!(list(&root.0, "other", None, None).unwrap().rows.is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn entries_in_keeps_readable_envs_when_one_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TempRoot::new();
+    let project_dir = root.0.join(safe_component("my app"));
+    for (env, name) in [
+        ("staging", "1000-aaaa0001-0.json"),
+        ("production", "2000-bbbb0002-0.json"),
+    ] {
+        let dir = project_dir.join(env);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(name), b"{}").unwrap();
+    }
+    assert_eq!(list(&root.0, "my app", None, None).unwrap().rows.len(), 2);
+
+    let locked = project_dir.join("production");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let (entries, problems) = history::entries_in(&project_dir);
+    let listed = list(&root.0, "my app", None, None);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let found: Vec<_> = entries
+        .iter()
+        .map(|entry| (entry.env.as_str(), entry.run_id.as_str()))
+        .collect();
+    assert_eq!(found, [("staging", "aaaa0001-0")]);
+    assert_eq!(problems.len(), 1);
+    assert!(matches!(&problems[0], ReceiptError::Io { path, .. } if *path == locked));
+    // `list` and `find` still fail on any unreadable directory.
+    assert!(listed.is_err());
+
+    let (entries, problems) = history::entries_in(&root.0.join("missing"));
+    assert!(entries.is_empty() && problems.is_empty());
+}
+
 #[test]
 fn list_shows_unreadable_and_newer_receipts_and_skips_other_files() {
     let root = TempRoot::new();

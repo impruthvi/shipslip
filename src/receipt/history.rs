@@ -52,11 +52,12 @@ pub enum Found {
     Missing,
 }
 
-struct Entry {
-    env: String,
-    started_at_ms: Option<u128>,
-    run_id: String,
-    path: PathBuf,
+pub(super) struct Entry {
+    /// The env directory's name, which is the encoded env.
+    pub(super) env: String,
+    pub(super) started_at_ms: Option<u128>,
+    pub(super) run_id: String,
+    pub(super) path: PathBuf,
 }
 
 /// Lists a project's receipts newest first, optionally for one environment.
@@ -134,10 +135,25 @@ fn listed(entry: &Entry, id: &str) -> Listed {
 }
 
 /// Receipt files of a project, newest first by the start time in their name.
+/// Fails on the first directory that cannot be read.
 fn entries(root: &Path, project: &str) -> Result<Vec<Entry>, ReceiptError> {
-    let project_dir = root.join(safe_component(project));
+    let (entries, problems) = entries_in(&root.join(safe_component(project)));
+    match problems.into_iter().next() {
+        Some(problem) => Err(problem),
+        None => Ok(entries),
+    }
+}
+
+/// Like [`entries`], for an already-encoded project directory, but an
+/// unreadable directory becomes a problem and the rest is still listed.
+pub(super) fn entries_in(project_dir: &Path) -> (Vec<Entry>, Vec<ReceiptError>) {
     let mut entries = Vec::new();
-    for env_dir in read_dir(&project_dir)? {
+    let mut problems = Vec::new();
+    let env_dirs = match read_dir(project_dir) {
+        Ok(dirs) => dirs,
+        Err(problem) => return (entries, vec![problem]),
+    };
+    for env_dir in env_dirs {
         if !env_dir.is_dir() {
             continue;
         }
@@ -145,7 +161,14 @@ fn entries(root: &Path, project: &str) -> Result<Vec<Entry>, ReceiptError> {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        for path in read_dir(&env_dir)? {
+        let files = match read_dir(&env_dir) {
+            Ok(files) => files,
+            Err(problem) => {
+                problems.push(problem);
+                continue;
+            }
+        };
+        for path in files {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") || !path.is_file() {
                 continue;
             }
@@ -173,7 +196,7 @@ fn entries(root: &Path, project: &str) -> Result<Vec<Entry>, ReceiptError> {
             .cmp(&a.started_at_ms)
             .then_with(|| b.run_id.cmp(&a.run_id))
     });
-    Ok(entries)
+    (entries, problems)
 }
 
 fn read_dir(dir: &Path) -> Result<Vec<PathBuf>, ReceiptError> {
