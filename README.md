@@ -37,7 +37,8 @@ is not supported yet.
 
 Project creation and GitHub publishing require Shipslip **0.3.0 or newer**;
 `slip doctor`, `slip setup`, and in-place repair require **0.4.0 or newer**;
-`slip receipts` requires **0.5.0 or newer**.
+`slip receipts` requires **0.5.0 or newer**; `slip status` requires **0.6.0
+or newer**.
 Run the GitHub installer above to upgrade, or use the
 [local build instructions](#try-project-creation-from-this-checkout).
 
