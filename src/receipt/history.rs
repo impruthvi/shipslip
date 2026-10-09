@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use super::{
     io_error, read_receipt, safe_component, Receipt, ReceiptError, ReceiptStatus, ReceiptStepStatus,
 };
+use crate::logs::escape_field;
 use crate::{DeployOutcome, RunPlan, SmokeResult, WatchStatus};
 
 /// Shortest run ID prefix shown to users.
@@ -51,11 +52,12 @@ pub enum Found {
     Missing,
 }
 
-struct Entry {
-    env: String,
-    started_at_ms: Option<u128>,
-    run_id: String,
-    path: PathBuf,
+pub(super) struct Entry {
+    /// The env directory's name, which is the encoded env.
+    pub(super) env: String,
+    pub(super) started_at_ms: Option<u128>,
+    pub(super) run_id: String,
+    pub(super) path: PathBuf,
 }
 
 /// Lists a project's receipts newest first, optionally for one environment.
@@ -133,10 +135,25 @@ fn listed(entry: &Entry, id: &str) -> Listed {
 }
 
 /// Receipt files of a project, newest first by the start time in their name.
+/// Fails on the first directory that cannot be read.
 fn entries(root: &Path, project: &str) -> Result<Vec<Entry>, ReceiptError> {
-    let project_dir = root.join(safe_component(project));
+    let (entries, problems) = entries_in(&root.join(safe_component(project)));
+    match problems.into_iter().next() {
+        Some(problem) => Err(problem),
+        None => Ok(entries),
+    }
+}
+
+/// Like [`entries`], for an already-encoded project directory, but an
+/// unreadable directory becomes a problem and the rest is still listed.
+pub(super) fn entries_in(project_dir: &Path) -> (Vec<Entry>, Vec<ReceiptError>) {
     let mut entries = Vec::new();
-    for env_dir in read_dir(&project_dir)? {
+    let mut problems = Vec::new();
+    let env_dirs = match read_dir(project_dir) {
+        Ok(dirs) => dirs,
+        Err(problem) => return (entries, vec![problem]),
+    };
+    for env_dir in env_dirs {
         if !env_dir.is_dir() {
             continue;
         }
@@ -144,7 +161,14 @@ fn entries(root: &Path, project: &str) -> Result<Vec<Entry>, ReceiptError> {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default();
-        for path in read_dir(&env_dir)? {
+        let files = match read_dir(&env_dir) {
+            Ok(files) => files,
+            Err(problem) => {
+                problems.push(problem);
+                continue;
+            }
+        };
+        for path in files {
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") || !path.is_file() {
                 continue;
             }
@@ -172,7 +196,7 @@ fn entries(root: &Path, project: &str) -> Result<Vec<Entry>, ReceiptError> {
             .cmp(&a.started_at_ms)
             .then_with(|| b.run_id.cmp(&a.run_id))
     });
-    Ok(entries)
+    (entries, problems)
 }
 
 fn read_dir(dir: &Path) -> Result<Vec<PathBuf>, ReceiptError> {
@@ -351,6 +375,62 @@ impl Receipt {
             )
         )
     }
+
+    /// Recovery hints built only from what the receipt recorded. Server text
+    /// is escaped, so the lines are safe to print as-is.
+    pub fn next_steps(&self) -> Vec<String> {
+        let env = escape_field(&self.target.env);
+        let mut lines = Vec::new();
+        if self.status == ReceiptStatus::InProgress {
+            lines.push(format!(
+                "The run did not finish. If no deploy is running, resume it from {} with `slip attach {env}`.",
+                escape_field(&self.repo_root)
+            ));
+        }
+        match &self.outcome {
+            Some(DeployOutcome::FailedAtStep { step: 0, .. }) => lines.push(
+                "The fast-forward failed. Check the server checkout before deploying again.".into(),
+            ),
+            Some(DeployOutcome::FailedAtStep { step, .. }) => {
+                lines.push(format!("Step {step} failed and later steps did not run."));
+                lines.extend(failed_step_options(&env, *step));
+            }
+            Some(DeployOutcome::StoppedAfterStep { step, .. })
+                if *step < self.target.steps.len() =>
+            {
+                lines.push(format!(
+                    "Steps after {step} did not run. `slip from-step {env} {}` runs them on the deployed commit.",
+                    step + 1
+                ))
+            }
+            Some(DeployOutcome::StoppedInMaintenance(_)) => lines.push(
+                "No deploy steps ran, so the code on the server did not change.".into(),
+            ),
+            Some(DeployOutcome::Unknown { step, .. }) => lines.push(format!(
+                "The result of step {step} is unknown. Check the server before running anything again."
+            )),
+            _ => {}
+        }
+        if self.app_left_down {
+            lines.push(format!(
+                "The app may still be in maintenance mode. After checking the server, `slip up {env}` turns it off."
+            ));
+        }
+        lines
+    }
+}
+
+/// Retrying the same commit only helps when the cause was outside the code.
+/// `env` must already be escaped.
+pub fn failed_step_options(env: &str, step: usize) -> [String; 2] {
+    [
+        format!(
+            "If the cause was on the server (permissions, .env, database), fix it there, then `slip from-step {env} {step}` runs the remaining steps on the deployed commit."
+        ),
+        format!(
+            "If it needs a code change, push the fix and run `slip deploy {env}`."
+        ),
+    ]
 }
 
 pub fn describe_plan(plan: RunPlan) -> String {

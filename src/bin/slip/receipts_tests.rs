@@ -148,7 +148,7 @@ fn list_rows_stay_on_one_line() {
 }
 
 #[test]
-fn next_steps_use_only_recorded_facts() {
+fn show_prints_next_steps_from_the_receipt() {
     let failed = receipt(|value| {
         value["outcome"] = json!({"FailedAtStep": {"step": 1, "partial_update": false}});
         value["steps"][0]["status"] = json!("Failed");
@@ -163,22 +163,17 @@ fn next_steps_use_only_recorded_facts() {
         value["status"] = json!("InProgress");
         value["app_left_down"] = json!(true);
     });
-    let lines = next_steps(&unfinished);
-    assert_eq!(
-        lines,
-        [
-            "The run did not finish. If no deploy is running, resume it from /work/app with `slip attach staging`.",
-            "The app may still be in maintenance mode. After checking the server, `slip up staging` turns it off.",
-        ]
-    );
-    assert!(render_show(&unfinished)
-        .contains("Outcome:            Unfinished (last recorded: Succeeded)"));
+    let text = render_show(&unfinished);
+    assert!(text.contains("Outcome:            Unfinished (last recorded: Succeeded)"));
+    assert!(text.contains(
+        "At the time of this run:\n  The run did not finish. If no deploy is running, resume it from /work/app with `slip attach staging`.\n  The app may still be in maintenance mode."
+    ), "{text}");
 
-    // Stopping after the last step leaves nothing to run.
-    let stopped = receipt(|value| {
-        value["outcome"] = json!({"StoppedAfterStep": {"step": 2, "reason": "Requested"}});
-    });
-    assert!(next_steps(&stopped).is_empty());
+    let succeeded = render_show(&receipt(|_| {}));
+    assert!(
+        !succeeded.contains("At the time of this run:"),
+        "{succeeded}"
+    );
 }
 
 struct TempRoot(PathBuf);

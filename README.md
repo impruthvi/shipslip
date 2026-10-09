@@ -459,6 +459,28 @@ environment name. `up` takes a new deploy lock and runs
 `php artisan up`; it asks for confirmation. Neither command resumes the old
 deploy. Check the receipt and server state before choosing a new run plan.
 
+### What is on each server
+
+`slip status` reads every project's receipts and approvals and prints, for each
+checkout and environment, the last code they record. It works from any folder,
+needs no config, and never contacts a server.
+
+```sh
+slip status
+slip status --compare staging production   # commits between the two, per app
+```
+
+A commit is shown only when a receipt backs it: `code at …` when the
+fast-forward succeeded (`deploy incomplete` if a later step did not), `checked
+out at start` for reruns, and `observed …` when Shipslip read the server's
+commit after a failed step. Otherwise the line says `server code not known`,
+`never deployed`, or `target changed` when the environment now points at a
+different server or path. Each line also shows the last run and its flags. It
+warns when a newer receipt could not be read, and when another checkout ran a
+newer deploy on the same server path, since that run may have replaced the
+code. `--compare` uses your local checkout to count commits and notes an
+incomplete deploy or dirty tree on either side.
+
 ## Post-deploy checks
 
 Shipslip compares log entries against the last 2 MiB of the log and previously

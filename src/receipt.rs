@@ -16,11 +16,17 @@ use crate::{
 
 mod history;
 mod markdown;
+mod overview;
 
 pub use history::{
-    describe_plan, describe_watch, find, list, Badge, Flag, Found, Listed, Listing, MIN_ID_LEN,
+    describe_plan, describe_watch, failed_step_options, find, list, Badge, Flag, Found, Listed,
+    Listing, MIN_ID_LEN,
 };
 pub use markdown::markdown;
+pub use overview::{
+    compare_envs, overview, AttemptSummary, CodeState, EnvCell, EnvComparison, Evidence,
+    NewerElsewhere, NotKnownReason, Overview, Problem, Qualifier, RepoRow, StaleHint, WALK_LIMIT,
+};
 
 const VERSION: u32 = 1;
 const OUTPUT_LINES: usize = 200;
@@ -443,17 +449,26 @@ impl ReceiptJournal {
         })
     }
 
-    pub fn history_path(&self) -> PathBuf {
+    /// Where this env's log signature history lives: beside the receipts
+    /// root, so a project named `signatures` cannot collide with it.
+    pub fn history_paths(&self) -> HistoryPaths {
         let env_dir = self
             .path
             .parent()
             .expect("receipt has environment directory");
         let project_dir = env_dir.parent().expect("receipt has project directory");
         let root = project_dir.parent().expect("receipt has root directory");
-        root.join("signatures")
-            .join(project_dir.file_name().expect("project directory has name"))
+        let tail = Path::new(project_dir.file_name().expect("project directory has name"))
             .join(env_dir.file_name().expect("environment directory has name"))
-            .join("history.json")
+            .join("history.json");
+        HistoryPaths {
+            current: root
+                .parent()
+                .expect("receipts root has a parent")
+                .join("signatures")
+                .join(&tail),
+            legacy: root.join("signatures").join(tail),
+        }
     }
 
     pub fn finish(&self, outcome: DeployOutcome) -> Result<(), ReceiptError> {
@@ -476,6 +491,15 @@ impl ReceiptJournal {
     }
 }
 
+/// Signature history file, and where releases up to 0.5.3 kept it inside the
+/// receipts root. The legacy file is read when the current one is missing and
+/// moved on the next write; no directory is ever removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryPaths {
+    pub current: PathBuf,
+    pub legacy: PathBuf,
+}
+
 pub fn default_receipts_root() -> Result<PathBuf, ReceiptError> {
     let home =
         std::env::var_os("HOME").ok_or_else(|| ReceiptError::Invalid("HOME is not set".into()))?;
@@ -487,11 +511,14 @@ pub fn default_receipts_root() -> Result<PathBuf, ReceiptError> {
     Ok(path)
 }
 
-/// The fields [`find_open`] needs, readable from any receipt version.
+/// The fields [`find_open`] and the release map need, readable from any
+/// receipt version.
 #[derive(Deserialize)]
 struct ReceiptSummary {
     status: ReceiptStatus,
     repo_root: String,
+    #[serde(default)]
+    project: Option<String>,
 }
 
 pub fn find_open(

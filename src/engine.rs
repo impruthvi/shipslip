@@ -804,7 +804,7 @@ async fn run_steps<T: Transport>(
                 transport.clone(),
                 &preview.target,
                 events.clone(),
-                journal.as_ref().map(|receipt| receipt.history_path()),
+                journal.as_ref().map(|receipt| receipt.history_paths()),
                 watch_cancel,
             )
             .await,
@@ -1935,11 +1935,15 @@ mod tests {
     impl TempReceipts {
         fn new() -> Self {
             static NEXT: AtomicUsize = AtomicUsize::new(0);
-            let path = std::env::temp_dir().join(format!(
-                "shipslip-receipt-test-{}-{}",
-                std::process::id(),
-                NEXT.fetch_add(1, Ordering::Relaxed)
-            ));
+            // Signature history lives beside the receipts root, so the
+            // root gets its own parent to keep both inside the temp dir.
+            let path = std::env::temp_dir()
+                .join(format!(
+                    "shipslip-receipt-test-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, Ordering::Relaxed)
+                ))
+                .join("receipts");
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
         }
@@ -1947,7 +1951,7 @@ mod tests {
 
     impl Drop for TempReceipts {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_dir_all(self.0.parent().unwrap());
         }
     }
 
@@ -3377,6 +3381,22 @@ mod tests {
                 ..
             }))
         ));
+    }
+
+    #[tokio::test]
+    async fn signature_history_sits_beside_the_receipts_root() {
+        let fake = Arc::new(preflight());
+        let preview = prepare(target(false, &[]), &*fake).await.unwrap();
+        let dir = TempReceipts::new();
+        let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        let tail = Path::new("app/staging/history.json");
+        assert_eq!(
+            journal.history_paths(),
+            crate::receipt::HistoryPaths {
+                current: dir.0.parent().unwrap().join("signatures").join(tail),
+                legacy: dir.0.join("signatures").join(tail),
+            }
+        );
     }
 
     #[tokio::test]

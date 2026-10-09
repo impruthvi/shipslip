@@ -152,6 +152,43 @@ fn list_is_newest_first_filters_by_env_and_limits() {
     assert!(list(&root.0, "other", None, None).unwrap().rows.is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn entries_in_keeps_readable_envs_when_one_cannot_be_read() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = TempRoot::new();
+    let project_dir = root.0.join(safe_component("my app"));
+    for (env, name) in [
+        ("staging", "1000-aaaa0001-0.json"),
+        ("production", "2000-bbbb0002-0.json"),
+    ] {
+        let dir = project_dir.join(env);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(name), b"{}").unwrap();
+    }
+    assert_eq!(list(&root.0, "my app", None, None).unwrap().rows.len(), 2);
+
+    let locked = project_dir.join("production");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let (entries, problems) = history::entries_in(&project_dir);
+    let listed = list(&root.0, "my app", None, None);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let found: Vec<_> = entries
+        .iter()
+        .map(|entry| (entry.env.as_str(), entry.run_id.as_str()))
+        .collect();
+    assert_eq!(found, [("staging", "aaaa0001-0")]);
+    assert_eq!(problems.len(), 1);
+    assert!(matches!(&problems[0], ReceiptError::Io { path, .. } if *path == locked));
+    // `list` and `find` still fail on any unreadable directory.
+    assert!(listed.is_err());
+
+    let (entries, problems) = history::entries_in(&root.0.join("missing"));
+    assert!(entries.is_empty() && problems.is_empty());
+}
+
 #[test]
 fn list_shows_unreadable_and_newer_receipts_and_skips_other_files() {
     let root = TempRoot::new();
@@ -269,6 +306,77 @@ fn markdown_shows_the_deployer_email_only_with_details() {
     assert!(shared.contains("| Started by | Ana Lee |"), "{shared}");
     assert!(!shared.contains("ana@example.test"));
     assert!(markdown(&receipt, true).contains("ana@example.test"));
+}
+
+#[test]
+fn next_steps_text_for_every_outcome() {
+    let with = |outcome: Value| {
+        let mut value = receipt_json("aaaa0001-0", 1000, "staging");
+        value["outcome"] = outcome;
+        parse(value)
+    };
+    let server_fix = |step: usize, env: &str| {
+        format!("If the cause was on the server (permissions, .env, database), fix it there, then `slip from-step {env} {step}` runs the remaining steps on the deployed commit.")
+    };
+    let code_fix =
+        |env: &str| format!("If it needs a code change, push the fix and run `slip deploy {env}`.");
+    let cases: Vec<(Value, Vec<String>)> = vec![
+        (json!("Succeeded"), vec![]),
+        (json!("CancelledBeforeChanges"), vec![]),
+        (
+            json!({"FailedAtStep": {"step": 0, "partial_update": true}}),
+            vec!["The fast-forward failed. Check the server checkout before deploying again.".into()],
+        ),
+        (
+            json!({"FailedAtStep": {"step": 2, "partial_update": false}}),
+            vec![
+                "Step 2 failed and later steps did not run.".into(),
+                server_fix(2, "staging"),
+                code_fix("staging"),
+            ],
+        ),
+        (
+            json!({"StoppedAfterStep": {"step": 1, "reason": "Requested"}}),
+            vec!["Steps after 1 did not run. `slip from-step staging 2` runs them on the deployed commit.".into()],
+        ),
+        // Stopping after the last step leaves nothing to run.
+        (json!({"StoppedAfterStep": {"step": 2, "reason": "LockLost"}}), vec![]),
+        (
+            json!({"StoppedInMaintenance": "LockLost"}),
+            vec!["No deploy steps ran, so the code on the server did not change.".into()],
+        ),
+        (
+            json!({"Unknown": {"step": 1, "reason": "connection lost"}}),
+            vec!["The result of step 1 is unknown. Check the server before running anything again.".into()],
+        ),
+    ];
+    for (outcome, expected) in cases {
+        assert_eq!(with(outcome.clone()).next_steps(), expected, "{outcome}");
+    }
+
+    let mut unfinished = receipt_json("aaaa0001-0", 1000, "staging");
+    unfinished["status"] = json!("InProgress");
+    unfinished["app_left_down"] = json!(true);
+    assert_eq!(
+        parse(unfinished).next_steps(),
+        [
+            "The run did not finish. If no deploy is running, resume it from /repo with `slip attach staging`.",
+            "The app may still be in maintenance mode. After checking the server, `slip up staging` turns it off.",
+        ]
+    );
+
+    let mut forged = receipt_json("aaaa0001-0", 1000, "stag\ning");
+    forged["outcome"] = json!({"FailedAtStep": {"step": 1, "partial_update": false}});
+    forged["app_left_down"] = json!(true);
+    assert_eq!(
+        parse(forged).next_steps(),
+        [
+            "Step 1 failed and later steps did not run.".to_string(),
+            server_fix(1, "stag\\x0aing"),
+            code_fix("stag\\x0aing"),
+            "The app may still be in maintenance mode. After checking the server, `slip up stag\\x0aing` turns it off.".into(),
+        ]
+    );
 }
 
 #[test]

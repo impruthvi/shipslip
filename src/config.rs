@@ -826,6 +826,16 @@ pub fn approve_trust(
     save_trust_store(path, &store)
 }
 
+/// Every approval record: checkout path to the env names approved there.
+/// Approval only means a record exists, not that the current config matches.
+pub fn approved_envs(path: &Path) -> Result<BTreeMap<String, Vec<String>>, ConfigError> {
+    Ok(load_trust_store(path)?
+        .repositories
+        .into_iter()
+        .map(|(repo_root, envs)| (repo_root, envs.into_keys().collect()))
+        .collect())
+}
+
 fn snapshot_hash(snapshot: &TrustSnapshot) -> Result<String, ConfigError> {
     let bytes = serde_json::to_vec(snapshot)?;
     Ok(Sha256::digest(bytes)
