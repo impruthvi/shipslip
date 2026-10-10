@@ -6,7 +6,7 @@ change the library API.
 
 ## [Unreleased]
 
-## [0.6.1] - 2026-10-09
+## [0.6.1] - 2026-10-10
 
 ### Changed
 
