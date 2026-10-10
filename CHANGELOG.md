@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-10
+
 ### Changed
 
 - `slip status` says how a run ended next to a commit it observed on the
@@ -336,6 +338,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.6.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.6.1
 [0.6.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.6.0
 [0.5.3]: https://github.com/impruthvi/shipslip/releases/tag/v0.5.3
 [0.5.2]: https://github.com/impruthvi/shipslip/releases/tag/v0.5.2
