@@ -365,6 +365,44 @@ fn next_steps_text_for_every_outcome() {
         ]
     );
 
+    let with_new_errors = |groups: usize, overflow: u64, outcome: Value| {
+        let mut receipt = with(outcome);
+        let watch = receipt.watch.as_mut().unwrap();
+        let group = serde_json::from_value(json!({
+            "exception": "RuntimeException",
+            "file": null,
+            "count": 1,
+            "variants": [],
+            "overflow_variants": 0
+        }))
+        .unwrap();
+        watch.new_errors = vec![group; groups];
+        watch.overflow_groups = overflow;
+        receipt.next_steps()
+    };
+    assert_eq!(
+        with_new_errors(1, 0, json!("Succeeded")),
+        ["The log showed 1 new error group after this run. `slip logs staging` shows the log."]
+    );
+    assert_eq!(
+        with_new_errors(2, 3, json!("Succeeded")),
+        ["The log showed 5 new error groups after this run. `slip logs staging` shows the log."]
+    );
+    assert_eq!(
+        with_new_errors(
+            1,
+            0,
+            json!({"FailedAtStep": {"step": 2, "partial_update": false}})
+        ),
+        [
+            "Step 2 failed and later steps did not run.".to_string(),
+            server_fix(2, "staging"),
+            code_fix("staging"),
+            "The log showed 1 new error group after this run. `slip logs staging` shows the log."
+                .into(),
+        ]
+    );
+
     let mut forged = receipt_json("aaaa0001-0", 1000, "stag\ning");
     forged["outcome"] = json!({"FailedAtStep": {"step": 1, "partial_update": false}});
     forged["app_left_down"] = json!(true);

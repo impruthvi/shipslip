@@ -1617,13 +1617,14 @@ pub fn find<'a>(groups: &'a Groups, query: &str) -> Lookup<'a> {
 }
 
 /// Escapes control characters other than newline and tab, so log content
-/// cannot move the cursor, recolor, or retitle the terminal.
+/// cannot move the cursor, recolor, or retitle the terminal. Bidirectional
+/// formatting characters are escaped too, so text cannot appear reordered.
 pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
             '\n' | '\t' => out.push(c),
-            c if c.is_control() => {
+            c if c.is_control() || is_bidi_format(c) => {
                 let code = c as u32;
                 if code < 0x100 {
                     out.push_str(&format!("\\x{code:02x}"));
@@ -1635,6 +1636,13 @@ pub fn escape(text: &str) -> String {
         }
     }
     out
+}
+
+fn is_bidi_format(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
 }
 
 /// Like [`escape`], but also escapes newlines and tabs, for text that must
@@ -2915,6 +2923,11 @@ mod tests {
             escape("a\x1b[31mred\x1b]0;title\x07\u{9b}\tb\nc\x7f"),
             "a\\x1b[31mred\\x1b]0;title\\x07\\x9b\tb\nc\\x7f"
         );
+        assert_eq!(
+            escape("evil\u{202e}php.txt \u{2066}x\u{2069} \u{200f}\u{061c}"),
+            "evil\\u{202e}php.txt \\u{2066}x\\u{2069} \\u{200f}\\u{61c}"
+        );
+        assert_eq!(escape_field("a\u{202a}b\n"), "a\\u{202a}b\\x0a");
         let text = entry_line(
             "2026-10-01 01:00:00",
             "ERROR",

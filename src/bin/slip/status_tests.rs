@@ -1,5 +1,9 @@
 use super::*;
-use shipslip::receipt::{AttemptSummary, Badge, Flag, NewerElsewhere, Problem};
+use shipslip::git::Comparison;
+use shipslip::receipt::{
+    AttemptSummary, Badge, CodeState, EnvCell, Evidence, Flag, NewerElsewhere, NotKnownReason,
+    Problem, ProblemKind, Qualifier, ReceiptStepStatus,
+};
 use shipslip::{DeployOutcome, RunPlan};
 
 const NOW: u128 = 10 * 86_400_000;
@@ -22,6 +26,7 @@ fn cell(env: &str, code: CodeState) -> EnvCell {
         approved: false,
         code,
         last_attempt: None,
+        code_run: None,
         stale_hint: None,
         target: None,
         newer_elsewhere: None,
@@ -80,7 +85,7 @@ fn every_code_state_has_its_own_words() {
     let lines = |code: CodeState, approved: bool| {
         let mut cell = cell("staging", code);
         cell.approved = approved;
-        code_line(&cell, NOW)
+        sentence(&cell, NOW)
     };
     assert_eq!(
         lines(recorded(true, Evidence::FastForward), false),
@@ -156,9 +161,12 @@ fn every_code_state_has_its_own_words() {
     );
     assert_eq!(
         lines(CodeState::NeverDeployed, true),
-        "approved before, never deployed"
+        "approved before, no deploy receipt on this Mac"
     );
-    assert_eq!(lines(CodeState::NeverDeployed, false), "never deployed");
+    assert_eq!(
+        lines(CodeState::NeverDeployed, false),
+        "no deploy receipt on this Mac"
+    );
     assert_eq!(
         lines(CodeState::NoCodeChangeInLast { records: 20 }, false),
         "no code change in the last 20 runs"
@@ -191,6 +199,7 @@ fn map_shows_last_runs_targets_hints_and_problems() {
         next_steps: vec![
             "The run did not finish. If no deploy is running, resume it from /work/shop with `slip attach production`.".into(),
         ],
+        path: "/r/shop/production/1-eeee0005-0.json".into(),
     });
     let mut staging = cell("staging", recorded(true, Evidence::FastForward));
     staging.stale_hint = Some(StaleHint::UnattributedNewer {
@@ -203,6 +212,8 @@ fn map_shows_last_runs_targets_hints_and_problems() {
         problems: vec![Problem {
             path: "/r/shop/staging/9-x.json".into(),
             message: "invalid receipt `/r/shop/staging/9-x.json`: expected value".into(),
+            kind: ProblemKind::Receipt,
+            cells: vec![],
         }],
     };
 
@@ -220,7 +231,7 @@ fn map_shows_last_runs_targets_hints_and_problems() {
          \x20             ⚠ a newer receipt could not be read; this may be out of date: /r/shop/staging/9-x.json\n\
          \n\
          blog  /work/blog  (checkout not found)\n\
-         \x20 staging  never deployed\n\
+         \x20 staging  no deploy receipt on this Mac\n\
          \n\
          Could not read:\n\
          \x20 invalid receipt `/r/shop/staging/9-x.json`: expected value\n"
@@ -291,7 +302,7 @@ fn comparisons_print_per_checkout_with_notes() {
     );
 
     let line = |result| {
-        comparison_line(
+        comparison_text(
             "staging",
             "production",
             &EnvComparison {
