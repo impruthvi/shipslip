@@ -3,13 +3,11 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use shipslip::git::{Comparison, Git};
+use shipslip::git::Git;
 use shipslip::logs::escape_field;
 use shipslip::receipt::{
-    self, CodeState, EnvCell, EnvComparison, Evidence, NotKnownReason, Overview, Qualifier,
-    ReceiptStepStatus, RepoRow, StaleHint,
+    self, age, comparison_text, sentence, short_id, EnvComparison, Overview, RepoRow, StaleHint,
 };
-use shipslip::DeployOutcome;
 
 use super::invalid_input;
 
@@ -84,7 +82,7 @@ fn render(
         for cell in &row.envs {
             let env = escape_field(&cell.env);
             let pad = " ".repeat(width + 4);
-            let _ = writeln!(out, "  {env:<width$}  {}", code_line(cell, now_ms));
+            let _ = writeln!(out, "  {env:<width$}  {}", sentence(cell, now_ms));
             if let Some(attempt) = &cell.last_attempt {
                 let badge = &attempt.badge;
                 let mut line = format!(
@@ -142,7 +140,7 @@ fn render(
                 out,
                 "  {}  {}",
                 escape_field(&row.label),
-                comparison_line(a, b, &compare_envs(row, a, b))
+                comparison_text(a, b, &compare_envs(row, a, b))
             );
         }
         if !any {
@@ -161,129 +159,6 @@ fn render(
         }
     }
     out
-}
-
-/// What the receipts say about the code; never "deployed" or "running".
-fn code_line(cell: &EnvCell, now_ms: u128) -> String {
-    let line = match &cell.code {
-        CodeState::Recorded {
-            sha,
-            complete,
-            evidence,
-            at_ms,
-            ..
-        } => {
-            let mut line = format!("code at {}", short(sha));
-            if !complete {
-                line.push_str(", deploy incomplete");
-            }
-            if *evidence == Evidence::CheckedOutAtStart {
-                line.push_str(", checked out at start");
-            }
-            format!("{line} (recorded {})", age(now_ms, *at_ms))
-        }
-        CodeState::Observed {
-            sha,
-            dirty,
-            expected,
-            run_id,
-            outcome,
-            at_ms,
-        } => {
-            let mut line = format!("observed {} after run {}", short(sha), short_id(run_id));
-            match outcome {
-                Some(DeployOutcome::FailedAtStep { step, .. }) => {
-                    let _ = write!(line, " failed at step {step}");
-                }
-                Some(DeployOutcome::StoppedAfterStep { step, .. }) => {
-                    let _ = write!(line, " stopped after step {step}");
-                }
-                Some(DeployOutcome::Unknown { step, .. }) => {
-                    let _ = write!(line, " lost track of step {step}");
-                }
-                _ => {}
-            }
-            if !sha.eq_ignore_ascii_case(expected) {
-                let _ = write!(line, ", expected {}", short(expected));
-            }
-            if *dirty == Some(true) {
-                line.push_str(", tree dirty");
-            }
-            format!("{line} ({})", age(now_ms, *at_ms))
-        }
-        CodeState::NotKnown { run_id, reason } => {
-            let why: String = match reason {
-                NotKnownReason::StepZero(ReceiptStepStatus::Failed) => "fast-forward failed".into(),
-                NotKnownReason::StepZero(ReceiptStepStatus::Running) => {
-                    "fast-forward was running when saved".into()
-                }
-                NotKnownReason::StepZero(_) => "fast-forward result unknown".into(),
-                NotKnownReason::NoStepZero => "no fast-forward step recorded".into(),
-                NotKnownReason::Unreadable => "its receipts could not be read".into(),
-            };
-            match run_id {
-                Some(run_id) => format!(
-                    "server code not known after run {} ({why})",
-                    short_id(run_id)
-                ),
-                None => format!("server code not known ({why})"),
-            }
-        }
-        CodeState::NeverDeployed if cell.approved => "approved before, never deployed".into(),
-        CodeState::NeverDeployed => "never deployed".into(),
-        CodeState::NoCodeChangeInLast { records: 1 } => "no code change in the last run".into(),
-        CodeState::NoCodeChangeInLast { records } => {
-            format!("no code change in the last {records} runs")
-        }
-        CodeState::TargetChanged { run_id, target } => format!(
-            "target changed in run {}; no code recorded for {target}",
-            short_id(run_id)
-        ),
-    };
-    escape_field(&line)
-}
-
-fn comparison_line(a: &str, b: &str, comparison: &EnvComparison) -> String {
-    let commits = |n: usize| if n == 1 { "commit" } else { "commits" };
-    let mut line = match &comparison.result {
-        Comparison::Same => format!("{a} and {b} are on the same commit"),
-        Comparison::Ahead(n) => format!("{a} is {n} {} ahead of {b}", commits(*n)),
-        Comparison::Behind(n) => format!("{a} is {n} {} behind {b}", commits(*n)),
-        Comparison::Diverged { a: left, b: right } => {
-            format!("{a} and {b} have diverged: {left} only on {a}, {right} only on {b}")
-        }
-        Comparison::Unavailable(reason) => format!("cannot compare: {reason}"),
-    };
-    if !comparison.notes.is_empty() {
-        let notes: Vec<String> = comparison
-            .notes
-            .iter()
-            .map(|(env, qualifier)| match qualifier {
-                Qualifier::DeployIncomplete => format!("{env} deploy incomplete"),
-                Qualifier::TreeDirty => format!("{env} tree dirty"),
-            })
-            .collect();
-        let _ = write!(line, " ({})", notes.join("; "));
-    }
-    escape_field(&line)
-}
-
-fn short(sha: &str) -> &str {
-    sha.get(..12).unwrap_or(sha)
-}
-
-fn short_id(run_id: &str) -> &str {
-    run_id.get(..receipt::MIN_ID_LEN).unwrap_or(run_id)
-}
-
-fn age(now_ms: u128, then_ms: u128) -> String {
-    let minutes = now_ms.saturating_sub(then_ms) / 60_000;
-    match minutes {
-        0 => "just now".into(),
-        1..=59 => format!("{minutes}m ago"),
-        60..=2879 => format!("{}h ago", minutes / 60),
-        _ => format!("{}d ago", minutes / 1440),
-    }
 }
 
 fn now_ms() -> u128 {

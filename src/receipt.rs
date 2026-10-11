@@ -24,8 +24,10 @@ pub use history::{
 };
 pub use markdown::markdown;
 pub use overview::{
-    compare_envs, overview, AttemptSummary, CodeState, EnvCell, EnvComparison, Evidence,
-    NewerElsewhere, NotKnownReason, Overview, Problem, Qualifier, RepoRow, StaleHint, WALK_LIMIT,
+    age, code_text, compare_envs, comparison_text, overview, sentence, short_id, short_sha,
+    AttemptSummary, CellRef, CodeState, CodeText, EnvCell, EnvComparison, Evidence, Mark,
+    NewerElsewhere, NotKnownReason, Overview, Problem, ProblemKind, Qualifier, RepoRow, StaleHint,
+    WALK_LIMIT,
 };
 
 const VERSION: u32 = 1;

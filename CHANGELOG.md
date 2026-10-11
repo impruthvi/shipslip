@@ -6,6 +6,21 @@ change the library API.
 
 ## [Unreleased]
 
+### Changed
+
+- `slip status` says `no deploy receipt on this Mac` for an environment with
+  no receipt, instead of claiming it was never deployed.
+- `slip status` and `slip receipts show` add a next step when the log showed
+  new error groups after a run: `slip logs ENV` shows the log.
+- Bidirectional-text control characters in remote output (such as U+202E)
+  are shown escaped, like other control characters, so they cannot reorder
+  what is printed.
+- Library: the release map wording is public (`code_text`, `sentence`,
+  `comparison_text`, `Flag::cell_text`, `age`), so the CLI and other
+  front-ends show the same facts. `EnvCell` gains `code_run` and
+  `needs_attention`, `AttemptSummary` gains the receipt `path`, and each
+  `Problem` has a `kind` and the cells it may make out of date.
+
 ## [0.6.1] - 2026-10-10
 
 ### Changed

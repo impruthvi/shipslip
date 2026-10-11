@@ -582,6 +582,7 @@ fn comparisons_carry_each_sides_caveat_and_refuse_unknown_code() {
         approved: false,
         code,
         last_attempt: None,
+        code_run: None,
         stale_hint: None,
         target: None,
         newer_elsewhere: None,
@@ -680,4 +681,403 @@ fn a_later_run_from_another_checkout_on_the_same_server_is_flagged() {
         cell(&overview, "/other/app", "staging").newer_elsewhere,
         None
     );
+}
+
+fn env_cell(env: &str, code: CodeState) -> EnvCell {
+    EnvCell {
+        env: env.into(),
+        approved: false,
+        code,
+        last_attempt: None,
+        code_run: None,
+        stale_hint: None,
+        target: None,
+        newer_elsewhere: None,
+    }
+}
+
+fn every_code_state() -> Vec<EnvCell> {
+    let mut approved = env_cell("demo", CodeState::NeverDeployed);
+    approved.approved = true;
+    vec![
+        env_cell("a", recorded(NEW, true, Evidence::FastForward, 1)),
+        env_cell("b", recorded(NEW, false, Evidence::CheckedOutAtStart, 1)),
+        env_cell(
+            "c",
+            CodeState::Observed {
+                sha: NEW.into(),
+                dirty: Some(true),
+                expected: OLD.into(),
+                run_id: "00000002-0".into(),
+                outcome: Some(DeployOutcome::FailedAtStep {
+                    step: 2,
+                    partial_update: false,
+                }),
+                at_ms: 2500,
+            },
+        ),
+        env_cell(
+            "d",
+            CodeState::NotKnown {
+                run_id: Some("00000003-0".into()),
+                reason: NotKnownReason::StepZero(ReceiptStepStatus::Failed),
+            },
+        ),
+        env_cell(
+            "e",
+            CodeState::NotKnown {
+                run_id: None,
+                reason: NotKnownReason::Unreadable,
+            },
+        ),
+        env_cell("f", CodeState::NeverDeployed),
+        approved,
+        env_cell("g", CodeState::NoCodeChangeInLast { records: 1 }),
+        env_cell("h", CodeState::NoCodeChangeInLast { records: 3 }),
+        env_cell(
+            "i",
+            CodeState::TargetChanged {
+                run_id: "00000004-0".into(),
+                target: "web2:/srv/app".into(),
+            },
+        ),
+    ]
+}
+
+#[test]
+fn the_status_sentence_is_built_from_the_cell_parts() {
+    let now = 2500 + 3 * 60_000;
+    let sentences: Vec<String> = every_code_state()
+        .iter()
+        .map(|cell| sentence(cell, now))
+        .collect();
+    assert_eq!(
+        sentences,
+        [
+            "code at 222222222222 (recorded 3m ago)",
+            "code at 222222222222, deploy incomplete, checked out at start (recorded 3m ago)",
+            "observed 222222222222 after run 00000002 failed at step 2, expected 111111111111, tree dirty (3m ago)",
+            "server code not known after run 00000003 (fast-forward failed)",
+            "server code not known (its receipts could not be read)",
+            "no deploy receipt on this Mac",
+            "approved before, no deploy receipt on this Mac",
+            "no code change in the last run",
+            "no code change in the last 3 runs",
+            "target changed in run 00000004; no code recorded for web2:/srv/app",
+        ]
+    );
+
+    let marks: Vec<Mark> = every_code_state()
+        .iter()
+        .map(|cell| code_text(cell).mark)
+        .collect();
+    assert_eq!(
+        marks,
+        [
+            Mark::Recorded,
+            Mark::Incomplete,
+            Mark::Observed,
+            Mark::NotKnown,
+            Mark::NotKnown,
+            Mark::NoCode,
+            Mark::NoCode,
+            Mark::NoCode,
+            Mark::NoCode,
+            Mark::NoCode,
+        ]
+    );
+
+    // A front-end laying out the parts shows every fact the CLI prints.
+    for (cell, line) in every_code_state().iter().zip(&sentences) {
+        let text = code_text(cell);
+        assert!(line.contains(&text.words), "{line}");
+        for fact in &text.evidence {
+            assert!(line.contains(fact.as_str()), "{fact} not in {line}");
+        }
+        if let Some(sha) = &text.sha {
+            assert!(line.contains(short_sha(sha, 12)), "{line}");
+        }
+    }
+}
+
+#[test]
+fn cell_words_never_claim_what_is_live_on_the_server() {
+    for cell in every_code_state() {
+        let text = code_text(&cell);
+        let all = [vec![sentence(&cell, 0), text.words], text.evidence].concat();
+        for words in all {
+            let words = words.to_lowercase();
+            for claim in ["deployed", "is running", "live", "currently", "now on"] {
+                assert!(!words.contains(claim), "{words:?} claims {claim:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn cell_parts_are_escaped() {
+    let cell = env_cell(
+        "a",
+        CodeState::TargetChanged {
+            run_id: "00000004-0".into(),
+            target: "web\u{202e}2:/srv\n".into(),
+        },
+    );
+    let text = code_text(&cell);
+    assert_eq!(text.words, "no code recorded for web\\u{202e}2:/srv\\x0a");
+    assert!(!sentence(&cell, 0).contains('\u{202e}'));
+}
+
+#[test]
+fn age_uses_the_largest_whole_unit() {
+    let minute = 60_000;
+    let now = 10_000 * minute;
+    let ago = |minutes: u128| age(now, now - minutes * minute);
+    assert_eq!(age(now, now - 59_999), "just now");
+    assert_eq!(ago(1), "1m ago");
+    assert_eq!(ago(59), "59m ago");
+    assert_eq!(ago(60), "1h ago");
+    assert_eq!(ago(47 * 60 + 59), "47h ago");
+    assert_eq!(ago(48 * 60), "2d ago");
+    // A clock that went backwards is not a negative age.
+    assert_eq!(age(now, now + minute), "just now");
+}
+
+#[test]
+fn flags_in_cell_words() {
+    let words: Vec<String> = [
+        Flag::NewErrors(1),
+        Flag::NewErrors(4),
+        Flag::LogNotFullyObserved,
+        Flag::LogNotRecorded,
+        Flag::SmokeFailed(Some(500)),
+        Flag::SmokeFailed(None),
+        Flag::SmokeNotRecorded,
+        Flag::AppLeftDown,
+    ]
+    .iter()
+    .map(Flag::cell_text)
+    .collect();
+    assert_eq!(
+        words,
+        [
+            "1 new error group after this run",
+            "4 new error groups after this run",
+            "log not fully observed",
+            "log not recorded",
+            "smoke 500",
+            "smoke failed",
+            "smoke not recorded",
+            "app in maintenance mode",
+        ]
+    );
+}
+
+#[test]
+fn the_run_that_decided_the_code_is_kept_beside_the_last_attempt() {
+    let fixture = Fixture::new();
+    let first = fixture.save(&run(1, "staging"));
+    let overview = fixture.overview();
+    let staging = cell(&overview, "/work/app", "staging");
+    assert_eq!(staging.code_run, staging.last_attempt);
+    assert_eq!(staging.code_run.as_ref().unwrap().path, first);
+    assert!(!staging.needs_attention());
+
+    let mut maintenance = run(2, "staging");
+    maintenance["outcome"] = json!({"StoppedInMaintenance": "LockLost"});
+    maintenance["app_left_down"] = json!(true);
+    for step in maintenance["steps"].as_array_mut().unwrap() {
+        step["status"] = json!("NotStarted");
+    }
+    let stopped = fixture.save(&maintenance);
+
+    let overview = fixture.overview();
+    let staging = cell(&overview, "/work/app", "staging");
+    let code_run = staging.code_run.as_ref().unwrap();
+    assert_eq!(
+        (code_run.run_id.as_str(), &code_run.path),
+        ("00000001-0", &first)
+    );
+    let last = staging.last_attempt.as_ref().unwrap();
+    assert_eq!((last.run_id.as_str(), &last.path), ("00000002-0", &stopped));
+    assert!(staging.needs_attention());
+}
+
+#[test]
+fn a_renamed_project_reads_both_directories() {
+    let fixture = Fixture::new();
+    fixture.save(&run(1, "staging"));
+    let mut renamed = run(2, "staging");
+    renamed["project"] = json!("shop");
+    renamed["target_sha"] = json!(OTHER);
+    let newest = fixture.save(&renamed);
+    let corrupt = fixture.receipts().join("app/staging/3000-00000003-0.json");
+    fs::write(&corrupt, b"{ not json").unwrap();
+
+    let overview = fixture.overview();
+    assert_eq!(overview.repos.len(), 1);
+    let staging = cell(&overview, "/work/app", "staging");
+    assert_eq!(
+        staging.code,
+        recorded(OTHER, true, Evidence::FastForward, 2)
+    );
+    assert_eq!(staging.code_run.as_ref().unwrap().path, newest);
+    assert_eq!(overview.problems[0].path, corrupt);
+    assert_eq!(
+        overview.problems[0].cells,
+        [CellRef {
+            repo_root: "/work/app".into(),
+            env: "staging".into()
+        }]
+    );
+}
+
+#[test]
+fn needs_attention_for_each_kind_of_cell() {
+    let attempt = |unfinished, outcome, flags| AttemptSummary {
+        run_id: "00000001-0".into(),
+        started_at_ms: 1000,
+        run_plan: RunPlan::Deploy,
+        badge: Badge {
+            unfinished,
+            outcome,
+            flags,
+        },
+        next_steps: vec![],
+        path: PathBuf::from("/r/1000-00000001-0.json"),
+    };
+    let ok = recorded(NEW, true, Evidence::FastForward, 1);
+    let with_last = |summary: AttemptSummary| {
+        let mut cell = env_cell("a", ok.clone());
+        cell.last_attempt = Some(summary);
+        cell
+    };
+    let succeeded = Some(DeployOutcome::Succeeded);
+
+    let quiet = [
+        env_cell("a", ok.clone()),
+        env_cell("a", CodeState::NeverDeployed),
+        env_cell("a", CodeState::NoCodeChangeInLast { records: 2 }),
+        with_last(attempt(false, succeeded.clone(), vec![])),
+        with_last(attempt(
+            false,
+            succeeded.clone(),
+            vec![Flag::LogNotFullyObserved],
+        )),
+        with_last(attempt(
+            false,
+            succeeded.clone(),
+            vec![Flag::SmokeNotRecorded],
+        )),
+    ];
+    for cell in &quiet {
+        assert!(!cell.needs_attention(), "{cell:?}");
+    }
+
+    let mut stale = env_cell("a", ok.clone());
+    stale.stale_hint = Some(StaleHint::NewestUnreadable {
+        path: PathBuf::from("/r/x.json"),
+    });
+    let mut elsewhere = env_cell("a", ok.clone());
+    elsewhere.newer_elsewhere = Some(NewerElsewhere {
+        repo_root: "/other".into(),
+        env: "a".into(),
+        run_id: "00000002-0".into(),
+        started_at_ms: 2000,
+    });
+    let mut bad_code_run = env_cell("a", ok.clone());
+    bad_code_run.code_run = Some(attempt(false, succeeded.clone(), vec![Flag::NewErrors(1)]));
+    let loud = [
+        env_cell("a", recorded(NEW, false, Evidence::FastForward, 1)),
+        env_cell(
+            "a",
+            CodeState::NotKnown {
+                run_id: None,
+                reason: NotKnownReason::NoStepZero,
+            },
+        ),
+        stale,
+        elsewhere,
+        bad_code_run,
+        with_last(attempt(true, succeeded.clone(), vec![])),
+        with_last(attempt(
+            false,
+            Some(DeployOutcome::FailedAtStep {
+                step: 1,
+                partial_update: false,
+            }),
+            vec![],
+        )),
+        with_last(attempt(
+            false,
+            succeeded.clone(),
+            vec![Flag::SmokeFailed(Some(500))],
+        )),
+        with_last(attempt(false, succeeded, vec![Flag::AppLeftDown])),
+    ];
+    for cell in &loud {
+        assert!(cell.needs_attention(), "{cell:?}");
+    }
+}
+
+#[test]
+fn problems_name_the_cells_they_may_make_stale() {
+    let fixture = Fixture::new();
+    fixture.save(&run(1, "staging"));
+    let mut other = run(2, "staging");
+    other["repo_root"] = json!("/old/app");
+    fixture.save(&other);
+    fs::write(
+        fixture.receipts().join("app/staging/3000-00000003-0.json"),
+        b"{ not json",
+    )
+    .unwrap();
+    fs::write(fixture.trust(), b"{ not json").unwrap();
+
+    let overview = fixture.overview();
+    let kinds: Vec<(ProblemKind, Vec<CellRef>)> = overview
+        .problems
+        .iter()
+        .map(|problem| (problem.kind, problem.cells.clone()))
+        .collect();
+    let staging = |repo_root: &str| CellRef {
+        repo_root: repo_root.into(),
+        env: "staging".into(),
+    };
+    assert_eq!(
+        kinds,
+        [
+            (
+                ProblemKind::Receipt,
+                vec![staging("/old/app"), staging("/work/app")]
+            ),
+            (ProblemKind::Trust, vec![]),
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_env_directory_is_a_problem_for_that_env_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    fixture.save(&run(1, "staging"));
+    fixture.save(&run(2, "production"));
+    let locked = fixture.receipts().join("app/production");
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let overview = fixture.overview();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert_eq!(overview.problems.len(), 1);
+    let problem = &overview.problems[0];
+    assert_eq!(
+        (problem.kind, &problem.path),
+        (ProblemKind::ProjectDir, &locked)
+    );
+    assert!(problem.cells.is_empty(), "{:?}", problem.cells);
+    assert!(matches!(
+        cell(&overview, "/work/app", "staging").code,
+        CodeState::Recorded { .. }
+    ));
 }

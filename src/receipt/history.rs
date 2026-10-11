@@ -411,6 +411,15 @@ impl Receipt {
             )),
             _ => {}
         }
+        let groups = self.watch.as_ref().map_or(0, |watch| {
+            watch.new_errors.len() as u64 + watch.overflow_groups
+        });
+        if groups > 0 {
+            let noun = if groups == 1 { "group" } else { "groups" };
+            lines.push(format!(
+                "The log showed {groups} new error {noun} after this run. `slip logs {env}` shows the log."
+            ));
+        }
         if self.app_left_down {
             lines.push(format!(
                 "The app may still be in maintenance mode. After checking the server, `slip up {env}` turns it off."

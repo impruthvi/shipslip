@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use super::history::{entries_in, Entry};
 use super::{io_error, read_receipt, safe_component, Badge, Receipt, ReceiptError, ReceiptStatus};
-use super::{ReceiptStepStatus, ReceiptSummary};
+use super::{Flag, ReceiptStepStatus, ReceiptSummary};
 use crate::git::{Comparison, Git};
 use crate::{DeployOutcome, RunPlan};
 
@@ -46,6 +46,9 @@ pub struct EnvCell {
     pub code: CodeState,
     /// The newest readable run of any kind.
     pub last_attempt: Option<AttemptSummary>,
+    /// The run that decided `code`, when one did. It can be older than
+    /// `last_attempt`.
+    pub code_run: Option<AttemptSummary>,
     pub stale_hint: Option<StaleHint>,
     /// `ssh_alias:path` of the newest readable run.
     pub target: Option<String>,
@@ -127,6 +130,63 @@ pub struct AttemptSummary {
     pub badge: Badge,
     /// [`Receipt::next_steps`], already escaped.
     pub next_steps: Vec<String>,
+    /// The receipt file.
+    pub path: PathBuf,
+}
+
+impl AttemptSummary {
+    fn of(receipt: &Receipt, path: &Path) -> Self {
+        Self {
+            run_id: receipt.run_id.clone(),
+            started_at_ms: receipt.started_at_ms,
+            run_plan: receipt.run_plan,
+            badge: receipt.badge(),
+            next_steps: receipt.next_steps(),
+            path: path.to_path_buf(),
+        }
+    }
+
+    fn needs_attention(&self) -> bool {
+        let badge = &self.badge;
+        badge.unfinished
+            || matches!(
+                badge.outcome,
+                Some(
+                    DeployOutcome::FailedAtStep { .. }
+                        | DeployOutcome::StoppedAfterStep { .. }
+                        | DeployOutcome::StoppedInMaintenance(_)
+                        | DeployOutcome::Unknown { .. }
+                )
+            )
+            || badge.flags.iter().any(|flag| {
+                matches!(
+                    flag,
+                    Flag::NewErrors(_) | Flag::SmokeFailed(_) | Flag::AppLeftDown
+                )
+            })
+    }
+}
+
+impl EnvCell {
+    /// Whether the cell shows something the user should look at: a run
+    /// that did not succeed, code that is not known or not complete, a
+    /// record that may be out of date, or new errors after a run.
+    pub fn needs_attention(&self) -> bool {
+        let code = match &self.code {
+            CodeState::Recorded { complete, .. } => !complete,
+            CodeState::Observed { .. } | CodeState::NotKnown { .. } => true,
+            CodeState::NeverDeployed
+            | CodeState::NoCodeChangeInLast { .. }
+            | CodeState::TargetChanged { .. } => false,
+        };
+        code || self.stale_hint.is_some()
+            || self.newer_elsewhere.is_some()
+            || self
+                .code_run
+                .iter()
+                .chain(&self.last_attempt)
+                .any(AttemptSummary::needs_attention)
+    }
 }
 
 /// A receipt newer than the one that decided the cell could not be read, so
@@ -143,10 +203,34 @@ pub enum StaleHint {
 pub struct Problem {
     pub path: PathBuf,
     pub message: String,
+    pub kind: ProblemKind,
+    /// The cells this problem may make out of date. Empty when it cannot
+    /// be tied to any, e.g. for the trust store.
+    pub cells: Vec<CellRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProblemKind {
+    Trust,
+    ProjectDir,
+    Receipt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CellRef {
+    pub repo_root: String,
+    pub env: String,
+}
+
+/// Where a problem was found, to work out the cells it touches.
+struct Scope {
+    project_dir: PathBuf,
+    /// Encoded env name; `None` for the whole project directory.
+    env: Option<String>,
 }
 
 impl Problem {
-    fn from_error(fallback: &Path, error: &ReceiptError) -> Self {
+    fn from_error(fallback: &Path, error: &ReceiptError, kind: ProblemKind) -> Self {
         let path = match error {
             ReceiptError::Io { path, .. } | ReceiptError::Parse { path, .. } => path.clone(),
             _ => fallback.to_path_buf(),
@@ -154,6 +238,8 @@ impl Problem {
         Self {
             path,
             message: error.to_string(),
+            kind,
+            cells: Vec::new(),
         }
     }
 }
@@ -182,18 +268,28 @@ struct CellBuild {
 /// Builds the release map. Only an existing receipts root that cannot be
 /// read is an error; anything else unreadable becomes a [`Problem`].
 pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, ReceiptError> {
-    let mut problems = Vec::new();
+    let mut problems: Vec<(Problem, Option<Scope>)> = Vec::new();
     let mut rows: BTreeMap<String, RowBuild> = BTreeMap::new();
     // Files no checkout can claim, by (project dir, encoded env).
     let mut unattributed: BTreeMap<(PathBuf, String), Vec<(u128, PathBuf)>> = BTreeMap::new();
 
     for project_dir in project_dirs(receipts_root)? {
         let (entries, dir_problems) = entries_in(&project_dir);
-        problems.extend(
-            dir_problems
-                .iter()
-                .map(|error| Problem::from_error(&project_dir, error)),
-        );
+        problems.extend(dir_problems.iter().map(|error| {
+            let problem = Problem::from_error(&project_dir, error, ProblemKind::ProjectDir);
+            // An unreadable env directory only touches that env's cells.
+            let env = problem
+                .path
+                .strip_prefix(&project_dir)
+                .ok()
+                .and_then(|rest| rest.iter().next())
+                .map(|env| env.to_string_lossy().into_owned());
+            let scope = Scope {
+                project_dir: project_dir.clone(),
+                env,
+            };
+            (problem, Some(scope))
+        }));
         for entry in entries {
             let Entry {
                 env,
@@ -218,7 +314,14 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
                     });
                 }
                 Err(error) => {
-                    problems.push(Problem::from_error(&path, &error));
+                    let scope = Scope {
+                        project_dir: project_dir.clone(),
+                        env: Some(env.clone()),
+                    };
+                    problems.push((
+                        Problem::from_error(&path, &error, ProblemKind::Receipt),
+                        Some(scope),
+                    ));
                     unattributed
                         .entry((project_dir.clone(), env))
                         .or_default()
@@ -239,20 +342,43 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
                 }
             }
         }
-        Err(error) => problems.push(Problem {
-            path: trust_path.to_path_buf(),
-            message: error.to_string(),
-        }),
+        Err(error) => problems.push((
+            Problem {
+                path: trust_path.to_path_buf(),
+                message: error.to_string(),
+                kind: ProblemKind::Trust,
+                cells: Vec::new(),
+            },
+            None,
+        )),
     }
+
+    // Which cells read receipts from each project dir and env.
+    let mut readers: BTreeMap<(PathBuf, String), Vec<CellRef>> = BTreeMap::new();
 
     let mut repos: Vec<RepoRow> = rows
         .into_iter()
         .map(|(repo_root, row)| {
-            let mut envs: Vec<EnvCell> = row
-                .envs
-                .into_iter()
-                .map(|(key, cell)| build_cell(&key, cell, &unattributed))
-                .collect();
+            let mut envs: Vec<EnvCell> = Vec::new();
+            for (key, cell) in row.envs {
+                let dirs: Vec<PathBuf> = cell
+                    .owns
+                    .iter()
+                    .map(|own| own.project_dir.clone())
+                    .collect();
+                let built = build_cell(&key, cell, &unattributed);
+                for dir in dirs {
+                    let refs = readers.entry((dir, key.clone())).or_default();
+                    let cell_ref = CellRef {
+                        repo_root: repo_root.clone(),
+                        env: built.env.clone(),
+                    };
+                    if !refs.contains(&cell_ref) {
+                        refs.push(cell_ref);
+                    }
+                }
+                envs.push(built);
+            }
             envs.sort_by(|a, b| a.env.cmp(&b.env));
             let label = row.project.clone().unwrap_or_else(|| {
                 Path::new(&repo_root)
@@ -275,6 +401,24 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
             .then_with(|| a.repo_root.cmp(&b.repo_root))
     });
     mark_newer_elsewhere(&mut repos);
+    let problems = problems
+        .into_iter()
+        .map(|(mut problem, scope)| {
+            if let Some(scope) = scope {
+                let mut cells: Vec<CellRef> = readers
+                    .iter()
+                    .filter(|((dir, env), _)| {
+                        *dir == scope.project_dir && scope.env.as_ref().is_none_or(|key| key == env)
+                    })
+                    .flat_map(|(_, refs)| refs.iter().cloned())
+                    .collect();
+                cells.sort();
+                cells.dedup();
+                problem.cells = cells;
+            }
+            problem
+        })
+        .collect();
     Ok(Overview { repos, problems })
 }
 
@@ -369,6 +513,7 @@ fn build_cell(
         approved: cell.approved,
         code: walk.code,
         last_attempt: walk.last_attempt,
+        code_run: walk.code_run,
         stale_hint,
         target: walk.target,
         newer_elsewhere: None,
@@ -378,6 +523,7 @@ fn build_cell(
 struct Walk {
     code: CodeState,
     last_attempt: Option<AttemptSummary>,
+    code_run: Option<AttemptSummary>,
     stale_hint: Option<StaleHint>,
     target: Option<String>,
     env: Option<String>,
@@ -391,6 +537,7 @@ fn walk(owns: &[Own]) -> Walk {
     let mut result = Walk {
         code: CodeState::NeverDeployed,
         last_attempt: None,
+        code_run: None,
         stale_hint: None,
         target: None,
         env: None,
@@ -427,13 +574,7 @@ fn walk(owns: &[Own]) -> Walk {
         if current.is_none() {
             result.target = Some(format!("{}:{}", target.0, target.1));
             result.env = Some(receipt.target.env.clone());
-            result.last_attempt = Some(AttemptSummary {
-                run_id: receipt.run_id.clone(),
-                started_at_ms: receipt.started_at_ms,
-                run_plan: receipt.run_plan,
-                badge: receipt.badge(),
-                next_steps: receipt.next_steps(),
-            });
+            result.last_attempt = Some(AttemptSummary::of(&receipt, &own.path));
             current = Some(target.clone());
         }
         if current.as_ref() != Some(&target) {
@@ -444,6 +585,7 @@ fn walk(owns: &[Own]) -> Walk {
         first_on_target = Some(receipt.run_id.clone());
         if let Some(code) = code_of(&receipt) {
             result.code = code;
+            result.code_run = Some(AttemptSummary::of(&receipt, &own.path));
             result.decided_at_ms = Some(receipt.started_at_ms);
             return result;
         }
@@ -572,6 +714,9 @@ pub fn compare_envs(git: &Git, row: &RepoRow, a: &str, b: &str) -> EnvComparison
         notes,
     }
 }
+
+mod text;
+pub use text::{age, code_text, comparison_text, sentence, short_id, short_sha, CodeText, Mark};
 
 #[cfg(test)]
 mod tests;
