@@ -410,7 +410,7 @@ slip receipts show 18dab54b --md
 
 Each row shows the outcome with flags for anything that needs a look:
 `⚠ N new error groups`, `⚠ smoke 500`, `ⓘ log not fully observed`,
-`ⓘ log not recorded`, `ⓘ smoke not recorded`, and `⛔ app in maintenance mode`.
+`ⓘ log not recorded`, `ⓘ smoke not recorded`, and `⛔ app may be in maintenance mode`.
 A run that never finished reads `Unfinished (last recorded: …)`, never as its
 saved outcome. `show` prints the steps (including maintenance on/off) with exit
 codes and saved output, the log watch and smoke results, and what to check
@@ -475,11 +475,13 @@ A commit is shown only when a receipt backs it: `code at …` when the
 fast-forward succeeded (`deploy incomplete` if a later step did not), `checked
 out at start` for reruns, and `observed …` when Shipslip read the server's
 commit after a failed step. Otherwise the line says `server code not known`,
-`never deployed`, or `target changed` when the environment now points at a
+`no deploy receipt on this Mac`, or `target changed` when the environment now points at a
 different server or path. Each line also shows the last run and its flags,
 and what to do next when that run needs attention. It warns when a newer
 receipt could not be read, and when another checkout ran a newer deploy on the
-same server path, since that run may have replaced the code. `--compare` uses your local checkout to count commits and notes an
+same server path, since that run may have replaced the code. It also warns
+when the approved config now deploys to a different server or path than the
+newest receipt, until a run uses the new one. `--compare` uses your local checkout to count commits and notes an
 incomplete deploy or dirty tree on either side.
 
 ## Post-deploy checks

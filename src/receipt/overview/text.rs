@@ -225,6 +225,15 @@ pub fn comparison_text(a: &str, b: &str, comparison: &EnvComparison) -> String {
     escape_field(&line)
 }
 
+/// A warning when the approved config deploys somewhere other than the
+/// newest receipt's target, so the cell's code may not be on it.
+pub fn target_moved_text(cell: &EnvCell) -> Option<String> {
+    let approved = cell.target_moved()?;
+    Some(escape_field(&format!(
+        "approved config now deploys to {approved}, not this target"
+    )))
+}
+
 impl Flag {
     /// The flag in words for a cell, without the leading symbol.
     pub fn cell_text(&self) -> String {
@@ -236,7 +245,7 @@ impl Flag {
             Self::SmokeFailed(Some(status)) => format!("smoke {status}"),
             Self::SmokeFailed(None) => "smoke failed".into(),
             Self::SmokeNotRecorded => "smoke not recorded".into(),
-            Self::AppLeftDown => "app in maintenance mode".into(),
+            Self::AppLeftDown => "app may be in maintenance mode".into(),
         }
     }
 }

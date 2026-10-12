@@ -472,7 +472,7 @@ fn badge_flags_every_incomplete_check() {
         [
             "⚠ 3 new error groups",
             "⚠ smoke 500",
-            "⛔ app in maintenance mode"
+            "⛔ app may be in maintenance mode"
         ]
     );
 
@@ -548,7 +548,7 @@ fn markdown_lists_maintenance_and_escapes_untrusted_text() {
 
     assert!(text.contains("| Maintenance on | `php artisan down` | ✓ ok | 0 |"));
     assert!(text.contains("| Maintenance off | `php artisan up` | ✗ failed | 1 |"));
-    assert!(text.contains("- ⛔ app in maintenance mode"));
+    assert!(text.contains("- ⛔ app may be in maintenance mode"));
     assert!(text.contains("- 2222222 \\[click\\]\\(https://evil.test\\) \\<b\\>x\\</b\\> \\| y"));
     assert!(text.contains("| 1 | ````echo ``` \\| tee```` |"), "{text}");
     // Output fences outlast any backtick run, and control characters are escaped.

@@ -826,13 +826,25 @@ pub fn approve_trust(
     save_trust_store(path, &store)
 }
 
-/// Every approval record: checkout path to the env names approved there.
-/// Approval only means a record exists, not that the current config matches.
-pub fn approved_envs(path: &Path) -> Result<BTreeMap<String, Vec<String>>, ConfigError> {
+/// Every approval record: checkout path to each env approved there and its
+/// approved `ssh_alias:path`. Approval only means a record exists, not that
+/// the current config matches.
+pub fn approved_envs(
+    path: &Path,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>, ConfigError> {
     Ok(load_trust_store(path)?
         .repositories
         .into_iter()
-        .map(|(repo_root, envs)| (repo_root, envs.into_keys().collect()))
+        .map(|(repo_root, envs)| {
+            let envs = envs
+                .into_iter()
+                .map(|(env, record)| {
+                    let target = format!("{}:{}", record.snapshot.ssh_alias, record.snapshot.path);
+                    (env, target)
+                })
+                .collect();
+            (repo_root, envs)
+        })
         .collect())
 }
 
