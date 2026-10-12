@@ -43,6 +43,8 @@ pub struct EnvCell {
     /// An approval record exists. It does not mean the current config is
     /// still trusted, which is never checked here.
     pub approved: bool,
+    /// `ssh_alias:path` from the approval record.
+    pub approved_target: Option<String>,
     pub code: CodeState,
     /// The newest readable run of any kind.
     pub last_attempt: Option<AttemptSummary>,
@@ -168,6 +170,12 @@ impl AttemptSummary {
 }
 
 impl EnvCell {
+    /// The approved target, when the newest receipt was for another one.
+    pub fn target_moved(&self) -> Option<&str> {
+        let approved = self.approved_target.as_deref()?;
+        (self.target.as_deref()? != approved).then_some(approved)
+    }
+
     /// Whether the cell shows something the user should look at: a run
     /// that did not succeed, code that is not known or not complete, a
     /// record that may be out of date, or new errors after a run.
@@ -181,6 +189,7 @@ impl EnvCell {
         };
         code || self.stale_hint.is_some()
             || self.newer_elsewhere.is_some()
+            || self.target_moved().is_some()
             || self
                 .code_run
                 .iter()
@@ -262,6 +271,7 @@ struct RowBuild {
 struct CellBuild {
     raw_env: Option<String>,
     approved: bool,
+    approved_target: Option<String>,
     owns: Vec<Own>,
 }
 
@@ -335,9 +345,10 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
         Ok(approved) => {
             for (repo_root, envs) in approved {
                 let row = rows.entry(repo_root).or_default();
-                for env in envs {
+                for (env, target) in envs {
                     let cell = row.envs.entry(safe_component(&env)).or_default();
                     cell.approved = true;
+                    cell.approved_target = Some(target);
                     cell.raw_env = Some(env);
                 }
             }
@@ -511,6 +522,7 @@ fn build_cell(
     EnvCell {
         env: walk.env.or(cell.raw_env).unwrap_or_else(|| key.to_string()),
         approved: cell.approved,
+        approved_target: cell.approved_target,
         code: walk.code,
         last_attempt: walk.last_attempt,
         code_run: walk.code_run,
@@ -716,7 +728,10 @@ pub fn compare_envs(git: &Git, row: &RepoRow, a: &str, b: &str) -> EnvComparison
 }
 
 mod text;
-pub use text::{age, code_text, comparison_text, sentence, short_id, short_sha, CodeText, Mark};
+pub use text::{
+    age, code_text, comparison_text, sentence, short_id, short_sha, target_moved_text, CodeText,
+    Mark,
+};
 
 #[cfg(test)]
 mod tests;

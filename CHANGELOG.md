@@ -6,6 +6,17 @@ change the library API.
 
 ## [Unreleased]
 
+### Changed
+
+- The maintenance flag reads `⛔ app may be in maintenance mode`: it is set
+  whenever `php artisan down` may have started or `php artisan up` did not
+  finish, including when `down` itself failed.
+- `slip status` warns under a cell when its approved config deploys to a
+  different `ssh_alias:path` than the newest receipt, until a run uses the
+  new target.
+- Library: `EnvCell` gains `approved_target` and `target_moved`, and
+  `target_moved_text` gives the warning in words.
+
 ## [0.6.2] - 2026-10-11
 
 ### Changed

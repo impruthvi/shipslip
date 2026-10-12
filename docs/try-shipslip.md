@@ -98,7 +98,7 @@ slip status                   # last recorded code of every app and env, from an
 ```
 
 Flags in the list tell you what needs a look: `⚠ N new error groups`,
-`⚠ smoke 500`, `ⓘ log not fully observed`, `⛔ app in maintenance mode`.
+`⚠ smoke 500`, `ⓘ log not fully observed`, `⛔ app may be in maintenance mode`.
 
 ## If something goes wrong
 

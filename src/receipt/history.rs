@@ -335,7 +335,7 @@ impl Flag {
             Self::SmokeFailed(Some(status)) => format!("⚠ smoke {status}"),
             Self::SmokeFailed(None) => "⚠ smoke failed".into(),
             Self::SmokeNotRecorded => "ⓘ smoke not recorded".into(),
-            Self::AppLeftDown => "⛔ app in maintenance mode".into(),
+            Self::AppLeftDown => "⛔ app may be in maintenance mode".into(),
         }
     }
 }

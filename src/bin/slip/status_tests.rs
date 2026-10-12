@@ -24,6 +24,7 @@ fn cell(env: &str, code: CodeState) -> EnvCell {
     EnvCell {
         env: env.into(),
         approved: false,
+        approved_target: None,
         code,
         last_attempt: None,
         code_run: None,
@@ -373,6 +374,28 @@ fn a_newer_run_from_another_checkout_is_called_out() {
     assert!(
         text.contains(
             "\n           ⚠ a newer run (ffff0006, 1h ago) from /private/tmp/app (staging) used this server; this may be out of date\n"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_changed_approved_target_is_called_out_under_the_old_one() {
+    let mut staging = cell("staging", recorded(true, Evidence::FastForward));
+    staging.target = Some("web1:/srv/app".into());
+    staging.approved_target = Some("web1:/srv/app-staging".into());
+    let text = render(
+        &Overview {
+            repos: vec![row("app", vec![staging])],
+            problems: vec![],
+        },
+        NOW,
+        None,
+        no_compare,
+    );
+    assert!(
+        text.contains(
+            "\n           on web1:/srv/app\n           ⚠ approved config now deploys to web1:/srv/app-staging, not this target\n"
         ),
         "{text}"
     );

@@ -35,14 +35,18 @@ impl Fixture {
         self.0.join("trust.json")
     }
 
+    /// Approves the target the `receipt` helper deploys to.
     fn approve(&self, repo_root: &str, env: &str) {
-        crate::config::approve_trust(
-            &self.trust(),
-            Path::new(repo_root),
-            env,
-            crate::config::TrustSnapshot::default(),
-        )
-        .unwrap();
+        self.approve_at(repo_root, env, "web1", "/srv/app");
+    }
+
+    fn approve_at(&self, repo_root: &str, env: &str, ssh_alias: &str, path: &str) {
+        let snapshot = crate::config::TrustSnapshot {
+            ssh_alias: ssh_alias.into(),
+            path: path.into(),
+            ..Default::default()
+        };
+        crate::config::approve_trust(&self.trust(), Path::new(repo_root), env, snapshot).unwrap();
     }
 
     /// Saves under the project directory the receipt's own project maps to.
@@ -374,6 +378,58 @@ fn a_new_target_never_inherits_the_old_targets_code() {
 }
 
 #[test]
+fn an_approved_target_change_warns_until_a_run_uses_it() {
+    let fixture = Fixture::new();
+    fixture.save(&run(1, "staging"));
+    fixture.approve("/work/app", "staging");
+    let overview = fixture.overview();
+    let staging = cell(&overview, "/work/app", "staging");
+    assert_eq!(staging.target_moved(), None);
+    assert_eq!(target_moved_text(staging), None);
+    assert!(!staging.needs_attention());
+
+    fixture.approve_at("/work/app", "staging", "web1", "/srv/app-staging");
+    let overview = fixture.overview();
+    let staging = cell(&overview, "/work/app", "staging");
+    assert_eq!(staging.code, recorded(NEW, true, Evidence::FastForward, 1));
+    assert_eq!(staging.target.as_deref(), Some("web1:/srv/app"));
+    assert_eq!(staging.target_moved(), Some("web1:/srv/app-staging"));
+    assert_eq!(
+        target_moved_text(staging).as_deref(),
+        Some("approved config now deploys to web1:/srv/app-staging, not this target")
+    );
+    assert!(staging.needs_attention());
+
+    let mut moved = run(2, "staging");
+    moved["target"]["path"] = json!("/srv/app-staging");
+    fixture.save(&moved);
+    let overview = fixture.overview();
+    assert_eq!(cell(&overview, "/work/app", "staging").target_moved(), None);
+}
+
+#[test]
+fn a_target_change_without_receipts_or_approval_is_not_a_warning() {
+    let fixture = Fixture::new();
+    fixture.approve_at("/work/app", "production", "web1", "/srv/app");
+    fixture.save(&run(1, "staging"));
+    let overview = fixture.overview();
+    assert_eq!(
+        cell(&overview, "/work/app", "production").target_moved(),
+        None
+    );
+    assert_eq!(cell(&overview, "/work/app", "staging").target_moved(), None);
+}
+
+#[test]
+fn the_target_moved_warning_is_escaped() {
+    let mut cell = env_cell("staging", CodeState::NeverDeployed);
+    cell.target = Some("web1:/srv/app".into());
+    cell.approved_target = Some("web\u{202e}1:/srv\n".into());
+    let text = target_moved_text(&cell).unwrap();
+    assert!(!text.contains('\u{202e}') && !text.contains('\n'));
+}
+
+#[test]
 fn walk_stops_after_twenty_runs_that_changed_nothing() {
     let fixture = Fixture::new();
     fixture.save(&run(1, "staging"));
@@ -580,6 +636,7 @@ fn comparisons_carry_each_sides_caveat_and_refuse_unknown_code() {
     let cell = |env: &str, code: CodeState| EnvCell {
         env: env.into(),
         approved: false,
+        approved_target: None,
         code,
         last_attempt: None,
         code_run: None,
@@ -687,6 +744,7 @@ fn env_cell(env: &str, code: CodeState) -> EnvCell {
     EnvCell {
         env: env.into(),
         approved: false,
+        approved_target: None,
         code,
         last_attempt: None,
         code_run: None,
@@ -868,7 +926,7 @@ fn flags_in_cell_words() {
             "smoke 500",
             "smoke failed",
             "smoke not recorded",
-            "app in maintenance mode",
+            "app may be in maintenance mode",
         ]
     );
 }

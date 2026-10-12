@@ -6,7 +6,8 @@ use std::process::ExitCode;
 use shipslip::git::Git;
 use shipslip::logs::escape_field;
 use shipslip::receipt::{
-    self, age, comparison_text, sentence, short_id, EnvComparison, Overview, RepoRow, StaleHint,
+    self, age, comparison_text, sentence, short_id, target_moved_text, EnvComparison, Overview,
+    RepoRow, StaleHint,
 };
 
 use super::invalid_input;
@@ -102,6 +103,9 @@ fn render(
             }
             if let Some(target) = &cell.target {
                 let _ = writeln!(out, "{pad}on {}", escape_field(target));
+            }
+            if let Some(line) = target_moved_text(cell) {
+                let _ = writeln!(out, "{pad}⚠ {line}");
             }
             if let Some(other) = &cell.newer_elsewhere {
                 let line = format!(
