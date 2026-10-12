@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-12
+
 ### Changed
 
 - The maintenance flag reads `⛔ app may be in maintenance mode`: it is set
@@ -15,7 +17,8 @@ change the library API.
   different `ssh_alias:path` than the newest receipt, until a run uses the
   new target.
 - Library: `EnvCell` gains `approved_target` and `target_moved`, and
-  `target_moved_text` gives the warning in words.
+  `target_moved_text` gives the warning in words. `config::approved_envs`
+  returns each approved env's `ssh_alias:path`.
 
 ## [0.6.2] - 2026-10-11
 
@@ -366,6 +369,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.7.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.7.0
 [0.6.2]: https://github.com/impruthvi/shipslip/releases/tag/v0.6.2
 [0.6.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.6.1
 [0.6.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.6.0
