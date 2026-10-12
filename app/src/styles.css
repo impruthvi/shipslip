@@ -1,0 +1,94 @@
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-weight: 400;
+  font-display: block;
+  src: url("./assets/fonts/IBMPlexSans-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-weight: 500;
+  font-display: block;
+  src: url("./assets/fonts/IBMPlexSans-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-weight: 600;
+  font-display: block;
+  src: url("./assets/fonts/IBMPlexSans-SemiBold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 400;
+  font-display: block;
+  src: url("./assets/fonts/IBMPlexMono-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 500;
+  font-display: block;
+  src: url("./assets/fonts/IBMPlexMono-Medium.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-weight: 600;
+  font-display: block;
+  src: url("./assets/fonts/IBMPlexMono-SemiBold.woff2") format("woff2");
+}
+
+:root {
+  color-scheme: light;
+
+  /* Colors (Paper "Shipslip — Release map"). Components use these names only. */
+  --color-surface: #fafaf7;
+  --color-surface-alt: #f1f0eb;
+  --color-surface-raised: #ffffff;
+  --color-text: #16181d;
+  --color-text-muted: #62666e;
+  --color-rule: #e2e0d9;
+  --color-hatch: #e6e4dd;
+  --color-selection: #e8ecf7;
+  --color-accent: #2445a8;
+  --color-focus: var(--color-accent);
+  --color-status-bad: #b42318;
+  --color-status-bad-soft: #fcedeb;
+  --color-status-good: #1e6b45;
+
+  --font-sans: "IBM Plex Sans", sans-serif;
+  --font-mono: "IBM Plex Mono", monospace;
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
+  --text-11: 11px;
+  --text-12: 12px;
+  --text-13: 13px;
+  --text-14: 14px;
+  --text-16: 16px;
+  --text-22: 22px;
+  --leading-body: 20px;
+  --tracking-tight: -0.02em;
+  --tracking-caps: 0.08em;
+
+  --space-4: 4px;
+  --space-8: 8px;
+  --space-12: 12px;
+  --space-16: 16px;
+  --space-24: 24px;
+  --space-32: 32px;
+  --space-48: 48px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+
+  font-family: var(--font-sans);
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--font-mono);
+}

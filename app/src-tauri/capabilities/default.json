@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Read-only release map: window queries, events, and copying a command to the clipboard.",
+  "windows": ["main"],
+  "permissions": [
+    "core:window:default",
+    "core:event:default",
+    "clipboard-manager:allow-write-text"
+  ]
+}
