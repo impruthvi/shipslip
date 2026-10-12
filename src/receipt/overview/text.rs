@@ -234,6 +234,26 @@ pub fn target_moved_text(cell: &EnvCell) -> Option<String> {
     )))
 }
 
+/// A warning when a receipt newer than the one behind the cell could not be
+/// read. Front-ends show the file from [`EnvCell::stale_hint`] with it.
+pub fn stale_hint_text(cell: &EnvCell) -> Option<String> {
+    cell.stale_hint
+        .as_ref()
+        .map(|_| "a newer receipt could not be read; this may be out of date".into())
+}
+
+/// A warning when another checkout ran on this cell's server after it.
+pub fn newer_elsewhere_text(cell: &EnvCell, now_ms: u128) -> Option<String> {
+    let other = cell.newer_elsewhere.as_ref()?;
+    Some(escape_field(&format!(
+        "a newer run ({}, {}) from {} ({}) used this server; this may be out of date",
+        short_id(&other.run_id),
+        age(now_ms, other.started_at_ms),
+        other.repo_root,
+        other.env
+    )))
+}
+
 impl Flag {
     /// The flag in words for a cell, without the leading symbol.
     pub fn cell_text(&self) -> String {

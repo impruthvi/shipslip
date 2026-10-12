@@ -700,11 +700,21 @@ fn comparisons_carry_each_sides_caveat_and_refuse_unknown_code() {
         compare_envs(&git, &row, "staging", "demo").result,
         Comparison::Unavailable("no demo environment".into())
     );
+    let supplied = compare_envs_with(&row, "staging", "prod.eu", |root, a, b| {
+        assert_eq!((root, a, b), (fixture.0.as_path(), NEW, NEW));
+        Comparison::Ahead(2)
+    });
+    assert_eq!(supplied.result, Comparison::Ahead(2));
+    assert_eq!(supplied.notes, one.notes);
+    let never =
+        |_: &Path, _: &str, _: &str| -> Comparison { panic!("compared without both commits") };
+    compare_envs_with(&row, "staging", "qa", never);
     row.path_missing = true;
     assert_eq!(
         compare_envs(&git, &row, "staging", "production").result,
         Comparison::Unavailable("checkout not found".into())
     );
+    compare_envs_with(&row, "staging", "production", never);
 }
 
 #[test]

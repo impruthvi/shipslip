@@ -6,10 +6,10 @@ use std::process::ExitCode;
 use shipslip::config::LoadedConfig;
 use shipslip::logs::{escape, escape_field};
 use shipslip::receipt::{
-    self, describe_plan, describe_watch, format_duration, strip_color, Found, Listed, Receipt,
-    ReceiptError, ReceiptStatus, ReceiptStepStatus,
+    self, describe_plan, describe_smoke, describe_watch, format_duration, strip_color, Found,
+    Listed, Receipt, ReceiptError, ReceiptStatus, ReceiptStepStatus,
 };
-use shipslip::{DeployOutcome, SmokeResult, WatchStatus};
+use shipslip::{DeployOutcome, WatchStatus};
 
 use super::invalid_input;
 
@@ -399,25 +399,7 @@ fn render_show(receipt: &Receipt) -> String {
     }
 
     if let Some(smoke) = &receipt.smoke {
-        let text = match smoke {
-            SmokeResult::NotConfigured => "not configured".into(),
-            SmokeResult::Skipped => "skipped".into(),
-            SmokeResult::Passed { status, latency_ms } => {
-                format!("passed, HTTP {status} in {latency_ms} ms")
-            }
-            SmokeResult::Failed {
-                status: Some(status),
-                reason,
-            } if *reason == format!("HTTP {status}") => format!("failed, HTTP {status}"),
-            SmokeResult::Failed {
-                status: Some(status),
-                reason,
-            } => format!("failed, HTTP {status}: {}", escape_field(reason)),
-            SmokeResult::Failed {
-                status: None,
-                reason,
-            } => format!("failed: {}", escape_field(reason)),
-        };
+        let text = describe_smoke(smoke);
         let _ = writeln!(out, "\nSmoke check: {text}");
     }
 

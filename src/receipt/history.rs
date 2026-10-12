@@ -450,6 +450,29 @@ pub fn describe_plan(plan: RunPlan) -> String {
     }
 }
 
+/// The smoke check's result in words, with server text escaped.
+pub fn describe_smoke(smoke: &SmokeResult) -> String {
+    match smoke {
+        SmokeResult::NotConfigured => "not configured".into(),
+        SmokeResult::Skipped => "skipped".into(),
+        SmokeResult::Passed { status, latency_ms } => {
+            format!("passed, HTTP {status} in {latency_ms} ms")
+        }
+        SmokeResult::Failed {
+            status: Some(status),
+            reason,
+        } if *reason == format!("HTTP {status}") => format!("failed, HTTP {status}"),
+        SmokeResult::Failed {
+            status: Some(status),
+            reason,
+        } => format!("failed, HTTP {status}: {}", escape_field(reason)),
+        SmokeResult::Failed {
+            status: None,
+            reason,
+        } => format!("failed: {}", escape_field(reason)),
+    }
+}
+
 pub fn describe_watch(status: WatchStatus) -> &'static str {
     match status {
         WatchStatus::Complete => "complete",
