@@ -19,15 +19,15 @@ mod markdown;
 mod overview;
 
 pub use history::{
-    describe_plan, describe_watch, failed_step_options, find, list, Badge, Flag, Found, Listed,
-    Listing, MIN_ID_LEN,
+    describe_plan, describe_smoke, describe_watch, failed_step_options, find, list, Badge, Flag,
+    Found, Listed, Listing, MIN_ID_LEN,
 };
 pub use markdown::markdown;
 pub use overview::{
-    age, code_text, compare_envs, comparison_text, overview, sentence, short_id, short_sha,
-    target_moved_text, AttemptSummary, CellRef, CodeState, CodeText, EnvCell, EnvComparison,
-    Evidence, Mark, NewerElsewhere, NotKnownReason, Overview, Problem, ProblemKind, Qualifier,
-    RepoRow, StaleHint, WALK_LIMIT,
+    age, code_text, compare_envs, compare_envs_with, comparison_text, newer_elsewhere_text,
+    overview, sentence, short_id, short_sha, stale_hint_text, target_moved_text, AttemptSummary,
+    CellRef, CodeState, CodeText, EnvCell, EnvComparison, Evidence, Mark, NewerElsewhere,
+    NotKnownReason, Overview, Problem, ProblemKind, Qualifier, RepoRow, StaleHint, WALK_LIMIT,
 };
 
 const VERSION: u32 = 1;

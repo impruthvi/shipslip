@@ -6,6 +6,14 @@ change the library API.
 
 ## [Unreleased]
 
+### Added
+
+- Library: `stale_hint_text` and `newer_elsewhere_text` give a release-map
+  cell's out-of-date warnings in words, `describe_smoke` gives a smoke check
+  result in words, and `compare_envs_with` compares two environments with a
+  caller-supplied commit comparison, e.g. to answer from a cache. `slip status`
+  and `slip receipts show` print the same as before.
+
 ## [0.7.0] - 2026-10-12
 
 ### Changed

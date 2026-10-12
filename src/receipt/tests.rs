@@ -572,3 +572,35 @@ fn time_and_color_helpers() {
         " INFO  done \u{1b}[2J"
     );
 }
+
+#[test]
+fn smoke_results_in_words() {
+    use crate::SmokeResult;
+    let failed = |status, reason: &str| SmokeResult::Failed {
+        status,
+        reason: reason.into(),
+    };
+    let cases = [
+        (SmokeResult::NotConfigured, "not configured"),
+        (SmokeResult::Skipped, "skipped"),
+        (
+            SmokeResult::Passed {
+                status: 200,
+                latency_ms: 42,
+            },
+            "passed, HTTP 200 in 42 ms",
+        ),
+        (failed(Some(500), "HTTP 500"), "failed, HTTP 500"),
+        (
+            failed(Some(502), "bad gateway"),
+            "failed, HTTP 502: bad gateway",
+        ),
+        (
+            failed(None, "timed out\u{1b}[2J"),
+            "failed: timed out\\x1b[2J",
+        ),
+    ];
+    for (smoke, words) in cases {
+        assert_eq!(describe_smoke(&smoke), words);
+    }
+}

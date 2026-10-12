@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use shipslip::git::Git;
 use shipslip::logs::escape_field;
 use shipslip::receipt::{
-    self, age, comparison_text, sentence, short_id, target_moved_text, EnvComparison, Overview,
-    RepoRow, StaleHint,
+    self, age, comparison_text, newer_elsewhere_text, sentence, short_id, stale_hint_text,
+    target_moved_text, EnvComparison, Overview, RepoRow, StaleHint,
 };
 
 use super::invalid_input;
@@ -107,27 +107,19 @@ fn render(
             if let Some(line) = target_moved_text(cell) {
                 let _ = writeln!(out, "{pad}⚠ {line}");
             }
-            if let Some(other) = &cell.newer_elsewhere {
-                let line = format!(
-                    "⚠ a newer run ({}, {}) from {} ({}) used this server; this may be out of date",
-                    short_id(&other.run_id),
-                    age(now_ms, other.started_at_ms),
-                    other.repo_root,
-                    other.env
-                );
-                let _ = writeln!(out, "{pad}{}", escape_field(&line));
+            if let Some(line) = newer_elsewhere_text(cell, now_ms) {
+                let _ = writeln!(out, "{pad}⚠ {line}");
             }
-            match &cell.stale_hint {
-                Some(
-                    StaleHint::NewestUnreadable { path } | StaleHint::UnattributedNewer { path },
-                ) => {
-                    let _ = writeln!(
-                        out,
-                        "{pad}⚠ a newer receipt could not be read; this may be out of date: {}",
-                        escape_field(&path.to_string_lossy())
-                    );
-                }
-                None => {}
+            if let (
+                Some(line),
+                Some(StaleHint::NewestUnreadable { path } | StaleHint::UnattributedNewer { path }),
+            ) = (stale_hint_text(cell), &cell.stale_hint)
+            {
+                let _ = writeln!(
+                    out,
+                    "{pad}⚠ {line}: {}",
+                    escape_field(&path.to_string_lossy())
+                );
             }
         }
     }

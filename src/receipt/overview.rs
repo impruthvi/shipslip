@@ -688,6 +688,18 @@ pub struct EnvComparison {
 /// Compares the code two envs of one checkout are on. Only recorded or
 /// observed commits are compared.
 pub fn compare_envs(git: &Git, row: &RepoRow, a: &str, b: &str) -> EnvComparison {
+    compare_envs_with(row, a, b, |root, a, b| git.compare(root, a, b))
+}
+
+/// [`compare_envs`] with the commit comparison supplied by the caller, e.g.
+/// to answer from a cache. `compare` runs only when both cells have a
+/// commit and the checkout exists.
+pub fn compare_envs_with(
+    row: &RepoRow,
+    a: &str,
+    b: &str,
+    compare: impl FnOnce(&Path, &str, &str) -> Comparison,
+) -> EnvComparison {
     let mut notes = Vec::new();
     let unavailable = |reason: String| EnvComparison {
         result: Comparison::Unavailable(reason),
@@ -722,15 +734,15 @@ pub fn compare_envs(git: &Git, row: &RepoRow, a: &str, b: &str) -> EnvComparison
         return unavailable("checkout not found".into());
     }
     EnvComparison {
-        result: git.compare(Path::new(&row.repo_root), &shas[0], &shas[1]),
+        result: compare(Path::new(&row.repo_root), &shas[0], &shas[1]),
         notes,
     }
 }
 
 mod text;
 pub use text::{
-    age, code_text, comparison_text, sentence, short_id, short_sha, target_moved_text, CodeText,
-    Mark,
+    age, code_text, comparison_text, newer_elsewhere_text, sentence, short_id, short_sha,
+    stale_hint_text, target_moved_text, CodeText, Mark,
 };
 
 #[cfg(test)]

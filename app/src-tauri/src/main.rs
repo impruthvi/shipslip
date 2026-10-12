@@ -1,8 +1,24 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::sync::Arc;
+
+mod commands;
+#[cfg(test)]
+mod fixture;
+mod git_path;
+mod receipt_view;
+mod state;
+mod view;
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .manage(Arc::new(commands::App::from_env()))
+        .invoke_handler(tauri::generate_handler![
+            commands::load_map,
+            commands::compare,
+            commands::load_receipt
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Shipslip");
 }
