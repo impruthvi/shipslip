@@ -41,9 +41,13 @@ impl Fixture {
 
     /// Approves the target [`run`] deploys to.
     pub fn approve(&self, repo_root: &str, env: &str) {
+        self.approve_at(repo_root, env, "web1", "/srv/app");
+    }
+
+    pub fn approve_at(&self, repo_root: &str, env: &str, ssh_alias: &str, path: &str) {
         let snapshot = TrustSnapshot {
-            ssh_alias: "web1".into(),
-            path: "/srv/app".into(),
+            ssh_alias: ssh_alias.into(),
+            path: path.into(),
             ..Default::default()
         };
         approve_trust(&self.trust(), Path::new(repo_root), env, snapshot).unwrap();
