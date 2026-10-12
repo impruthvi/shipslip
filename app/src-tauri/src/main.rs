@@ -42,8 +42,23 @@ mod tests {
         let names: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| {
+                [".json", ".json5", ".toml"]
+                    .iter()
+                    .any(|ext| name.ends_with(ext))
+            })
             .collect();
         assert_eq!(names, ["default.json"]);
+    }
+
+    #[test]
+    fn identifier_does_not_end_with_app() {
+        let conf = json(include_str!("../tauri.conf.json"));
+        let id = conf["identifier"].as_str().unwrap();
+        assert!(
+            !id.ends_with(".app"),
+            "{id} clashes with the macOS bundle extension"
+        );
     }
 
     #[test]
