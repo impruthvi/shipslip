@@ -27,18 +27,21 @@ function receiptOf(slip: SlipView): Extract<SlipView, { kind: "receipt" }> {
 }
 
 function show(opened: Opened, cell = cellAt("/Users/you/code/shop", "staging")) {
-  const onBackToCode = vi.fn();
+  const onView = vi.fn();
   render(
     <Slip
       opened={opened}
       cell={cell}
       label="shop"
       env="staging"
-      context={{ text: "Latest attempt · recorded code comes from an earlier run", backToCode: true }}
-      onBackToCode={onBackToCode}
+      context={{
+        text: "Latest attempt · recorded code comes from an earlier run",
+        links: [{ text: "open", label: "Open the receipt behind the recorded code", view: "code" }],
+      }}
+      onView={onView}
     />,
   );
-  return { onBackToCode };
+  return { onView };
 }
 
 describe("receipt slips", () => {
@@ -110,10 +113,12 @@ describe("receipt slips", () => {
   });
 
   test("the context line links back to the receipt behind the recorded code", () => {
-    const { onBackToCode } = show(slipOf(cellAt("/Users/you/code/api", "production").lastAttempt!.receipt));
+    const { onView } = show(slipOf(cellAt("/Users/you/code/api", "production").lastAttempt!.receipt));
     expect(screen.getByText(/^Latest attempt/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "open" }));
-    expect(onBackToCode).toHaveBeenCalled();
+    const open = screen.getByRole("button", { name: "Open the receipt behind the recorded code" });
+    expect(open).toHaveTextContent("open");
+    fireEvent.click(open);
+    expect(onView).toHaveBeenCalledWith("code");
   });
 });
 

@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { CommandBox } from "./CommandBox";
-import type { Context } from "./slipTarget";
+import type { Context, PaneView } from "./slipTarget";
 import { isTime, stamp, utcStamp } from "./time";
 import type {
   EnvCellView,
@@ -35,23 +35,23 @@ interface Props {
   label: string;
   env: string;
   context: Context | null;
-  onBackToCode: () => void;
+  onView: (view: PaneView) => void;
 }
 
 /** The receipt slip: header and outcome pinned on top, guidance pinned at the
  * bottom, the rest scrolling between the perforated edges. */
-export function Slip({ opened, cell, label, env, context, onBackToCode }: Props) {
+export function Slip({ opened, cell, label, env, context, onView }: Props) {
   const contextLine = context && (
     <p className="slip-context muted">
       {context.text}
-      {context.backToCode && (
-        <>
+      {context.links.map((link) => (
+        <span key={link.view}>
           {" · "}
-          <button type="button" className="link" onClick={onBackToCode}>
-            open
+          <button type="button" className="link" aria-label={link.label} onClick={() => onView(link.view)}>
+            {link.text}
           </button>
-        </>
-      )}
+        </span>
+      ))}
     </p>
   );
   const name = `${label} · ${env}`;
@@ -62,7 +62,7 @@ export function Slip({ opened, cell, label, env, context, onBackToCode }: Props)
       return (
         <Paper>
           <div className="slip-head">
-            <h2 className="slip-title">{name}</h2>
+            <h2 className="slip-title" tabIndex={-1}>{name}</h2>
             <p>
               No receipt for {name} on this Mac.
               {cell.evidence.length > 0 && ` ${sentence(cell.evidence.join(", "))}`}
@@ -76,7 +76,7 @@ export function Slip({ opened, cell, label, env, context, onBackToCode }: Props)
         <Paper>
           <div className="slip-head">
             {contextLine}
-            <h2 className="slip-title">{name}</h2>
+            <h2 className="slip-title" tabIndex={-1}>{name}</h2>
             <p className="tone-bad">
               The receipt file is no longer there. Refresh ⌘R to re-read the map.
             </p>
@@ -88,7 +88,7 @@ export function Slip({ opened, cell, label, env, context, onBackToCode }: Props)
         <Paper>
           <div className="slip-head">
             {contextLine}
-            <h2 className="slip-title">{name}</h2>
+            <h2 className="slip-title" tabIndex={-1}>{name}</h2>
             <p>Written by a newer Shipslip. Update slip to read it.</p>
           </div>
         </Paper>
@@ -99,7 +99,7 @@ export function Slip({ opened, cell, label, env, context, onBackToCode }: Props)
         <Paper>
           <div className="slip-head">
             {contextLine}
-            <h2 className="slip-title">{name}</h2>
+            <h2 className="slip-title" tabIndex={-1}>{name}</h2>
             <p className="tone-bad">Can't read this receipt.</p>
             <p className="mono slip-detail">{opened.message}</p>
           </div>
@@ -149,7 +149,7 @@ function ReceiptSlip({ receipt, contextLine }: { receipt: ReceiptView; contextLi
             <span className="mono muted slip-time">time not known</span>
           )}
         </div>
-        <h2 className="slip-title">
+        <h2 className="slip-title" tabIndex={-1}>
           {receipt.project} · {receipt.env}
         </h2>
         <div className="slip-shas mono">
