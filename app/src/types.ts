@@ -156,7 +156,10 @@ export interface ServerHead {
 
 export interface ReceiptView {
   runId: string;
+  /** The short headline, e.g. "Failed at step 2". */
   outcome: OutcomeView;
+  /** The receipt's own sentence for a finished run. */
+  summary: string | null;
   flags: FlagView[];
   project: string;
   repoRoot: string;

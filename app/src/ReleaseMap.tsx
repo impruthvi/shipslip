@@ -2,6 +2,7 @@ import { Cell } from "./Cell";
 import type { CompareLine, Pair } from "./compare";
 import { SourceMarker, TargetMarker } from "./ComparePicker";
 import { Legend } from "./Legend";
+import type { PaneView } from "./slipTarget";
 import type { Selection } from "./selection";
 import { shortPath } from "./text";
 import type { MapView } from "./types";
@@ -16,7 +17,7 @@ interface Props {
   map: MapView;
   compare?: Compare | null;
   selected?: Selection | null;
-  onSelect?: (row: number, col: number) => void;
+  onSelect?: (row: number, col: number, view?: PaneView) => void;
 }
 
 export function ReleaseMap({ map, selected = null, onSelect, compare = null }: Props) {
@@ -62,6 +63,7 @@ export function ReleaseMap({ map, selected = null, onSelect, compare = null }: P
                         cell={cell}
                         selected={isSelected}
                         compareLine={col === source ? compare?.lines[r] : undefined}
+                        onOpen={onSelect && ((view) => onSelect(r, col, view))}
                       />
                     )}
                   </div>
