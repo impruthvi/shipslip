@@ -129,6 +129,26 @@ button {
   color: var(--color-text-muted);
 }
 
+/* Focus shows only for keyboard use (DD20): a 2px accent ring. */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.grid-env:focus-visible {
+  outline-offset: -1px;
+  border-radius: var(--radius-md);
+}
+
+.slip-title:focus-visible {
+  outline-offset: 4px;
+}
+
 .mono {
   font-family: var(--font-mono);
 }

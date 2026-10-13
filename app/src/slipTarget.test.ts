@@ -17,15 +17,16 @@ describe("which receipt a cell opens", () => {
     const api = cellAt("/Users/you/code/api", "production");
     expect(target(api, "code")).toEqual({ id: api.receipt, role: "code" });
     expect(target(api, "last")).toEqual({ id: api.lastAttempt?.receipt, role: "last" });
-    expect(context(api, "code")).toEqual({ text: "Receipt behind the recorded code", backToCode: false });
-    expect(context(api, "last")).toEqual({
-      text: "Latest attempt · recorded code comes from an earlier run",
-      backToCode: true,
-    });
+    const views = (ctx: ReturnType<typeof context>) => ctx?.links.map((link) => link.view);
+    expect(context(api, "code")?.text).toBe("Receipt behind the recorded code");
+    expect(views(context(api, "code"))).toEqual(["last"]);
+    expect(context(api, "last")?.text).toBe("Latest attempt · recorded code comes from an earlier run");
+    expect(views(context(api, "last"))).toEqual(["code"]);
 
     const billing = cellAt("/Users/you/code/billing", "production");
     expect(target(billing, "stale")).toEqual({ id: billing.staleReceipt, role: "stale" });
-    expect(context(billing, "stale")?.backToCode).toBe(true);
+    expect(views(context(billing, "code"))).toEqual(["stale"]);
+    expect(views(context(billing, "stale"))).toEqual(["code"]);
   });
 
   test("a view the cell lacks falls back to the code run", () => {
@@ -48,6 +49,6 @@ describe("which receipt a cell opens", () => {
       lastAttempt: { receipt: 7, outcome: { text: "Cancelled before changes", tone: "neutral" }, flags: [], atMs: 0, age: "1m ago" },
     };
     expect(target(attemptOnly, "code")).toEqual({ id: 7, role: "last" });
-    expect(context(attemptOnly, "last")).toEqual({ text: "Latest attempt", backToCode: false });
+    expect(context(attemptOnly, "last")).toEqual({ text: "Latest attempt", links: [] });
   });
 });

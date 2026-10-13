@@ -1,8 +1,8 @@
 import type { CompareLine } from "./compare";
-import { Mark } from "./Mark";
+import { Mark, markLabel } from "./Mark";
 import type { PaneView } from "./slipTarget";
 import { lowerFirst } from "./text";
-import type { EnvCellView, FlagView, Tone } from "./types";
+import type { CellView, EnvCellView, FlagView, Tone } from "./types";
 import { WarningIcon } from "./Warning";
 
 const toneClass: Record<Tone, string> = { good: "tone-good", bad: "tone-bad", neutral: "" };
@@ -57,7 +57,7 @@ function Warning({ text, onOpen }: { text: string; onOpen?: () => void }) {
     <div className="cell-line cell-warning">
       <WarningIcon />
       {onOpen ? (
-        <button type="button" className="cell-open sentence" onClick={stop(onOpen)}>
+        <button type="button" className="cell-open sentence" tabIndex={-1} onClick={stop(onOpen)}>
           {text}
         </button>
       ) : (
@@ -84,6 +84,28 @@ function compareText(line: CompareLine): { text: string; muted: boolean } {
     case "done":
       return { text: line.text, muted: !line.available };
   }
+}
+
+/** What a screen reader says for a cell: where it is, then the cell's lines
+ * in reading order, e.g. "shop, production, recorded code a1b2c3d, 3d ago,
+ * Succeeded". The target and the receipt's details are left to the pane. */
+export function cellName(label: string, env: string, cell: CellView, compareLine?: CompareLine): string {
+  if (cell.kind === "absent") return `${label}, ${env}, none`;
+  const parts = [label, env];
+  parts.push(cell.shortSha ? `${markLabel[cell.mark]} ${cell.shortSha}` : cell.words);
+  if (cell.age) parts.push(cell.age);
+  parts.push(...cell.qualifiers);
+  const state = stateLine(cell);
+  if (state) parts.push(state.text);
+  if (compareLine) parts.push(compareText(compareLine).text);
+  parts.push(...cell.flags.map((flag) => flag.text));
+  if (cell.targetMoved) parts.push(cell.targetMoved);
+  const last = cell.lastAttempt;
+  if (last) {
+    parts.push(`last attempt: ${lowerFirst(last.outcome.text)}, ${last.age}`);
+    parts.push(...last.flags.filter((flag) => flag.bad).map((flag) => flag.text));
+  }
+  return parts.join(", ");
 }
 
 interface Props {
@@ -134,7 +156,12 @@ export function Cell({ cell, selected = false, compareLine, onOpen }: Props) {
         <>
           <div className="cell-tear" />
           {onOpen ? (
-            <button type="button" className="cell-line cell-last cell-open muted" onClick={stop(() => onOpen("last"))}>
+            <button
+              type="button"
+              className="cell-line cell-last cell-open muted"
+              tabIndex={-1}
+              onClick={stop(() => onOpen("last"))}
+            >
               Last: {lowerFirst(last.outcome.text)} · {last.age}
             </button>
           ) : (

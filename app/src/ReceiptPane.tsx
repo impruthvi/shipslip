@@ -1,4 +1,4 @@
-import { useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, type KeyboardEvent, type PointerEvent } from "react";
 import { PANE_MAX, PANE_MIN } from "./pane";
 import { context, type PaneView, type Target } from "./slipTarget";
 import { Slip } from "./Slip";
@@ -16,6 +16,11 @@ export interface SlipMeta {
 }
 
 interface Props {
+  /** The receipt being asked for; focus waits until the slip shows it. */
+  requestKey: string;
+  /** A keyboard open asked for focus on the slip. */
+  focusSlip: boolean;
+  onSlipFocused: () => void;
   /** The cell being opened, named while a slow read is under way. */
   opening: { label: string; env: string };
   receipt: ReceiptState<SlipMeta>;
@@ -31,8 +36,26 @@ function slipKey(key: string, opened: Opened): string {
   return opened.kind === "receipt" ? `${key}\n${opened.runId}` : `${key}\n${opened.kind}`;
 }
 
-export function ReceiptPane({ opening: next, receipt, onView, width, onResize, drawer }: Props) {
+export function ReceiptPane({
+  requestKey,
+  focusSlip,
+  onSlipFocused,
+  opening: next,
+  receipt,
+  onView,
+  width,
+  onResize,
+  drawer,
+}: Props) {
   const drag = useRef<{ x: number; width: number } | null>(null);
+  const pane = useRef<HTMLElement>(null);
+  const shownKey = receipt.shown?.key;
+
+  useEffect(() => {
+    if (!focusSlip || shownKey !== requestKey) return;
+    pane.current?.querySelector<HTMLElement>(".slip-title")?.focus();
+    onSlipFocused();
+  }, [focusSlip, shownKey, requestKey, onSlipFocused]);
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     drag.current = { x: event.clientX, width };
@@ -54,6 +77,7 @@ export function ReceiptPane({ opening: next, receipt, onView, width, onResize, d
   const { shown, opening } = receipt;
   return (
     <aside
+      ref={pane}
       className={`pane${drawer ? " pane-drawer" : ""}`}
       style={{ width }}
       aria-label="Receipt"
@@ -80,7 +104,7 @@ export function ReceiptPane({ opening: next, receipt, onView, width, onResize, d
         </p>
       )}
       {shown && (
-        <div className={`pane-slip${opening ? " pane-slip-dim" : ""}`}>
+        <div className={`pane-slip${opening ? " pane-slip-dim" : ""}`} aria-busy={opening}>
           <Slip
             key={slipKey(shown.key, shown.opened)}
             opened={shown.opened}
@@ -88,7 +112,7 @@ export function ReceiptPane({ opening: next, receipt, onView, width, onResize, d
             label={shown.meta.label}
             env={shown.meta.env}
             context={context(shown.meta.cell, shown.meta.role)}
-            onBackToCode={() => onView("code")}
+            onView={onView}
           />
         </div>
       )}

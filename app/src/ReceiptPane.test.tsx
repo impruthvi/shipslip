@@ -83,7 +83,7 @@ test("Last: opens the latest attempt; open goes back to the code run", async () 
   const { cell } = at("/Users/you/code/api", "production");
   expect(loadReceipt).toHaveBeenLastCalledWith(loaded.generation, cell.lastAttempt!.receipt);
   expect(within(pane()).getByText(/^Latest attempt/)).toBeInTheDocument();
-  fireEvent.click(within(pane()).getByRole("button", { name: "open" }));
+  fireEvent.click(within(pane()).getByRole("button", { name: "Open the receipt behind the recorded code" }));
   await settle();
   expect(loadReceipt).toHaveBeenLastCalledWith(loaded.generation, cell.receipt);
   expect(within(pane()).getByText("Receipt behind the recorded code")).toBeInTheDocument();

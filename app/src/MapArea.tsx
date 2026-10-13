@@ -11,10 +11,15 @@ interface Props {
   onRetry: () => void;
   selected: Selection | null;
   onSelect: (row: number, col: number, view?: PaneView) => void;
+  /** Keyboard open from the grid: select and move focus to the receipt. */
+  onEnter: (row: number, col: number) => void;
+  /** "Select cell" in the problems strip: select and focus the cell. */
+  onProblem: (row: number, col: number) => void;
+  onCellFocus: () => void;
   compare: Compare | null;
 }
 
-export function MapArea({ state, onRetry, selected, onSelect, compare }: Props) {
+export function MapArea({ state, onRetry, selected, onSelect, onEnter, onProblem, onCellFocus, compare }: Props) {
   switch (state.phase) {
     case "loading":
       return <p className="placeholder">Reading local receipts…</p>;
@@ -51,11 +56,18 @@ export function MapArea({ state, onRetry, selected, onSelect, compare }: Props) 
       }
       return (
         <>
-          <ProblemsStrip problems={map.problems} onSelect={onSelect} />
+          <ProblemsStrip problems={map.problems} onSelect={onProblem} />
           {map.screen === "noneReadable" ? (
             <p className="placeholder">No readable receipts</p>
           ) : (
-            <ReleaseMap map={map} selected={selected} onSelect={onSelect} compare={compare} />
+            <ReleaseMap
+              map={map}
+              selected={selected}
+              onSelect={onSelect}
+              onEnter={onEnter}
+              onCellFocus={onCellFocus}
+              compare={compare}
+            />
           )}
         </>
       );
