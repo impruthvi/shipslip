@@ -17,7 +17,11 @@ use crate::view::{flags, guidance, tone, FlagView, Guidance, OutcomeView};
 const TOP_GROUPS: usize = 5;
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum SlipView {
     Receipt(Box<ReceiptView>),
     /// The file is gone since the map was read.

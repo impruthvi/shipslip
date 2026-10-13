@@ -43,7 +43,11 @@ pub struct Loaded {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum LoadResult {
     Loaded(Loaded),
     /// A load was already running; it reads once more before it answers.
@@ -56,7 +60,11 @@ pub enum LoadResult {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum CompareResult {
     Compared {
         generation: u64,
@@ -71,7 +79,11 @@ pub enum CompareResult {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ReceiptResult {
     Opened {
         generation: u64,

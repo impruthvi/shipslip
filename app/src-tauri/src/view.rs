@@ -69,7 +69,11 @@ pub struct RowView {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum CellView {
     /// The app has no such environment.
     Absent,
@@ -89,7 +93,7 @@ pub struct EnvCellView {
     /// The state in words; empty for recorded code.
     pub words: String,
     pub evidence: Vec<String>,
-    /// How the run behind the code ended.
+    /// How the run behind the code ended, else the newest run.
     pub outcome: Option<OutcomeView>,
     pub flags: Vec<FlagView>,
     pub target: Option<String>,
@@ -135,6 +139,9 @@ pub struct FlagView {
     pub text: String,
     /// Shown with a "NEW" chip.
     pub new_errors: bool,
+    /// Something may be wrong now: new errors, a failed smoke check, or the
+    /// app left in maintenance mode. Other flags say what was not recorded.
+    pub bad: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -294,7 +301,7 @@ fn cell_view(cell: &EnvCell, now_ms: u128, locators: &mut Locators) -> EnvCellVi
             .collect(),
         words: text.words,
         evidence: text.evidence,
-        outcome: cell.code_run.as_ref().map(|run| outcome(&run.badge)),
+        outcome: opened.map(|run| outcome(&run.badge)),
         flags: cell
             .code_run
             .as_ref()
@@ -350,6 +357,10 @@ pub fn flags(badge: &Badge) -> Vec<FlagView> {
         .map(|flag| FlagView {
             text: escape_field(&flag.cell_text()),
             new_errors: matches!(flag, Flag::NewErrors(_)),
+            bad: matches!(
+                flag,
+                Flag::NewErrors(_) | Flag::SmokeFailed(_) | Flag::AppLeftDown
+            ),
         })
         .collect()
 }
@@ -360,7 +371,11 @@ fn millis(ms: u128) -> u64 {
 
 /// One part of a next-step line.
 #[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Span {
     Text {
         text: String,
@@ -550,6 +565,27 @@ mod tests {
     }
 
     #[test]
+    fn cells_without_a_code_run_show_the_newest_runs_outcome() {
+        let fx = Fixture::new();
+        let mut cancelled = run(1, "staging");
+        cancelled["outcome"] = json!("CancelledBeforeChanges");
+        cancelled["mutation_started"] = json!(false);
+        for step in cancelled["steps"].as_array_mut().unwrap() {
+            step["status"] = json!("NotStarted");
+        }
+        fx.save(&cancelled);
+        let (view, _) = load(&fx);
+        let cell = present(&view, 0, 0);
+        assert_eq!(cell.mark, MarkView::NoCode);
+        let outcome = cell.outcome.as_ref().unwrap();
+        assert_eq!(
+            (outcome.text.as_str(), outcome.tone),
+            ("Cancelled before changes", Tone::Neutral)
+        );
+        assert!(cell.last_attempt.is_none());
+    }
+
+    #[test]
     fn maintenance_stop_after_a_deploy_flags_the_last_attempt() {
         let fx = Fixture::new();
         fx.save(&run(1, "staging"));
@@ -569,7 +605,7 @@ mod tests {
         assert!(last
             .flags
             .iter()
-            .any(|flag| flag.text == "app may be in maintenance mode"));
+            .any(|flag| flag.text == "app may be in maintenance mode" && flag.bad));
     }
 
     #[test]
@@ -824,6 +860,18 @@ mod span_tests {
             assert!(guidance.copy_withheld, "{env}");
             assert!(commands(&guidance).is_empty(), "{env}");
         }
+    }
+
+    #[test]
+    fn command_spans_serialize_in_camel_case() {
+        let span = Span::Command {
+            prefix: "cd '/a' && ".into(),
+            command: "slip up a".into(),
+            copy_text: "cd '/a' && slip up a".into(),
+        };
+        let json = serde_json::to_value(&span).unwrap();
+        assert_eq!(json["kind"], "command");
+        assert_eq!(json["copyText"], "cd '/a' && slip up a");
     }
 
     #[test]

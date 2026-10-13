@@ -8,6 +8,8 @@ mod fixture;
 mod git_path;
 mod receipt_view;
 mod state;
+#[cfg(test)]
+mod ui_fixtures;
 mod view;
 
 fn main() {
