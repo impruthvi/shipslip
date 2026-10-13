@@ -1,5 +1,6 @@
 import { ProblemsStrip } from "./ProblemsStrip";
 import { ReleaseMap } from "./ReleaseMap";
+import type { PaneView } from "./slipTarget";
 import type { Selection } from "./selection";
 import type { Compare } from "./ReleaseMap";
 import type { MapState } from "./useReleaseMap";
@@ -9,7 +10,7 @@ interface Props {
   state: MapState;
   onRetry: () => void;
   selected: Selection | null;
-  onSelect: (row: number, col: number) => void;
+  onSelect: (row: number, col: number, view?: PaneView) => void;
   compare: Compare | null;
 }
 

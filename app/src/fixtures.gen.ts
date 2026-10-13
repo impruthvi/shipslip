@@ -430,9 +430,10 @@ export const receipts: Record<string, ReceiptResult> = {
       "kind": "receipt",
       "runId": "00000007-0",
       "outcome": {
-        "text": "Deploy run succeeded.",
+        "text": "Succeeded",
         "tone": "good"
       },
+      "summary": "Deploy run succeeded.",
       "flags": [],
       "project": "api",
       "repoRoot": "/Users/you/code/api",
@@ -496,9 +497,10 @@ export const receipts: Record<string, ReceiptResult> = {
       "kind": "receipt",
       "runId": "00000008-0",
       "outcome": {
-        "text": "Deploy stopped after maintenance mode was turned on; no deploy steps ran: the deploy lock was taken over.",
+        "text": "Stopped in maintenance mode, no steps ran",
         "tone": "bad"
       },
+      "summary": "Deploy stopped after maintenance mode was turned on; no deploy steps ran: the deploy lock was taken over.",
       "flags": [
         {
           "text": "app may be in maintenance mode",
@@ -599,9 +601,10 @@ export const receipts: Record<string, ReceiptResult> = {
       "kind": "receipt",
       "runId": "00000001-0",
       "outcome": {
-        "text": "Deploy run succeeded.",
+        "text": "Succeeded",
         "tone": "good"
       },
+      "summary": "Deploy run succeeded.",
       "flags": [
         {
           "text": "2 new error groups after this run",
@@ -715,9 +718,10 @@ export const receipts: Record<string, ReceiptResult> = {
       "kind": "receipt",
       "runId": "00000009-0",
       "outcome": {
-        "text": "Deploy failed at step 1.",
+        "text": "Failed at step 1",
         "tone": "bad"
       },
+      "summary": "Deploy failed at step 1.",
       "flags": [],
       "project": "api",
       "repoRoot": "/Users/you/code/api",
@@ -823,9 +827,10 @@ export const receipts: Record<string, ReceiptResult> = {
       "kind": "receipt",
       "runId": "00000005-0",
       "outcome": {
-        "text": "Deploy run succeeded.",
+        "text": "Succeeded",
         "tone": "good"
       },
+      "summary": "Deploy run succeeded.",
       "flags": [],
       "project": "billing",
       "repoRoot": "/Users/you/code/billing",
@@ -898,9 +903,10 @@ export const receipts: Record<string, ReceiptResult> = {
       "kind": "receipt",
       "runId": "00000004-0",
       "outcome": {
-        "text": "Deploy failed at step 1.",
+        "text": "Failed at step 1",
         "tone": "bad"
       },
+      "summary": "Deploy failed at step 1.",
       "flags": [],
       "project": "billing",
       "repoRoot": "/Users/you/code/billing",
@@ -1010,9 +1016,10 @@ export const receipts: Record<string, ReceiptResult> = {
       "kind": "receipt",
       "runId": "00000006-0",
       "outcome": {
-        "text": "Deploy failed at step 0.",
+        "text": "Failed at step 0",
         "tone": "bad"
       },
+      "summary": "Deploy failed at step 0.",
       "flags": [],
       "project": "blog",
       "repoRoot": "/Users/you/code/blog",
@@ -1086,9 +1093,10 @@ export const receipts: Record<string, ReceiptResult> = {
       "kind": "receipt",
       "runId": "0000000a-0",
       "outcome": {
-        "text": "Deploy run succeeded.",
+        "text": "Succeeded",
         "tone": "good"
       },
+      "summary": "Deploy run succeeded.",
       "flags": [],
       "project": "shop",
       "repoRoot": "/Users/you/tmp/shop-copy",
@@ -1152,9 +1160,10 @@ export const receipts: Record<string, ReceiptResult> = {
       "kind": "receipt",
       "runId": "00000002-0",
       "outcome": {
-        "text": "Deploy run succeeded.",
+        "text": "Succeeded",
         "tone": "good"
       },
+      "summary": "Deploy run succeeded.",
       "flags": [],
       "project": "shop",
       "repoRoot": "/Users/you/code/shop",
@@ -1218,9 +1227,10 @@ export const receipts: Record<string, ReceiptResult> = {
       "kind": "receipt",
       "runId": "00000003-0",
       "outcome": {
-        "text": "Deploy was cancelled before changes.",
+        "text": "Cancelled before changes",
         "tone": "neutral"
       },
+      "summary": "Deploy was cancelled before changes.",
       "flags": [],
       "project": "shop",
       "repoRoot": "/Users/you/code/shop",
@@ -1342,7 +1352,7 @@ export const slips: Record<string, SlipView> = {
     },
     "notes": [],
     "outcome": {
-      "text": "Deploy run succeeded.",
+      "text": "Succeeded",
       "tone": "good"
     },
     "plan": "deploy",
@@ -1372,6 +1382,7 @@ export const slips: Record<string, SlipView> = {
         "status": "ok"
       }
     ],
+    "summary": "Deploy run succeeded.",
     "target": "qa1:/var/www/shop",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "watch": {
@@ -1456,6 +1467,7 @@ export const slips: Record<string, SlipView> = {
         "status": "running"
       }
     ],
+    "summary": null,
     "target": "staging1:/var/www/shop",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "watch": {

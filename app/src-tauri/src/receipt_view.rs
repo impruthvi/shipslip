@@ -37,7 +37,10 @@ pub enum SlipView {
 #[serde(rename_all = "camelCase")]
 pub struct ReceiptView {
     pub run_id: String,
+    /// The short headline, e.g. "Failed at step 2".
     pub outcome: OutcomeView,
+    /// The receipt's own sentence for a finished run.
+    pub summary: Option<String>,
     pub flags: Vec<FlagView>,
     pub project: String,
     pub repo_root: String,
@@ -144,10 +147,6 @@ pub fn slip(result: Result<Receipt, ReceiptError>) -> SlipView {
 fn receipt_view(receipt: &Receipt) -> ReceiptView {
     let badge = receipt.badge();
     let target = &receipt.target;
-    let outcome = match &receipt.outcome {
-        Some(outcome) if !badge.unfinished => outcome.summary(),
-        _ => badge.headline(),
-    };
     let mut steps = Vec::new();
     if let Some(status) = &receipt.maintenance_down_status {
         steps.push(step(
@@ -179,9 +178,14 @@ fn receipt_view(receipt: &Receipt) -> ReceiptView {
     ReceiptView {
         run_id: escape_field(&receipt.run_id),
         outcome: OutcomeView {
-            text: escape_field(&outcome),
+            text: escape_field(&badge.headline()),
             tone: tone(&badge),
         },
+        summary: receipt
+            .outcome
+            .as_ref()
+            .filter(|_| !badge.unfinished)
+            .map(|outcome| escape_field(&outcome.summary())),
         flags: flags(&badge),
         project: escape_field(&receipt.project),
         repo_root: escape_field(&receipt.repo_root),
@@ -319,7 +323,8 @@ mod tests {
         let fx = Fixture::new();
         let view = open(&fx, &run(1, "staging"));
         assert_eq!(view.run_id, "00000001-0");
-        assert_eq!(view.outcome.text, "Deploy run succeeded.");
+        assert_eq!(view.outcome.text, "Succeeded");
+        assert_eq!(view.summary.as_deref(), Some("Deploy run succeeded."));
         assert_eq!(view.outcome.tone, Tone::Good);
         assert_eq!((view.env.as_str(), view.production), ("staging", false));
         assert_eq!(view.target, "web1:/srv/app");

@@ -1,5 +1,6 @@
 import type { CompareLine } from "./compare";
 import { Mark } from "./Mark";
+import type { PaneView } from "./slipTarget";
 import { lowerFirst } from "./text";
 import type { EnvCellView, FlagView, Tone } from "./types";
 import { WarningIcon } from "./Warning";
@@ -51,13 +52,27 @@ function Flag({ flag }: { flag: FlagView }) {
   );
 }
 
-function Warning({ text }: { text: string }) {
+function Warning({ text, onOpen }: { text: string; onOpen?: () => void }) {
   return (
     <div className="cell-line cell-warning">
       <WarningIcon />
-      <span className="sentence">{text}</span>
+      {onOpen ? (
+        <button type="button" className="cell-open sentence" onClick={stop(onOpen)}>
+          {text}
+        </button>
+      ) : (
+        <span className="sentence">{text}</span>
+      )}
     </div>
   );
+}
+
+/** A click on a line inside the cell opens that receipt, not the cell's own. */
+function stop(handler: () => void) {
+  return (event: { stopPropagation: () => void }) => {
+    event.stopPropagation();
+    handler();
+  };
 }
 
 function compareText(line: CompareLine): { text: string; muted: boolean } {
@@ -76,9 +91,11 @@ interface Props {
   selected?: boolean;
   /** Slot 3, only in the source column of a picked pair. */
   compareLine?: CompareLine;
+  /** Opens one of the cell's other receipts in the pane. */
+  onOpen?: (view: PaneView) => void;
 }
 
-export function Cell({ cell, selected = false, compareLine }: Props) {
+export function Cell({ cell, selected = false, compareLine, onOpen }: Props) {
   const never = cell.mark === "noCode" && cell.receipt === null;
   const state = stateLine(cell);
   const last = cell.lastAttempt;
@@ -99,8 +116,12 @@ export function Cell({ cell, selected = false, compareLine }: Props) {
           <span className={`cell-words sentence${never ? " muted" : ""}`}>{cell.words}</span>
         )}
       </div>
-      {cell.qualifiers.map((text) => (
-        <Warning key={text} text={text} />
+      {cell.qualifiers.map((text, index) => (
+        <Warning
+          key={text}
+          text={text}
+          onOpen={index === 0 && cell.staleReceipt !== null && onOpen ? () => onOpen("stale") : undefined}
+        />
       ))}
       {state && <div className={`cell-line ${state.className}`}>{state.text}</div>}
       {compareLine && <CompareRow line={compareLine} />}
@@ -112,9 +133,15 @@ export function Cell({ cell, selected = false, compareLine }: Props) {
       {last && (
         <>
           <div className="cell-tear" />
-          <div className="cell-line cell-last muted">
-            Last: {lowerFirst(last.outcome.text)} · {last.age}
-          </div>
+          {onOpen ? (
+            <button type="button" className="cell-line cell-last cell-open muted" onClick={stop(() => onOpen("last"))}>
+              Last: {lowerFirst(last.outcome.text)} · {last.age}
+            </button>
+          ) : (
+            <div className="cell-line cell-last muted">
+              Last: {lowerFirst(last.outcome.text)} · {last.age}
+            </div>
+          )}
           {last.flags
             .filter((flag) => flag.bad)
             .map((flag) => (

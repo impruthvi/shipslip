@@ -10,7 +10,7 @@ vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
     compare: (g: number, row: number, a: number, b: number) => compare(g, row, a, b),
-    loadReceipt: vi.fn(),
+    loadReceipt: async () => ({ kind: "notFound" }),
     copyText: vi.fn(),
     onFocus: async (handler: () => void) => {
       window.addEventListener("focus", handler);
