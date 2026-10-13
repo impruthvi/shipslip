@@ -145,3 +145,29 @@ test("a refresh keeps the answers it has while it asks again", async () => {
   expect(shopStaging()).toHaveTextContent("staging is 4 commits ahead of production");
   expect(shopStaging()).not.toHaveTextContent("comparing…");
 });
+
+test("a refresh without one of the compared envs clears the pair, its lines and markers", async () => {
+  compare.mockResolvedValue({ kind: "notFound" });
+  render(<App />);
+  await settle();
+  pick("staging → production");
+  await settle();
+  expect(screen.getAllByRole("img", { name: "compared from" }).length).toBeGreaterThan(0);
+
+  const prod = map.map.envs.indexOf("production");
+  const withoutProd = {
+    ...map,
+    generation: map.generation + 1,
+    map: {
+      ...map.map,
+      envs: map.map.envs.filter((_, i) => i !== prod),
+      rows: map.map.rows.map((row) => ({ ...row, cells: row.cells.filter((_, i) => i !== prod) })),
+    },
+  };
+  loadMap.mockResolvedValueOnce(withoutProd);
+  await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "r", metaKey: true })));
+  await settle();
+  expect(screen.queryByLabelText("Compare")).not.toBeInTheDocument();
+  expect(document.querySelector(".cell-compare")).toBeNull();
+  expect(screen.queryAllByRole("img", { name: "compared from" })).toHaveLength(0);
+});
