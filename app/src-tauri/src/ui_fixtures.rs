@@ -107,6 +107,9 @@ fn release_map(fx: &Fixture) {
 
     let mut shop = b.deploy("shop", "staging", 62, &sha('a'));
     shop["watch"] = watch(&[("QueryException", 9), ("TypeError", 2)]);
+    // Server text is untrusted: a bidi override, a newline and markup.
+    shop["watch"]["new_errors"][1]["variants"][0]["message"] =
+        json!("Unsupported operand \u{202e}gnp.exe\n<b>bold</b>");
     shop["smoke"] = json!({"Passed": {"status": 200, "latency_ms": 412}});
     shop["target"]["production"] = json!(false);
     b.save(&shop);
@@ -129,7 +132,8 @@ fn release_map(fx: &Fixture) {
     failed["steps"][1]["output"] = json!([
         "   INFO  Running migrations.",
         "  2026_10_09_add_discount_code ......................... FAIL",
-        "SQLSTATE[42000]: Syntax error or access violation"
+        "SQLSTATE[42000]: Syntax error or access violation",
+        "\u{1b}[31m<img src=x onerror=alert(1)>\u{1b}[0m \u{202e}fdp.exe"
     ]);
     b.save(&failed);
     let receipt = b.deploy("billing", "production", 8640, &sha('d'));

@@ -676,7 +676,7 @@ export const receipts: Record<string, ReceiptResult> = {
               {
                 "count": 2,
                 "location": "app/Http/Controllers/CheckoutController.php:88",
-                "message": "SQLSTATE[42S22]: Column not found: 1054 Unknown column 'discount_code' in 'field list'"
+                "message": "Unsupported operand \\u{202e}gnp.exe\\x0a<b>bold</b>"
               }
             ],
             "moreVariants": 0
@@ -944,7 +944,8 @@ export const receipts: Record<string, ReceiptResult> = {
           "output": [
             "   INFO  Running migrations.",
             "  2026_10_09_add_discount_code ......................... FAIL",
-            "SQLSTATE[42000]: Syntax error or access violation"
+            "SQLSTATE[42000]: Syntax error or access violation",
+            "<img src=x onerror=alert(1)> \\u{202e}fdp.exe"
           ]
         }
       ],
