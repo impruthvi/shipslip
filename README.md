@@ -484,6 +484,31 @@ when the approved config now deploys to a different server or path than the
 newest receipt, until a run uses the new one. `--compare` uses your local checkout to count commits and notes an
 incomplete deploy or dirty tree on either side.
 
+### Desktop app (local build)
+
+The macOS app shows the same receipts and approvals as `slip status` in one
+window: a grid of apps and environments, each cell holding the last code a
+receipt records. Select a cell to read its receipt beside the grid. Like
+`slip status`, it shows what this Mac recorded, not what a server is running.
+It never contacts a server and never runs a deploy; comparing two environments
+runs `git` in your local checkout, and next steps are commands you copy into
+the terminal.
+
+There is no download yet. To build it you need macOS with the Xcode Command
+Line Tools, Rust 1.90 or newer, and Node 26:
+
+```sh
+cd app
+npm ci
+npm run tauri dev                    # run it
+npm run tauri build -- --bundles app # build src-tauri/target/release/bundle/macos/Shipslip.app
+npm test                             # frontend tests
+```
+
+The window refreshes when it gains focus; ⌘R refreshes now. Arrow keys move
+through the grid, Enter opens the receipt, and Esc returns to the grid. Below
+1200 px wide the receipt opens as a drawer, toggled with ⌘I.
+
 ## Post-deploy checks
 
 Shipslip compares log entries against the last 2 MiB of the log and previously

@@ -8,6 +8,10 @@ change the library API.
 
 ### Added
 
+- A macOS desktop app, built locally from `app/`, shows the release map from
+  `slip status` and opens each cell's receipt beside it. It reads the same
+  files on this Mac and never contacts a server. See
+  [Desktop app (local build)](README.md#desktop-app-local-build).
 - Library: `stale_hint_text` and `newer_elsewhere_text` give a release-map
   cell's out-of-date warnings in words, `describe_smoke` gives a smoke check
   result in words, and `compare_envs_with` compares two environments with a
