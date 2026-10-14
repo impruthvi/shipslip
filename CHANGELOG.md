@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-14
+
 ### Added
 
 - A macOS desktop app, built locally from `app/`, shows the release map from
@@ -381,6 +383,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.7.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.7.1
 [0.7.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.7.0
 [0.6.2]: https://github.com/impruthvi/shipslip/releases/tag/v0.6.2
 [0.6.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.6.1
