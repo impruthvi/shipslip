@@ -6,6 +6,12 @@ change the library API.
 
 ## [Unreleased]
 
+### Changed
+
+- `slip logs` summary and variant lines show the log message without the
+  JSON context Laravel appends, so `Payment failed {"exception":"[object] …`
+  reads `Payment failed`. The detail view still shows the whole entry.
+
 ### Added
 
 - `slip logs ENV` counts every entry in the window by level in its header,
