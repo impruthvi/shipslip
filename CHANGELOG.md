@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-21
+
 ### Added
 
 - `slip logs ENV ID` lists other entries that share the latest entry's
@@ -413,6 +415,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.8.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.8.0
 [0.7.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.7.1
 [0.7.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.7.0
 [0.6.2]: https://github.com/impruthvi/shipslip/releases/tag/v0.6.2
