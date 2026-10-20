@@ -15,7 +15,7 @@ use crate::{
 };
 
 mod history;
-mod markdown;
+pub(crate) mod markdown;
 mod overview;
 
 pub use history::{

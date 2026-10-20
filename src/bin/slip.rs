@@ -905,6 +905,10 @@ struct LogsOptions {
     channels: bool,
     all: bool,
     max_bytes: Option<u64>,
+    /// Show every stack frame in a group's detail instead of folding vendor runs.
+    full: bool,
+    /// Print a group's detail as Markdown.
+    md: bool,
 }
 
 fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
@@ -941,6 +945,8 @@ fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
             "--raw" => options.raw = true,
             "--channels" => options.channels = true,
             "--all" => options.all = true,
+            "--full" => options.full = true,
+            "--md" => options.md = true,
             flag if flag.starts_with("--") => {
                 return Err(invalid_input(format!(
                     "unknown logs option `{flag}`; run `slip --help` for usage"
@@ -950,6 +956,18 @@ fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
             query if options.query.is_none() => options.query = Some(query.to_string()),
             _ => return Err(invalid_input("logs accepts one group ID or row number").into()),
         }
+    }
+    if (options.full || options.md) && (options.raw || options.channels) {
+        return Err(invalid_input(
+            "--full and --md change one group's detail; they don't apply to --raw or --channels",
+        )
+        .into());
+    }
+    if (options.full || options.md) && options.query.is_none() {
+        return Err(invalid_input(
+            "--full and --md change one group's detail; add a group ID or row number",
+        )
+        .into());
     }
     if options.raw && options.query.is_some() {
         return Err(invalid_input("--raw shows entries, not a group; drop the group ID").into());
@@ -1021,13 +1039,21 @@ async fn logs_command(
     let Some(query) = options.query else {
         print!(
             "{}",
-            logs::render_summary(&snapshot, &groups, level, options.all)
+            logs::render_summary(&snapshot, &groups, level, grep, options.all)
         );
         return Ok(ExitCode::SUCCESS);
     };
     match logs::find(&groups, &query) {
         Lookup::Found(group) => {
-            print!("{}", logs::render_detail(&snapshot, group));
+            if options.md {
+                let filter = logs::DetailFilter { level, grep };
+                print!(
+                    "{}",
+                    logs::render_detail_md(&snapshot, group, &filter, options.full)
+                );
+            } else {
+                print!("{}", logs::render_detail(&snapshot, group, options.full));
+            }
             Ok(ExitCode::SUCCESS)
         }
         Lookup::Ambiguous(matches) => {
@@ -1096,6 +1122,8 @@ fn print_help() {
          \x20 --raw              Print entries instead of groups\n\
          \x20 --channels         Show files, format, window and baseline coverage by channel\n\
          \x20 --all              Show every group, not just the first 20\n\
+         \x20 --full             With ID|ROW: show every stack frame (default folds vendor runs)\n\
+         \x20 --md               With ID|ROW: print the detail as Markdown to paste\n\
          \x20 --max-bytes SIZE   Window read limit, like 20m (default 12m total, 4m/channel)\n\
          \x20                    Baseline has a separate 6m total, 2m/channel limit\n\n\
          Receipts options:\n\
@@ -1946,6 +1974,24 @@ mod tests {
         .unwrap();
         assert!(channels.channels);
         assert_eq!(channels.since, Some(Since::Ago(7 * 86400)));
+        let detail = parse_logs_options(&["2".into(), "--md".into(), "--full".into()]).unwrap();
+        assert_eq!(detail.query.as_deref(), Some("2"));
+        assert!(detail.md && detail.full);
+        for (args, message) in [
+            (vec!["--md"], "add a group ID or row number"),
+            (
+                vec!["--raw", "--full"],
+                "don't apply to --raw or --channels",
+            ),
+            (
+                vec!["--channels", "--md"],
+                "don't apply to --raw or --channels",
+            ),
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            let error = parse_logs_options(&args).unwrap_err().to_string();
+            assert!(error.contains(message), "{error}");
+        }
         for args in [
             vec!["slip", "logs"],
             vec!["slip", "logs", "production", "--since"],
@@ -1962,6 +2008,10 @@ mod tests {
             vec!["slip", "logs", "production", "1", "2"],
             vec!["slip", "logs", "production", "--follow"],
             vec!["slip", "logs", "production", "--channels", "--raw"],
+            vec!["slip", "logs", "production", "--md"],
+            vec!["slip", "logs", "production", "--full"],
+            vec!["slip", "logs", "production", "--raw", "--md"],
+            vec!["slip", "logs", "production", "--channels", "--full"],
             vec!["slip", "logs", "production", "--channels", "--all"],
             vec!["slip", "logs", "production", "--channels", "qmkte"],
             vec![
