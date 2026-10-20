@@ -382,7 +382,7 @@ async fn logs_window_and_baseline_budgets_stay_separate_and_fair_across_busy_cha
         .unwrap();
     assert_eq!(new.badge, Badge::New);
     assert!(new.partial);
-    assert!(logs::render_detail(&snapshot, new).contains("First seen: —"));
+    assert!(logs::render_detail(&snapshot, new, true).contains("First seen: —"));
     let quiet = groups
         .groups
         .iter()
@@ -1071,6 +1071,7 @@ async fn logs_caps_file_slots_and_channels_and_reports_stale_non_disk_hint() {
         &snapshot,
         &logs::group(&snapshot, Level::Error, None),
         Level::Error,
+        None,
         false,
     );
     assert!(summary.contains("coverage is incomplete"));
@@ -1109,7 +1110,7 @@ async fn logs_snapshot_merges_daily_files_and_changes_no_app_or_run_files() {
         .find(|g| g.class == "QueryException")
         .unwrap();
     assert_eq!(query.count, 4);
-    let detail = logs::render_detail(&snapshot, query);
+    let detail = logs::render_detail(&snapshot, query, true);
     assert!(detail.contains("[stacktrace]"));
     assert!(detail.contains("Checkout.php(3)"));
     let raw = logs::render_raw(&snapshot, Level::Debug, None);
@@ -1213,7 +1214,7 @@ async fn logs_byte_limit_and_partial_lookup_are_honest() {
         assert!(!snapshot.channels[0].complete);
         assert!(logs::render_miss(&snapshot, "zz").contains("not found in what was read"));
         let groups = logs::group(&snapshot, Level::Error, None);
-        let summary = logs::render_summary(&snapshot, &groups, Level::Error, false);
+        let summary = logs::render_summary(&snapshot, &groups, Level::Error, None, false);
         assert!(summary.contains("≥") || summary.contains("coverage is incomplete"));
     }
 }
@@ -1343,7 +1344,7 @@ async fn logs_dst_keeps_second_pass_entries_and_warns_in_raw_mode() {
     let groups = logs::group(&snapshot, Level::Error, None);
     assert_eq!(groups.groups.len(), 1);
     assert_eq!(groups.groups[0].count, 2);
-    assert!(logs::render_detail(&snapshot, &groups.groups[0]).contains("second pass"));
+    assert!(logs::render_detail(&snapshot, &groups.groups[0], true).contains("second pass"));
     assert!(
         logs::render_raw(&snapshot, Level::Debug, None).contains("clock changed in this window")
     );
@@ -1368,6 +1369,7 @@ async fn logs_missing_or_unreadable_files_do_not_report_all_clear() {
         &snapshot,
         &logs::group(&snapshot, Level::Error, None),
         Level::Error,
+        None,
         false,
     );
     assert!(summary.contains("no log file found"));
