@@ -1684,6 +1684,282 @@ fn json_tail(text: &str) -> bool {
     values > 0
 }
 
+/// Context keys that name one request or job, narrowest first.
+const ID_KEYS: [&str; 5] = [
+    "request_id",
+    "trace_id",
+    "correlation_id",
+    "job_id",
+    "batch_id",
+];
+/// Keys whose value is copied into queued jobs when set through `Context`.
+const JOB_SPANNING_KEYS: [&str; 2] = ["trace_id", "correlation_id"];
+/// Lines shown on each side of the entry in a same-request section.
+const RELATED_SIDE: usize = 10;
+/// Trailing JSON larger than this is not read for IDs (exception context aside).
+const ID_TAIL_BYTES: usize = 16 * 1024;
+/// Candidate JSON starts tried from the end when there is no exception context.
+const ID_TRIES: usize = 4;
+
+/// An ID read from the top level of an entry's context or extra JSON.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestId {
+    pub key: &'static str,
+    pub value: String,
+    /// Context and extra both had this key with different values; context won.
+    pub conflict: bool,
+}
+
+/// The context and extra objects Laravel appended to `entry`, parsed as JSON
+/// after re-escaping the line breaks Monolog leaves inside exception strings.
+fn context_objects(entry: &Entry) -> Vec<serde_json::Map<String, serde_json::Value>> {
+    let tail = entry.message();
+    let start = match tail.find("\"exception\":\"[object] (") {
+        Some(key) => tail[..key].rfind(" {").map(|at| vec![at]),
+        None => None,
+    };
+    let starts = start.unwrap_or_else(|| {
+        let mut starts: Vec<usize> = tail
+            .match_indices(' ')
+            .map(|(at, _)| at)
+            .filter(|at| matches!(tail.as_bytes().get(at + 1), Some(b'{' | b'[')))
+            .filter(|at| tail.len() - at <= ID_TAIL_BYTES)
+            .collect();
+        starts.reverse();
+        starts.truncate(ID_TRIES);
+        starts.reverse();
+        starts
+    });
+    for at in starts {
+        let text = tail[at + 1..]
+            .replace('\r', "\\r")
+            .replace('\n', "\\n")
+            .replace('\t', "\\t");
+        let mut objects = Vec::new();
+        let mut ok = true;
+        for value in serde_json::Deserializer::from_str(&text).into_iter::<serde_json::Value>() {
+            match value {
+                Ok(serde_json::Value::Object(map)) if objects.len() < 2 => objects.push(map),
+                Ok(serde_json::Value::Array(items)) if items.is_empty() && objects.len() < 2 => {
+                    objects.push(serde_json::Map::new())
+                }
+                _ => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok && !objects.is_empty() {
+            return objects;
+        }
+    }
+    Vec::new()
+}
+
+fn id_value(key: &str, value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text)
+            if (8..=128).contains(&text.len())
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._:-".contains(&byte)) =>
+        {
+            Some(text.clone())
+        }
+        serde_json::Value::Number(number)
+            if matches!(key, "job_id" | "batch_id") && number.is_u64() =>
+        {
+            Some(number.to_string())
+        }
+        _ => None,
+    }
+}
+
+/// The narrowest request or job ID in `entry`'s context or extra, if any.
+pub fn request_id(entry: &Entry) -> Option<RequestId> {
+    let objects = context_objects(entry);
+    for key in ID_KEYS {
+        let values: Vec<String> = objects
+            .iter()
+            .filter_map(|object| object.get(key).and_then(|value| id_value(key, value)))
+            .collect();
+        if let Some(first) = values.first() {
+            return Some(RequestId {
+                key,
+                value: first.clone(),
+                conflict: values.iter().any(|value| value != first),
+            });
+        }
+    }
+    None
+}
+
+/// `word` as typed in a shell: bare when it is plainly safe, quoted otherwise.
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:/@%+=,-".contains(&byte));
+    if plain {
+        word.into()
+    } else {
+        shell_quote(word)
+    }
+}
+
+/// Entries that share a request or job ID with one entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Related {
+    pub id: RequestId,
+    /// Entry indices before and after the chosen entry, in time order.
+    pub before: Vec<usize>,
+    pub after: Vec<usize>,
+    /// Matching entries not shown.
+    pub more: u64,
+    /// Some channel was not fully read or understood, so lines may be missing.
+    pub partial: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Correlation {
+    Shared(Related),
+    /// The entry has no usable ID.
+    NoId,
+    /// The entry was cut at the size limit before any ID was found.
+    Cut,
+}
+
+/// Other entries in the window that share `entry`'s request or job ID.
+/// This is correlation, not cause: it says the lines came from the same
+/// request, not that one led to the other.
+pub fn related(snapshot: &Snapshot, entry: usize) -> Correlation {
+    let chosen = &snapshot.entries[entry];
+    let Some(id) = request_id(chosen) else {
+        return if chosen.truncated {
+            Correlation::Cut
+        } else {
+            Correlation::NoId
+        };
+    };
+    let mut matches: Vec<usize> = snapshot
+        .entries
+        .iter()
+        .enumerate()
+        .filter(|(index, other)| {
+            *index == entry
+                || (other.text.contains(&id.value)
+                    && request_id(other)
+                        .is_some_and(|other| other.key == id.key && other.value == id.value))
+        })
+        .map(|(index, _)| index)
+        .collect();
+    matches.sort_by(|a, b| {
+        let (a_time, b_time) = (&snapshot.entries[*a].time, &snapshot.entries[*b].time);
+        a_time
+            .is_none()
+            .cmp(&b_time.is_none())
+            .then_with(|| a_time.cmp(b_time))
+            .then_with(|| a.cmp(b))
+    });
+    let at = matches
+        .iter()
+        .position(|index| *index == entry)
+        .unwrap_or(0);
+    let before = matches[at.saturating_sub(RELATED_SIDE)..at].to_vec();
+    let after = matches[at + 1..(at + 1 + RELATED_SIDE).min(matches.len())].to_vec();
+    Correlation::Shared(Related {
+        more: (matches.len() - 1 - before.len() - after.len()) as u64,
+        before,
+        after,
+        partial: coverage_incomplete(snapshot),
+        id,
+    })
+}
+
+/// The same-request section for a group's latest entry, or a short note when
+/// it has no ID. `window_args` are the user's `--since`/`--max-bytes` flags,
+/// repeated in the follow-up command so it reads the same window.
+pub fn render_related(snapshot: &Snapshot, group: &Group, window_args: &[String]) -> String {
+    let latest = &snapshot.entries[group.latest];
+    let related = match related(snapshot, group.latest) {
+        Correlation::Shared(related) => related,
+        Correlation::Cut => {
+            return "\nEntry was cut at 256 KiB, so an ID at its end may be missing.\n".into()
+        }
+        Correlation::NoId if latest.level >= Level::Error => {
+            return "\nNo request ID in this entry. Laravel's Context::add('request_id', …) in a middleware adds one to every log line.\n".into()
+        }
+        Correlation::NoId => return String::new(),
+    };
+    let id = &related.id;
+    let mut out = String::new();
+    out.push('\n');
+    push_wrapped(
+        &mut out,
+        "",
+        &format!(
+            "Shared {} {} (correlation, not cause{}):",
+            id.key,
+            id.value,
+            if JOB_SPANNING_KEYS.contains(&id.key) {
+                "; can include queued jobs"
+            } else {
+                ""
+            }
+        ),
+    );
+    if id.conflict {
+        out.push_str("  context and extra disagree; using context\n");
+    }
+    let line = |index: usize| {
+        let entry = &snapshot.entries[index];
+        format!(
+            "  {}  {}  {:<8} {}{}\n",
+            entry.time.as_deref().unwrap_or("time unknown"),
+            escape_field(&snapshot.channels[entry.channel].name),
+            entry.level.name().to_ascii_uppercase(),
+            escape_field(&clip_utf8(
+                without_context(entry.message().lines().next().unwrap_or("")),
+                120
+            )),
+            if index == group.latest {
+                "  ← this entry"
+            } else {
+                ""
+            }
+        )
+    };
+    for index in related
+        .before
+        .iter()
+        .chain([&group.latest])
+        .chain(&related.after)
+    {
+        out.push_str(&line(*index));
+    }
+    if related.before.is_empty() && related.after.is_empty() {
+        out.push_str("  no other entry in this window has this ID\n");
+    }
+    if related.more > 0 {
+        // One unwrapped line, so it can be pasted as is.
+        let command = ["slip", "logs", &snapshot.env, "--raw", "--grep", &id.value]
+            .into_iter()
+            .chain(window_args.iter().map(String::as_str))
+            .map(shell_word)
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!(
+            "  +{} more; broader text search: {}\n",
+            related.more,
+            escape_field(&command)
+        ));
+    }
+    if related.partial {
+        out.push_str("  (some channels only partly read)\n");
+    }
+    out
+}
+
 fn matches_grep(entry: &Entry, grep: Option<&str>) -> bool {
     grep.is_none_or(|grep| entry.text.to_lowercase().contains(grep))
 }
@@ -3292,6 +3568,11 @@ mod tests {
             render_summary(&snapshot, &groups, Level::Error, None, false),
             render_detail(&snapshot, &groups.groups[0], true),
             render_detail(&snapshot, &groups.groups[0], false),
+            render_related(
+                &snapshot,
+                &groups.groups[0],
+                &["--since".into(), "\x1b[2J".into()],
+            ),
             render_detail_md(
                 &snapshot,
                 &groups.groups[0],
@@ -3792,5 +4073,219 @@ mod tests {
                 || render_detail(&snapshot, &groups.groups[1], false)
                     .contains("{\"exception\":\"[object]")
         );
+    }
+
+    fn one(message: &str) -> Entry {
+        let line = entry_line("2026-10-01 01:00:00", "ERROR", message);
+        parse_entries(line.as_bytes(), 0, 0, "laravel.log").remove(0)
+    }
+
+    #[test]
+    fn request_ids_come_from_top_level_context_or_extra_only() {
+        let id =
+            |message: &str| request_id(&one(message)).map(|id| (id.key, id.value, id.conflict));
+        let uuid = "2eee31e7-23cc-4849-b166-d0927fd7251f";
+        // Laravel 13 with Context::add: empty context omitted, extra after two spaces.
+        assert_eq!(
+            id(&format!(
+                "Payment retry failed  {{\"trace_id\":\"{uuid}\"}}"
+            )),
+            Some(("trace_id", uuid.to_string(), false))
+        );
+        // Log::withContext puts it in context; context and extra both present.
+        assert_eq!(
+            id("Saved {\"request_id\":\"req-12345678\"} {\"url\":\"/x\"}"),
+            Some(("request_id", "req-12345678".into(), false))
+        );
+        // request_id is narrower than trace_id, wherever each sits.
+        assert_eq!(
+            id("Saved {\"trace_id\":\"trace-1234567\"} {\"request_id\":\"req-12345678\"}"),
+            Some(("request_id", "req-12345678".into(), false))
+        );
+        // Context wins when the two disagree, and says so.
+        assert_eq!(
+            id("Saved {\"request_id\":\"from-context\"} {\"request_id\":\"from-extra1\"}"),
+            Some(("request_id", "from-context".into(), true))
+        );
+        // After a multi-line exception string, at the top level of context.
+        let exception = format!(
+            "Boom {{\"exception\":\"[object] (RuntimeException(code: 0): Boom at /srv/app/app/X.php:3)\n[stacktrace]\n#0 /srv/app/vendor/a/B.php(1): \\\"request_id\\\":\\\"from-trace-text\\\"\n#1 {{main}}\n\",\"request_id\":\"req-after-trace\"}} {{\"trace_id\":\"{uuid}\"}}"
+        );
+        assert_eq!(
+            id(&exception),
+            Some(("request_id", "req-after-trace".into(), false))
+        );
+        // Not top level, not context, or not a usable value: no ID.
+        for message in [
+            "Saved {\"payload\":{\"request_id\":\"nested-1234567\"}}",
+            "Got {\"request_id\":\"in-message-123\"} from the API {\"x\":1}",
+            "Saved {\"session_id\":\"session-1234567\"}",
+            "Saved {\"request_id\":\"short\"}",
+            "Saved {\"request_id\":\"has space 12345\"}",
+            "Saved {\"request_id\":\"bidi\u{202e}12345678\"}",
+            "Saved {\"request_id\":12345678}",
+            "Saved {\"request_id\":\"a\"",
+            "No context at all",
+        ] {
+            assert_eq!(id(message), None, "{message}");
+        }
+        assert_eq!(
+            id("Ran {\"job_id\":42}"),
+            Some(("job_id", "42".into(), false))
+        );
+        let long = format!("Saved {{\"request_id\":\"{}\"}}", "a".repeat(129));
+        assert_eq!(id(&long), None);
+        // Trailing JSON over the size cap is not read.
+        let big = format!(
+            "Saved {{\"request_id\":\"req-12345678\",\"pad\":\"{}\"}}",
+            "x".repeat(ID_TAIL_BYTES)
+        );
+        assert_eq!(id(&big), None);
+    }
+
+    #[test]
+    fn related_lines_share_key_and_value_in_time_order() {
+        let lines = [
+            entry_line(
+                "2026-10-01 01:00:05",
+                "WARNING",
+                "Checkout started  {\"trace_id\":\"trace-aaaaaaaa\"}",
+            ),
+            entry_line(
+                "2026-10-01 01:00:01",
+                "INFO",
+                "Cart loaded  {\"trace_id\":\"trace-aaaaaaaa\"}",
+            ),
+            entry_line(
+                "2026-10-01 01:00:02",
+                "INFO",
+                "Other request  {\"trace_id\":\"trace-bbbbbbbb\"}",
+            ),
+            entry_line(
+                "2026-10-01 01:00:03",
+                "INFO",
+                "Same value, other key  {\"job_id\":\"trace-aaaaaaaa\"}",
+            ),
+            entry_line(
+                "2026-10-01 01:00:09",
+                "ERROR",
+                "Payment failed  {\"trace_id\":\"trace-aaaaaaaa\"}",
+            ),
+        ]
+        .concat();
+        let mut snapshot = snapshot_of(&lines, true);
+        snapshot.entries[1].time = None;
+        let Correlation::Shared(related) = related(&snapshot, 4) else {
+            panic!("expected shared lines")
+        };
+        assert_eq!(related.id.key, "trace_id");
+        assert_eq!(related.before, [0]);
+        assert_eq!(related.after, [1]); // untimed sorts after timed
+        assert_eq!(related.more, 0);
+        assert!(!related.partial);
+
+        let groups = group(&snapshot, Level::Error, None);
+        let out = render_related(&snapshot, &groups.groups[0], &[]);
+        assert!(
+            out.contains(
+                "Shared trace_id trace-aaaaaaaa (correlation, not cause; can include queued jobs):"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("WARNING  Checkout started\n"), "{out}");
+        assert!(
+            out.contains("ERROR    Payment failed  ← this entry\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("time unknown  laravel  INFO     Cart loaded\n"),
+            "{out}"
+        );
+        assert!(!out.contains("Other request") && !out.contains("other key"));
+        assert!(!out.contains("more;"));
+    }
+
+    #[test]
+    fn related_lines_cap_each_side_and_print_a_broader_search() {
+        let text: String = (0..25)
+            .map(|second| {
+                entry_line(
+                    &format!("2026-10-01 01:00:{second:02}"),
+                    if second == 12 { "ERROR" } else { "INFO" },
+                    &format!("step {second}  {{\"request_id\":\"req-12345678\"}}"),
+                )
+            })
+            .collect();
+        let snapshot = snapshot_of(&text, false);
+        let Correlation::Shared(related) = related(&snapshot, 12) else {
+            panic!("expected shared lines")
+        };
+        assert_eq!(related.before, (2..12).collect::<Vec<_>>());
+        assert_eq!(related.after, (13..23).collect::<Vec<_>>());
+        assert_eq!(related.more, 4);
+        assert!(related.partial);
+        let groups = group(&snapshot, Level::Error, None);
+        let args = [
+            "--since".to_string(),
+            "2026-10-01 00:00".into(),
+            "--max-bytes".into(),
+            "20m".into(),
+        ];
+        let out = render_related(&snapshot, &groups.groups[0], &args);
+        assert!(!out.contains("queued jobs"));
+        assert!(out.contains("+4 more; broader text search: slip logs production --raw --grep req-12345678 --since '2026-10-01 00:00' --max-bytes 20m"), "{out}");
+        assert!(out.contains("(some channels only partly read)"));
+        // The suggested search shows at least every matching line.
+        let raw = render_raw(&snapshot, Level::Debug, Some("req-12345678"));
+        for entry in &snapshot.entries {
+            assert!(raw.contains(&escape(&entry.text)));
+        }
+    }
+
+    #[test]
+    fn entries_without_an_id_get_a_tip_or_a_cut_note() {
+        let mut snapshot = snapshot_of(
+            &[
+                entry_line("2026-10-01 01:00:00", "ERROR", "RuntimeException: boom"),
+                entry_line("2026-10-01 01:00:01", "WARNING", "slow query"),
+            ]
+            .concat(),
+            true,
+        );
+        assert_eq!(related(&snapshot, 0), Correlation::NoId);
+        let groups = group(&snapshot, Level::Warning, None);
+        let error = groups
+            .groups
+            .iter()
+            .find(|group| group.class == "RuntimeException")
+            .unwrap();
+        assert!(render_related(&snapshot, error, &[])
+            .contains("No request ID in this entry. Laravel's Context::add"));
+        let warning = groups
+            .groups
+            .iter()
+            .find(|group| group.class != "RuntimeException")
+            .unwrap();
+        assert_eq!(render_related(&snapshot, warning, &[]), "");
+
+        snapshot.entries[0].truncated = true;
+        assert_eq!(related(&snapshot, 0), Correlation::Cut);
+        let groups = group(&snapshot, Level::Error, None);
+        assert_eq!(
+            render_related(&snapshot, &groups.groups[0], &[]),
+            "\nEntry was cut at 256 KiB, so an ID at its end may be missing.\n"
+        );
+
+        let alone = snapshot_of(
+            &entry_line(
+                "2026-10-01 01:00:00",
+                "ERROR",
+                "Boom  {\"request_id\":\"req-12345678\"}",
+            ),
+            true,
+        );
+        let groups = group(&alone, Level::Error, None);
+        assert!(render_related(&alone, &groups.groups[0], &[])
+            .contains("no other entry in this window has this ID"));
     }
 }

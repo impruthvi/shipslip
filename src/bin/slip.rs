@@ -909,6 +909,8 @@ struct LogsOptions {
     full: bool,
     /// Print a group's detail as Markdown.
     md: bool,
+    /// `--since` and `--max-bytes` as typed, for commands slip suggests.
+    window_args: Vec<String>,
 }
 
 fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
@@ -922,7 +924,9 @@ fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
         };
         match arg.as_str() {
             "--since" => {
-                options.since = Some(Since::parse(&value("--since")?).map_err(invalid_input)?)
+                let since = value("--since")?;
+                options.since = Some(Since::parse(&since).map_err(invalid_input)?);
+                options.window_args.extend(["--since".into(), since]);
             }
             "--level" => {
                 let name = value("--level")?;
@@ -936,6 +940,9 @@ fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
             "--grep" => options.grep = Some(value("--grep")?),
             "--max-bytes" => {
                 let size = value("--max-bytes")?;
+                options
+                    .window_args
+                    .extend(["--max-bytes".into(), size.clone()]);
                 options.max_bytes = Some(parse_size(&size).ok_or_else(|| {
                     invalid_input(format!(
                         "`--max-bytes {size}` must be a size like 500k or 20m"
@@ -1053,6 +1060,10 @@ async fn logs_command(
                 );
             } else {
                 print!("{}", logs::render_detail(&snapshot, group, options.full));
+                print!(
+                    "{}",
+                    logs::render_related(&snapshot, group, &options.window_args)
+                );
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -1114,7 +1125,8 @@ fn print_help() {
          \x20                                 gh reads the github.com GitHub CLI login\n\
          \x20 Token account is shown before use; token is not saved by Shipslip.\n\n\
          Logs options:\n\
-         \x20 ID|ROW             Show one group's latest entry and variants\n\
+         \x20 ID|ROW             Show one group's latest entry, variants, and lines\n\
+         \x20                    from the same request when it logs a request ID\n\
          \x20 --since S          30m, 6h, 7d, 2026-10-01 or \"2026-10-01 14:00\"\n\
          \x20                    Default: latest run, then checkout change, then 24h\n\
          \x20 --level L          This level and more severe (default error; --raw: debug)\n\
@@ -1977,6 +1989,20 @@ mod tests {
         let detail = parse_logs_options(&["2".into(), "--md".into(), "--full".into()]).unwrap();
         assert_eq!(detail.query.as_deref(), Some("2"));
         assert!(detail.md && detail.full);
+        let window = parse_logs_options(&[
+            "2".into(),
+            "--since".into(),
+            "2026-10-01 14:00".into(),
+            "--grep".into(),
+            "x".into(),
+            "--max-bytes".into(),
+            "8m".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            window.window_args,
+            ["--since", "2026-10-01 14:00", "--max-bytes", "8m"]
+        );
         for (args, message) in [
             (vec!["--md"], "add a group ID or row number"),
             (

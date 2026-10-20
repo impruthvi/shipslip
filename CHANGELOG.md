@@ -6,14 +6,14 @@ change the library API.
 
 ## [Unreleased]
 
-### Changed
-
-- `slip logs` summary and variant lines show the log message without the
-  JSON context Laravel appends, so `Payment failed {"exception":"[object] …`
-  reads `Payment failed`. The detail view still shows the whole entry.
-
 ### Added
 
+- `slip logs ENV ID` lists other entries that share the latest entry's
+  `request_id`, `trace_id`, `correlation_id`, `job_id` or `batch_id`, read
+  from the top level of Laravel's context or extra JSON. Errors without an ID
+  get a one-line tip on adding one with `Context::add`.
+- Library: `request_id`, `related`, `render_related`, `RequestId`, `Related`
+  and `Correlation`.
 - `slip logs ENV` counts every entry in the window by level in its header,
   regardless of `--level` and `--grep`.
 - `slip logs ENV ID` folds runs of three or more vendor stack frames; the first
@@ -26,6 +26,9 @@ change the library API.
 
 ### Changed
 
+- `slip logs` summary and variant lines show the log message without the
+  JSON context Laravel appends, so `Payment failed {"exception":"[object] …`
+  reads `Payment failed`. The detail view still shows the whole entry.
 - Counts are lower bounds (`≥`, `at least`) when a channel has lines slip
   couldn't parse, not only when it was partly read. Variant counts follow
   their group.

@@ -319,6 +319,17 @@ The summary header counts every entry in the window by level, for example
 `… 14 vendor frames (--full to show)`; the first frame, your app's frames and
 lines slip can't read as frames always stay. `--full` shows every frame.
 
+When the latest entry carries a request or job ID at the top level of its
+Laravel context, the detail view lists other entries in the window with the
+same ID, up to ten before and ten after, across all channels. Keys are tried
+in this order: `request_id`, `trace_id`, `correlation_id`, `job_id`,
+`batch_id`. This is correlation, not cause: the lines came from the same
+request (or, for `trace_id`, the jobs it queued), not necessarily one from
+another. Laravel adds no ID by default; a middleware that calls
+`Context::add('request_id', (string) Str::uuid())` puts one on every line. When
+more lines match, slip prints a `--raw --grep` command for the same window;
+being a text search, it can also show the ID mentioned elsewhere.
+
 `--md` prints a group's detail as Markdown for an issue or chat. It starts with
 the environment, log timezone, window (start to the time it was read),
 coverage, baseline, filters and slip version, so a paste still makes sense
