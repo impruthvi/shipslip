@@ -1580,7 +1580,7 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
                     badge: Badge::Seen,
                     signature,
                     channels: vec![entry.channel],
-                    message: clip_utf8(first_line, MESSAGE_BYTES),
+                    message: clip_utf8(without_context(first_line), MESSAGE_BYTES),
                     file_line: display,
                     count: 1,
                 });
@@ -1620,7 +1620,10 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
             );
         }
         let latest = &snapshot.entries[group.latest];
-        group.message = clip_utf8(latest.message().lines().next().unwrap_or(""), MESSAGE_BYTES);
+        group.message = clip_utf8(
+            without_context(latest.message().lines().next().unwrap_or("")),
+            MESSAGE_BYTES,
+        );
         group
             .variants
             .sort_by_key(|variant| std::cmp::Reverse(variant.count));
@@ -1637,6 +1640,48 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
         groups,
         overflow: overflow.len() as u64,
     }
+}
+
+/// Candidate JSON starts tried from the end of a line, so a long line can't
+/// make the search slow.
+const CONTEXT_TRIES: usize = 8;
+
+/// The first line of a message without the context and extra JSON that
+/// Laravel's formatter appends, for a short label. A Laravel exception's
+/// context starts on this line and closes lines later; any other context
+/// must be one or two complete JSON objects or arrays at the end.
+fn without_context(line: &str) -> &str {
+    if let Some(key) = line.find("\"exception\":\"[object] (") {
+        if let Some(start) = line[..key].rfind(" {") {
+            return line[..start].trim_end();
+        }
+    }
+    let mut cut = None;
+    let starts = line
+        .match_indices(' ')
+        .map(|(at, _)| at)
+        .filter(|at| matches!(line.as_bytes().get(at + 1), Some(b'{' | b'[')))
+        .collect::<Vec<_>>();
+    for &at in starts.iter().rev().take(CONTEXT_TRIES) {
+        if json_tail(&line[at + 1..]) {
+            cut = Some(at);
+        }
+    }
+    cut.map_or(line, |at| line[..at].trim_end())
+}
+
+/// `text` is one or two JSON objects or arrays and nothing else.
+fn json_tail(text: &str) -> bool {
+    let mut values = 0;
+    for value in serde_json::Deserializer::from_str(text).into_iter::<serde_json::Value>() {
+        match value {
+            Ok(serde_json::Value::Object(_) | serde_json::Value::Array(_)) if values < 2 => {
+                values += 1
+            }
+            _ => return false,
+        }
+    }
+    values > 0
 }
 
 fn matches_grep(entry: &Entry, grep: Option<&str>) -> bool {
@@ -3680,5 +3725,72 @@ mod tests {
         for bad in ["", "0530", "+53", "+05:30", "+0a30"] {
             assert_eq!(local_time(epoch, bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn labels_drop_laravel_context_and_extra() {
+        // Lines as Laravel 13 wrote them on the test server.
+        let cases = [
+            (
+                "Invoice backfill failed: column totals_cents is missing (shipslip test) {\"exception\":\"[object] (RuntimeException(code: 0): Invoice backfill failed",
+                "Invoice backfill failed: column totals_cents is missing (shipslip test)",
+            ),
+            (
+                "Checkout started (shipslip test)  {\"trace_id\":\"2eee31e7-23cc-4849-b166-d0927fd7251f\"}",
+                "Checkout started (shipslip test)",
+            ),
+            (
+                "User authenticated. {\"auth_id\":27} {\"url\":\"https://example.com/login\",\"trace_id\":\"e04e1a11\"}",
+                "User authenticated.",
+            ),
+            (
+                "Order failed {\"user\":{\"id\":5},\"exception\":\"[object] (LogicException(code: 0): no",
+                "Order failed",
+            ),
+            ("Queue busy [] []", "Queue busy"),
+            (
+                "SQLSTATE[HY000]: General error: 8 attempt to write a readonly database",
+                "SQLSTATE[HY000]: General error: 8 attempt to write a readonly database",
+            ),
+            ("Payload was {\"broken", "Payload was {\"broken"),
+            // Context and extra are the last two values; earlier text is message.
+            ("Three objects {} {} {}", "Three objects {}"),
+            ("{\"only\":\"json\"}", "{\"only\":\"json\"}"),
+            ("", ""),
+        ];
+        for (line, label) in cases {
+            assert_eq!(without_context(line), label, "{line}");
+        }
+        // Many brace-like words: only the last few candidates are tried.
+        let long = format!("{}{}", " {x".repeat(10_000), " {\"a\":1}");
+        assert_eq!(without_context(&long), " {x".repeat(10_000).trim_end());
+
+        let text = [
+            entry_line(
+                "2026-10-01 01:00:00",
+                "ERROR",
+                &format!("{}\n[stacktrace]\n#0 {{main}}\n\"}}", cases[0].0),
+            ),
+            entry_line("2026-10-01 01:00:01", "ERROR", cases[2].0),
+        ]
+        .concat();
+        let snapshot = snapshot_of(&text, true);
+        let groups = group(&snapshot, Level::Error, None);
+        let summary = render_summary(&snapshot, &groups, Level::Error, None, false);
+        assert!(
+            summary.contains(
+                "    Invoice backfill failed: column totals_cents is missing (shipslip test)\n"
+            ),
+            "{summary}"
+        );
+        assert!(summary.contains("    User authenticated.\n"), "{summary}");
+        assert!(!summary.contains("{\"exception\""));
+        // The detail view still shows the whole entry.
+        let detail = render_detail(&snapshot, &groups.groups[0], false);
+        assert!(
+            detail.contains("{\"exception\":\"[object]")
+                || render_detail(&snapshot, &groups.groups[1], false)
+                    .contains("{\"exception\":\"[object]")
+        );
     }
 }
