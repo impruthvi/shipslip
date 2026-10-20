@@ -296,6 +296,8 @@ slip logs staging                    # grouped errors since the latest run
 slip logs staging --since 7d          # override the default window
 slip logs staging --channels          # files, formats and coverage per channel
 slip logs staging qmkte               # latest full entry for a group ID
+slip logs staging qmkte --full        # every stack frame, nothing folded
+slip logs staging qmkte --md          # the same detail as Markdown to paste
 slip logs staging --level warning --grep payment
 slip logs staging --raw --since 30m   # entries in timestamp order
 slip logs staging --all --max-bytes 8m
@@ -309,6 +311,19 @@ locks, receipts and signature history unchanged. The summary groups entries
 by exception class and app file, including recurring errors. Copy a group's
 ID to open its latest entry and stack trace; row numbers also work, but can
 move between invocations. The first 20 groups are shown unless you use `--all`.
+
+The summary header counts every entry in the window by level, for example
+`in this window: 3 error · 12 warning · 40 info`, whatever `--level` and
+`--grep` hide. In a group's detail, runs of three or more framework frames
+(files under a `vendor` directory) fold into one line such as
+`… 14 vendor frames (--full to show)`; the first frame, your app's frames and
+lines slip can't read as frames always stay. `--full` shows every frame.
+
+`--md` prints a group's detail as Markdown for an issue or chat. It starts with
+the environment, log timezone, window (start to the time it was read),
+coverage, baseline, filters and slip version, so a paste still makes sense
+later. Log text is escaped or fenced, so links, images and HTML in it show as
+plain text. `--md` folds frames like the terminal unless you add `--full`.
 
 The default window starts at the latest verified Shipslip run (deploy, rerun
 or from-step). During a run, the header says `deploy in progress`. If the run
@@ -344,7 +359,9 @@ The comparison has a separate 2 MiB per-channel / 6 MiB total limit, shared
 fairly. It walks backward from the anchor through up to seven earlier daily
 files; `--channels` includes its coverage. At most
 20 channels and 50 files are selected per snapshot; omissions are reported.
-Partial coverage is printed in the header and affected counts use `≥`. Use
+Partial coverage is printed in the header, and when any channel was partly
+read or contains lines slip couldn't parse, counts are lower bounds: the
+header line says `at least`, and group and variant counts use `≥`. Use
 `--channels` to inspect each channel's files, total size, last write, format and
 coverage. Files that rotate or are truncated during the snapshot are reported as changed. Individual entries
 are limited to 256 KiB, with a note in the detail view when truncated.

@@ -6,6 +6,27 @@ change the library API.
 
 ## [Unreleased]
 
+### Added
+
+- `slip logs ENV` counts every entry in the window by level in its header,
+  regardless of `--level` and `--grep`.
+- `slip logs ENV ID` folds runs of three or more vendor stack frames; the first
+  frame and app frames always show. `--full` shows every frame.
+- `slip logs ENV ID --md` prints the detail as Markdown with its environment,
+  timezone, window, coverage, baseline and filters. Log text is escaped or
+  fenced so it never renders as links, images or HTML.
+- Library: `level_counts`, `coverage_incomplete`, `render_detail_md` and
+  `DetailFilter`; `Snapshot.read_at` holds when the server was read.
+
+### Changed
+
+- Counts are lower bounds (`≥`, `at least`) when a channel has lines slip
+  couldn't parse, not only when it was partly read. Variant counts follow
+  their group.
+- With `--grep`, an empty summary says `No entries match --grep …`.
+- Library: `render_summary` takes the `--grep` text and `render_detail` takes
+  a `full` flag.
+
 ## [0.7.1] - 2026-10-14
 
 ### Added
