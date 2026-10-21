@@ -251,3 +251,233 @@ fn up_to_date_hint_is_silent_after_a_successful_run() {
     root.save(1000, &receipt(|_| {}));
     assert_eq!(up_to_date_hint(&root.0, "app", "staging"), None);
 }
+
+fn failed_deploy_for_up_hint() -> Receipt {
+    receipt(|value| {
+        value["outcome"] = json!({"FailedAtStep": {"step": 2, "partial_update": false}});
+        value["app_left_down"] = json!(true);
+    })
+}
+
+fn up_for_hint(changes: impl FnOnce(&mut serde_json::Value)) -> Receipt {
+    receipt(|value| {
+        value["version"] = json!(2);
+        value["kind"] = json!("up");
+        value["run_id"] = json!("bbbb0002-0");
+        value["steps"] = json!([]);
+        value["maintenance_up_done"] = json!(true);
+        value["maintenance_up_status"] = json!("Ok");
+        value["maintenance_up_exit_code"] = json!(0);
+        changes(value);
+    })
+}
+
+#[test]
+fn up_to_date_hint_keeps_failed_deploy_recovery_after_successful_up() {
+    let root = TempRoot::new("failed-then-up");
+    root.save(1000, &failed_deploy_for_up_hint());
+    root.save(2000, &up_for_hint(|_| {}));
+
+    let hint = up_to_date_hint(&root.0, "app", "staging").unwrap();
+    assert!(
+        hint.contains("(aaaa0001) did not succeed: Failed at step 2"),
+        "{hint}"
+    );
+    assert!(hint.contains("`slip from-step staging 2`"), "{hint}");
+    assert!(
+        hint.contains("push the fix and run `slip deploy staging`"),
+        "{hint}"
+    );
+    assert!(!hint.contains("maintenance mode"), "{hint}");
+}
+
+#[test]
+fn up_to_date_hint_does_not_clear_maintenance_for_another_target() {
+    for (field, value) in [("ssh_alias", "other-app"), ("path", "/srv/other")] {
+        let root = TempRoot::new(&format!("up-other-{field}"));
+        root.save(1000, &failed_deploy_for_up_hint());
+        root.save(2000, &up_for_hint(|up| up["target"][field] = json!(value)));
+
+        let hint = up_to_date_hint(&root.0, "app", "staging").unwrap();
+        assert!(hint.contains("`slip from-step staging 2`"), "{hint}");
+        assert!(hint.contains("may still be in maintenance mode"), "{hint}");
+    }
+}
+
+#[test]
+fn up_to_date_hint_keeps_failed_and_unfinished_up_recovery() {
+    for unfinished in [false, true] {
+        let root = TempRoot::new(if unfinished {
+            "unfinished-up"
+        } else {
+            "failed-up"
+        });
+        root.save(1000, &failed_deploy_for_up_hint());
+        root.save(
+            2000,
+            &up_for_hint(|up| {
+                up["app_left_down"] = json!(true);
+                up["maintenance_up_done"] = json!(false);
+                up["maintenance_up_status"] = json!(if unfinished { "Unknown" } else { "Failed" });
+                up["maintenance_up_exit_code"] = json!(null);
+                if unfinished {
+                    up["status"] = json!("InProgress");
+                    up["phase"] = json!("MaintenanceUp");
+                    up["finished_at_ms"] = json!(null);
+                    up["outcome"] = json!(null);
+                } else {
+                    up["outcome"] = json!({"FailedAtStep": {"step": 0, "partial_update": false}});
+                }
+            }),
+        );
+
+        let hint = up_to_date_hint(&root.0, "app", "staging").unwrap();
+        assert!(hint.contains("`slip from-step staging 2`"), "{hint}");
+        assert!(hint.contains("slip receipts show bbbb0002"), "{hint}");
+        if unfinished {
+            assert!(hint.contains("`slip attach staging`"), "{hint}");
+        } else {
+            assert!(
+                hint.contains("After checking the server, `slip up staging` tries again"),
+                "{hint}"
+            );
+        }
+    }
+}
+
+#[test]
+fn up_to_date_hint_uses_latest_up_result_for_maintenance() {
+    let root = TempRoot::new("latest-up");
+    root.save(1000, &failed_deploy_for_up_hint());
+    root.save(2000, &up_for_hint(|_| {}));
+    root.save(
+        3000,
+        &up_for_hint(|up| {
+            up["run_id"] = json!("cccc0003-0");
+            up["app_left_down"] = json!(true);
+            up["maintenance_up_done"] = json!(false);
+            up["maintenance_up_status"] = json!("Unknown");
+            up["maintenance_up_exit_code"] = json!(null);
+            up["outcome"] = json!({"Unknown": {"step": 0, "reason": "connection lost"}});
+        }),
+    );
+
+    let hint = up_to_date_hint(&root.0, "app", "staging").unwrap();
+    assert!(hint.contains("`slip from-step staging 2`"), "{hint}");
+    assert!(hint.contains("slip receipts show cccc0003"), "{hint}");
+    assert!(
+        hint.contains("Check the server before running anything again"),
+        "{hint}"
+    );
+    assert!(!hint.contains("turns it off"), "{hint}");
+}
+
+#[test]
+fn up_to_date_hint_finds_deploy_beyond_ten_up_receipts() {
+    let root = TempRoot::new("many-up");
+    root.save(1000, &failed_deploy_for_up_hint());
+    for index in 0..11 {
+        root.save(
+            2000 + index,
+            &up_for_hint(|up| {
+                up["run_id"] = json!(format!("bbbb{index:04x}-0"));
+            }),
+        );
+    }
+    let hint = up_to_date_hint(&root.0, "app", "staging").unwrap();
+    assert!(hint.contains("`slip from-step staging 2`"), "{hint}");
+    assert!(!hint.contains("maintenance mode"), "{hint}");
+}
+
+#[test]
+fn up_to_date_hint_preserves_up_recovery_without_a_deploy() {
+    let root = TempRoot::new("only-up");
+    root.save(1000, &up_for_hint(|_| {}));
+    assert_eq!(up_to_date_hint(&root.0, "app", "staging"), None);
+
+    root.save(
+        2000,
+        &up_for_hint(|up| {
+            up["run_id"] = json!("cccc0003-0");
+            up["app_left_down"] = json!(true);
+            up["maintenance_up_done"] = json!(false);
+            up["maintenance_up_status"] = json!("Unknown");
+            up["maintenance_up_exit_code"] = json!(null);
+            up["outcome"] = json!({"Unknown": {"step": 0, "reason": "connection lost"}});
+        }),
+    );
+    let hint = up_to_date_hint(&root.0, "app", "staging").unwrap();
+    assert!(hint.contains("slip receipts show cccc0003"), "{hint}");
+    assert!(
+        hint.contains("Check the server before running anything again"),
+        "{hint}"
+    );
+    assert!(!hint.contains("from-step"), "{hint}");
+}
+
+#[test]
+fn up_to_date_hint_does_not_apply_up_before_the_latest_deploy() {
+    let root = TempRoot::new("up-before-deploy");
+    root.save(1000, &up_for_hint(|_| {}));
+    root.save(2000, &failed_deploy_for_up_hint());
+    let hint = up_to_date_hint(&root.0, "app", "staging").unwrap();
+    assert!(hint.contains("`slip from-step staging 2`"), "{hint}");
+    assert!(hint.contains("may still be in maintenance mode"), "{hint}");
+
+    root.save(
+        3000,
+        &receipt(|value| value["run_id"] = json!("dddd0004-0")),
+    );
+    assert_eq!(up_to_date_hint(&root.0, "app", "staging"), None);
+}
+
+#[test]
+fn up_to_date_hint_does_not_hide_unknown_up_with_success_on_another_target() {
+    let root = TempRoot::new("unknown-up-other-success");
+    root.save(1000, &failed_deploy_for_up_hint());
+    root.save(
+        2000,
+        &up_for_hint(|up| {
+            up["app_left_down"] = json!(true);
+            up["maintenance_up_done"] = json!(false);
+            up["maintenance_up_status"] = json!("Unknown");
+            up["maintenance_up_exit_code"] = json!(null);
+            up["outcome"] = json!({"Unknown": {"step": 0, "reason": "connection lost"}});
+        }),
+    );
+    root.save(
+        3000,
+        &up_for_hint(|up| {
+            up["run_id"] = json!("cccc0003-0");
+            up["target"]["ssh_alias"] = json!("other-app");
+        }),
+    );
+
+    let hint = up_to_date_hint(&root.0, "app", "staging").unwrap();
+    assert!(hint.contains("`slip from-step staging 2`"), "{hint}");
+    assert!(hint.contains("slip receipts show bbbb0002"), "{hint}");
+    assert!(
+        hint.contains("Check the server before running anything again"),
+        "{hint}"
+    );
+    assert!(!hint.contains("turns it off"), "{hint}");
+}
+
+#[test]
+fn standalone_up_shows_its_saved_output_once() {
+    let up = receipt(|value| {
+        value["version"] = json!(2);
+        value["kind"] = json!("up");
+        value["maintenance_up_status"] = json!("Failed");
+        value["maintenance_up_exit_code"] = json!(7);
+        value["outcome"] = json!({"FailedAtStep": {"step": 0, "partial_update": false}});
+        value["steps"] = json!([{
+            "index": 0, "command": "php artisan up", "status": "Failed",
+            "exit_code": 7, "output": ["up failed\u{1b}[2J"]
+        }]);
+    });
+    let text = render_show(&up);
+    assert!(text.contains("up failed\\x1b[2J"), "{text}");
+    assert!(!text.contains("Maintenance off:"), "{text}");
+    assert_eq!(text.matches("✓ ok").count(), 0, "{text}");
+}

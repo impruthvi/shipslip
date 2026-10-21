@@ -2615,6 +2615,74 @@ async fn bring_app_up_restores_a_deploy_left_in_maintenance_mode() {
 }
 
 #[tokio::test]
+async fn recorded_up_recovers_after_disconnect_without_repeating_the_command() {
+    let server = Server::start().await;
+    let path = server.app("app");
+    server.exec_as("root", "mv /usr/local/bin/php /usr/local/bin/php-original; cat > /usr/local/bin/php; chmod 755 /usr/local/bin/php", r#"#!/bin/sh
+if [ "$1" = artisan ] && [ "$2" = up ]; then
+    echo up-started
+    while [ ! -e "$HOME/.shipslip-allow-up" ]; do sleep 0.05; done
+fi
+exec /usr/local/bin/php-original "$@"
+"#);
+    let ssh = Arc::new(server.connect().await);
+    let target = trusted(target(&path, &["echo recipe-ran > ~/unexpected-recipe"]));
+    let receipts = server.dir.join("receipts");
+    let (mut events, handle) = bring_app_up(&target, ssh.clone(), &receipts).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if matches!(events.recv().await, Some(DeployEvent::MaintenanceOutput { line, .. }) if line == "up-started") {
+                break;
+            }
+        }
+    }).await.unwrap();
+    server.exec_as("root", "pkill -f 'sshd: deploy'", "");
+    handle.detach();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = events.recv().await {
+            if event == (DeployEvent::Detached { index: 0 }) {
+                return;
+            }
+        }
+        panic!("Up did not detach");
+    })
+    .await
+    .unwrap();
+    drop(events);
+    drop(handle);
+    drop(ssh);
+    let saved = std::fs::read_dir(receipts.join("app/staging"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .unwrap();
+    let journal = Arc::new(ReceiptJournal::load(&saved).unwrap());
+    assert_eq!(journal.snapshot().status, ReceiptStatus::InProgress);
+    let ssh = Arc::new(server.connect().await);
+    server.exec("touch ~/.shipslip-allow-up", "");
+    let (mut events, _) = attach(&target, journal.clone(), ssh).unwrap();
+    let mut last = None;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = events.recv().await {
+            last = Some(event);
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(last, Some(DeployEvent::Finished(DeployOutcome::Succeeded)));
+    let receipt = shipslip::receipt::read(&saved).unwrap();
+    assert_eq!(receipt.status, ReceiptStatus::Final);
+    assert_eq!(receipt.steps.len(), 1);
+    assert!(receipt.steps[0].output.iter().any(|line| line == "up"));
+    assert_eq!(server.exec("cat ~/.shipslip-php-calls", ""), "artisan up");
+    assert_eq!(
+        server.exec("test ! -e ~/unexpected-recipe && echo clean", ""),
+        "clean"
+    );
+    assert!(!server.lock_exists(&path));
+}
+
+#[tokio::test]
 async fn bring_app_up_does_not_run_while_a_deploy_holds_the_lock() {
     let server = Server::start().await;
     let ssh = server.connect().await;

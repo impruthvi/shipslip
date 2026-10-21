@@ -603,9 +603,18 @@ async fn run_up<T: Transport>(
     let (path, run_id) = (&preview.target.path, &preview.run_id);
     let follow_up = async {
         if mode == FollowMode::Launch {
-            journal
-                .begin_maintenance(MaintenancePhase::Up)
-                .map_err(|error| error.to_string())?;
+            match lock_owned(&*transport, path, run_id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return End::Finished(DeployOutcome::StoppedInMaintenance(
+                        AbortReason::LockLost,
+                    ));
+                }
+                Err(reason) => return End::Interrupted { index: 0, reason },
+            }
+            if let Err(error) = journal.begin_maintenance(MaintenancePhase::Up) {
+                return End::RunError(format!("could not save the receipt: {error}"));
+            }
         }
         let followed = maintenance(
             &*transport,
@@ -621,52 +630,56 @@ async fn run_up<T: Transport>(
         .await;
         if let Followed::Done(result) = &followed {
             let (status, code) = result_status(result);
-            journal
-                .finish_maintenance(MaintenancePhase::Up, status, code)
-                .map_err(|error| error.to_string())?;
+            if let Err(error) = journal.finish_maintenance(MaintenancePhase::Up, status, code) {
+                return End::RunError(format!("could not save the receipt: {error}"));
+            }
         }
-        Ok::<_, String>(followed)
+        match followed {
+            Followed::Detached => End::Detached(0),
+            Followed::Done(StepResult::Interrupted(reason)) => {
+                End::Interrupted { index: 0, reason }
+            }
+            Followed::NotLaunched => {
+                End::Finished(DeployOutcome::StoppedInMaintenance(AbortReason::Cancelled))
+            }
+            Followed::Done(StepResult::Exited(0)) => End::Finished(DeployOutcome::Succeeded),
+            Followed::Done(StepResult::Exited(_)) => End::Finished(DeployOutcome::FailedAtStep {
+                step: 0,
+                partial_update: false,
+            }),
+            Followed::Done(StepResult::NotStarted(reason)) => End::Finished(
+                DeployOutcome::StoppedInMaintenance(AbortReason::ConnectFailed(reason)),
+            ),
+            Followed::Done(StepResult::Gone) => End::Finished(DeployOutcome::Unknown {
+                step: 0,
+                reason: "the command's record on the server is gone".into(),
+            }),
+        }
     };
-    let followed = tokio::select! {
-        followed = follow_up => followed,
+    let end = tokio::select! {
+        end = follow_up => end,
         () = heartbeat_forever(&*transport, path, run_id) => unreachable!("heartbeat never ends"),
     };
-    let outcome = match followed {
-        Err(error) => {
-            send_run_error(
-                &events,
-                Some(journal),
-                format!("could not save the receipt: {error}"),
-            );
+    let outcome = match end {
+        End::RunError(reason) => {
+            send_run_error(&events, Some(journal), reason);
             return;
         }
-        Ok(Followed::Detached) => {
+        End::Detached(index) => {
             let _ = journal.message("detached while observing `php artisan up`".into());
             journal.release_claim();
             drop(journal);
-            let _ = events.send(DeployEvent::Detached { index: 0 });
+            let _ = events.send(DeployEvent::Detached { index });
             return;
         }
-        Ok(Followed::Done(StepResult::Interrupted(reason))) => {
+        End::Interrupted { index, reason } => {
             let _ = journal.message(reason.clone());
             journal.release_claim();
             drop(journal);
-            let _ = events.send(DeployEvent::Interrupted { index: 0, reason });
+            let _ = events.send(DeployEvent::Interrupted { index, reason });
             return;
         }
-        Ok(Followed::NotLaunched) => DeployOutcome::StoppedInMaintenance(AbortReason::Cancelled),
-        Ok(Followed::Done(StepResult::Exited(0))) => DeployOutcome::Succeeded,
-        Ok(Followed::Done(StepResult::Exited(_))) => DeployOutcome::FailedAtStep {
-            step: 0,
-            partial_update: false,
-        },
-        Ok(Followed::Done(StepResult::NotStarted(reason))) => {
-            DeployOutcome::StoppedInMaintenance(AbortReason::ConnectFailed(reason))
-        }
-        Ok(Followed::Done(StepResult::Gone)) => DeployOutcome::Unknown {
-            step: 0,
-            reason: "the command's record on the server is gone".into(),
-        },
+        End::Finished(outcome) => outcome,
     };
     // After an unknown result the server needs checking first, so the lock
     // is kept and goes stale.
@@ -938,20 +951,24 @@ pub fn attach<T: Transport>(
     if receipt.kind == ReceiptKind::Up {
         if !is_full_sha(&receipt.from_sha)
             || receipt.recipe_hash != up_hash(&receipt.target)
-            || !receipt.steps.is_empty()
+            || receipt.from_sha != receipt.target_sha
+            || receipt.steps.len() != 1
+            || receipt.steps[0].index != 0
+            || receipt.steps[0].command != UP_COMMAND
         {
             return Err(AttachError::Invalid("the saved run is inconsistent".into()));
         }
         journal
             .set_owner_pid(std::process::id())
             .map_err(|error| AttachError::Receipt(error.to_string()))?;
-        // Once started, `php artisan up` is only observed, never sent again.
-        let mode = if receipt.mutation_started {
-            FollowMode::Attach
-        } else {
-            FollowMode::Launch
-        };
-        return Ok(spawn_up(up_preview(&receipt), transport, journal, mode));
+        // Recovery only observes the recorded command, even if the process
+        // died before sending it. Starting a new Up requires confirmation.
+        return Ok(spawn_up(
+            up_preview(&receipt),
+            transport,
+            journal,
+            FollowMode::Attach,
+        ));
     }
     if !is_full_sha(&receipt.from_sha)
         || !is_full_sha(&receipt.target_sha)
@@ -2317,10 +2334,12 @@ mod tests {
         launched: Mutex<HashMap<String, usize>>,
         lose_acquire_response: AtomicBool,
         reconnect_fails: bool,
+        fail_lock_checks: bool,
         reconnects: AtomicUsize,
         lock: Mutex<LockSim>,
         server: Mutex<ServerSim>,
         on_state_check: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+        on_lock_release: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
     }
 
     /// The app's checkout as preflight and the recheck see it.
@@ -2725,6 +2744,14 @@ mod tests {
                 let _ = output.send("@marker-written".into()).await;
                 Ok(0)
             } else if script.contains("shipslip.lock") {
+                if self.fail_lock_checks && script.contains("then echo owned; else echo lost") {
+                    return Err(lost());
+                }
+                if script.contains("released-") {
+                    if let Some(f) = self.on_lock_release.lock().unwrap().take() {
+                        f();
+                    }
+                }
                 let _ = output.send(self.lock_script(script)).await;
                 if script.contains("echo acquired")
                     && self.lose_acquire_response.swap(false, Ordering::SeqCst)
@@ -3427,7 +3454,10 @@ mod tests {
         assert_eq!(receipt.maintenance_up_status, Some(StepStatus::Ok));
         assert!(is_full_sha(&receipt.from_sha));
         assert_eq!(receipt.from_sha, receipt.target_sha);
-        assert!(receipt.steps.is_empty());
+        assert_eq!(receipt.steps.len(), 1);
+        assert_eq!(receipt.steps[0].command, UP_COMMAND);
+        assert_eq!(receipt.steps[0].status, ReceiptStepStatus::Ok);
+        assert_eq!(receipt.steps[0].output, ["back up"]);
         assert!(receipt.badge().flags.is_empty());
         assert_eq!(
             receipt.summary().unwrap(),
@@ -3460,6 +3490,9 @@ mod tests {
         assert_eq!(fake.lock_owner(), None);
         let receipt = crate::receipt::read(&up_receipt_path(&dir)).unwrap();
         assert!(receipt.app_left_down);
+        assert_eq!(receipt.steps[0].output, ["nope"]);
+        assert!(crate::receipt::markdown(&receipt, true).contains("nope"));
+        assert!(!crate::receipt::markdown(&receipt, false).contains("nope"));
         assert!(receipt
             .badge()
             .flags
@@ -3491,6 +3524,184 @@ mod tests {
         assert!(receipt.mutation_started);
         assert_eq!(receipt.maintenance_up_status, Some(StepStatus::Unknown));
         assert!(receipt.app_left_down);
+    }
+
+    #[tokio::test]
+    async fn up_losing_its_lock_before_launch_spares_the_successor() {
+        let fake = Arc::new(preflight().loses_lock_before_step(0));
+        let dir = TempReceipts::new();
+        let (events, _) = bring_app_up(&trusted(target(false, &[])), fake.clone(), &dir.0)
+            .await
+            .unwrap();
+        assert_eq!(
+            collect(events).await.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::StoppedInMaintenance(
+                AbortReason::LockLost
+            )))
+        );
+        assert_eq!(fake.launched(UP_COMMAND), 0);
+        assert_eq!(fake.lock_owner().as_deref(), Some("other"));
+    }
+
+    #[tokio::test]
+    async fn up_unverifiable_lock_never_launches_or_reports_success() {
+        let mut fake = preflight();
+        fake.fail_lock_checks = true;
+        let fake = Arc::new(fake);
+        let dir = TempReceipts::new();
+        let (events, _) = bring_app_up(&trusted(target(false, &[])), fake.clone(), &dir.0)
+            .await
+            .unwrap();
+        assert!(matches!(
+            collect(events).await.last(),
+            Some(DeployEvent::Interrupted { .. })
+        ));
+        assert_eq!(fake.launched(UP_COMMAND), 0);
+        assert!(fake.lock_owner().is_some());
+        let saved = crate::receipt::read(&up_receipt_path(&dir)).unwrap();
+        assert_eq!(saved.status, ReceiptStatus::InProgress);
+        assert!(!saved.mutation_started);
+    }
+
+    #[tokio::test]
+    async fn up_attach_before_launch_only_observes_and_spares_another_lock() {
+        let fake = Arc::new(preflight().locked_by_other(false));
+        let dir = TempReceipts::new();
+        let target = trusted(target(false, &["deploy command"]));
+        let journal = Arc::new(
+            ReceiptJournal::create_up(
+                &dir.0,
+                "app",
+                Path::new("/repo"),
+                target.target(),
+                FROM,
+                "abcd-0001",
+                &up_hash(target.target()),
+            )
+            .unwrap(),
+        );
+        let (events, _) = attach(&target, journal.clone(), fake.clone()).unwrap();
+        assert!(matches!(
+            collect(events).await.last(),
+            Some(DeployEvent::Finished(DeployOutcome::StoppedInMaintenance(
+                _
+            )))
+        ));
+        assert_eq!(fake.launched(UP_COMMAND), 0);
+        assert_eq!(fake.ran_matching("deploy command"), 0);
+        assert_eq!(fake.lock_owner().as_deref(), Some("other"));
+        assert!(!journal.snapshot().mutation_started);
+    }
+
+    #[tokio::test]
+    async fn up_state_and_initial_journal_failures_never_launch_and_release_the_lock() {
+        let dir = TempReceipts::new();
+        let bad_state = Arc::new(preflight().server(|s| s.head = "invalid".into()));
+        assert!(matches!(
+            bring_app_up(&trusted(target(false, &[])), bad_state.clone(), &dir.0).await,
+            Err(BringUpError::Check(_))
+        ));
+        assert_eq!(bad_state.launched(UP_COMMAND), 0);
+        assert_eq!(bad_state.lock_owner(), None);
+        let blocked = dir.0.join("blocked");
+        fs::write(&blocked, "file instead of directory").unwrap();
+        let fake = Arc::new(preflight());
+        assert!(matches!(
+            bring_app_up(&trusted(target(false, &[])), fake.clone(), &blocked).await,
+            Err(BringUpError::Receipt(_))
+        ));
+        assert_eq!(fake.launched(UP_COMMAND), 0);
+        assert_eq!(fake.lock_owner(), None);
+    }
+
+    // Fail writes without deleting the durable receipt, then restore it for recovery.
+    fn block_receipt_directory(dir: &Path) {
+        fs::rename(dir, dir.with_extension("saved")).unwrap();
+        fs::write(dir, "blocked").unwrap();
+    }
+
+    fn restore_receipt_directory(dir: &Path) {
+        fs::remove_file(dir).unwrap();
+        fs::rename(dir.with_extension("saved"), dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn up_prelaunch_journal_failure_never_sends_the_command() {
+        let fake = Arc::new(preflight());
+        let dir = TempReceipts::new();
+        let target = trusted(target(false, &[]));
+        let journal = Arc::new(
+            ReceiptJournal::create_up(
+                &dir.0,
+                "app",
+                Path::new("/repo"),
+                target.target(),
+                FROM,
+                "abcd-0002",
+                &up_hash(target.target()),
+            )
+            .unwrap(),
+        );
+        fake.lock.lock().unwrap().owner = Some(journal.snapshot().run_id.clone());
+        let env_dir = journal.path().parent().unwrap().to_path_buf();
+        let path = journal.path().to_path_buf();
+        block_receipt_directory(&env_dir);
+        let (events, _) = spawn_up(
+            up_preview(&journal.snapshot()),
+            fake.clone(),
+            journal,
+            FollowMode::Launch,
+        );
+        assert!(matches!(
+            collect(events).await.last(),
+            Some(DeployEvent::RunError { .. })
+        ));
+        restore_receipt_directory(&env_dir);
+        assert_eq!(fake.launched(UP_COMMAND), 0);
+        assert!(!crate::receipt::read(&path).unwrap().mutation_started);
+    }
+
+    #[tokio::test]
+    async fn up_result_and_finalization_failures_stay_attachable_without_replay() {
+        for fail_finalization in [false, true] {
+            let dir = TempReceipts::new();
+            let target = trusted(target(false, &[]));
+            let env_dir = dir.0.join("app/staging");
+            let blocked = env_dir.clone();
+            let fake = if fail_finalization {
+                let fake = preflight().on(UP_COMMAND, &["diagnostic"], 0);
+                *fake.on_lock_release.lock().unwrap() =
+                    Some(Box::new(move || block_receipt_directory(&blocked)));
+                Arc::new(fake)
+            } else {
+                let once = AtomicBool::new(false);
+                Arc::new(preflight().calls(UP_COMMAND, move || {
+                    if !once.swap(true, Ordering::SeqCst) {
+                        block_receipt_directory(&blocked);
+                    }
+                }))
+            };
+            let (events, _) = bring_app_up(&target, fake.clone(), &dir.0).await.unwrap();
+            let events = collect(events).await;
+            assert!(
+                matches!(events.last(), Some(DeployEvent::RunError { .. })),
+                "{events:?}"
+            );
+            restore_receipt_directory(&env_dir);
+            let path = up_receipt_path(&dir);
+            let saved = crate::receipt::read(&path).unwrap();
+            assert_eq!(saved.status, ReceiptStatus::InProgress);
+            assert!(saved.mutation_started);
+            assert_eq!(fake.launched(UP_COMMAND), 1);
+            let journal = Arc::new(ReceiptJournal::load(&path).unwrap());
+            let (events, _) = attach(&target, journal.clone(), fake.clone()).unwrap();
+            assert_eq!(
+                collect(events).await.last(),
+                Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+            );
+            assert_eq!(fake.launched(UP_COMMAND), 1);
+            assert_eq!(journal.snapshot().status, ReceiptStatus::Final);
+        }
     }
 
     #[tokio::test]

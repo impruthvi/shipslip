@@ -345,14 +345,16 @@ fn render_show(receipt: &Receipt) -> String {
             let _ = writeln!(out, "        {}", escape(&strip_color(line)));
         }
     }
-    if let Some(status) = &receipt.maintenance_up_status {
-        step_line(
-            &mut out,
-            "off",
-            "Maintenance off: php artisan up",
-            status.clone().into(),
-            receipt.maintenance_up_exit_code,
-        );
+    if receipt.kind == shipslip::receipt::ReceiptKind::Deploy {
+        if let Some(status) = &receipt.maintenance_up_status {
+            step_line(
+                &mut out,
+                "off",
+                "Maintenance off: php artisan up",
+                status.clone().into(),
+                receipt.maintenance_up_exit_code,
+            );
+        }
     }
 
     if let Some(watch) = &receipt.watch {
@@ -435,33 +437,79 @@ fn render_show(receipt: &Receipt) -> String {
 /// Explains an "already up to date" block when the deployed commit's last run
 /// did not succeed, so a retry does not hide a broken or down app.
 pub(super) fn up_to_date_hint(root: &Path, project: &str, env: &str) -> Option<String> {
-    let listing = receipt::list(root, project, Some(env), Some(10)).ok()?;
-    let (id, receipt) = listing.rows.iter().find_map(|row| match row {
-        Listed::Receipt { id, receipt, .. } if receipt.mutation_started => Some((id, receipt)),
-        _ => None,
-    })?;
-    let needs_attention = receipt.status == ReceiptStatus::InProgress
-        || receipt.ended_in_failure()
-        || receipt.app_left_down;
-    if !needs_attention {
-        return None;
-    }
+    let listing = receipt::list(root, project, Some(env), Some(receipt::WALK_LIMIT)).ok()?;
+    let runs: Vec<_> = listing
+        .rows
+        .iter()
+        .filter_map(|row| match row {
+            Listed::Receipt { id, receipt, .. } if receipt.mutation_started => Some((id, receipt)),
+            _ => None,
+        })
+        .collect();
+    let same_target = |a: &Receipt, b: &Receipt| {
+        a.target.ssh_alias == b.target.ssh_alias && a.target.path == b.target.path
+    };
+    let needs_attention = |receipt: &Receipt| {
+        receipt.status == ReceiptStatus::InProgress
+            || receipt.ended_in_failure()
+            || receipt.app_left_down
+    };
+    let latest_up = runs
+        .first()
+        .copied()
+        .filter(|(_, receipt)| receipt.kind == ReceiptKind::Up && needs_attention(receipt));
+    let deploy_index = runs
+        .iter()
+        .position(|(_, receipt)| receipt.kind == ReceiptKind::Deploy);
+    let relevant_up = deploy_index.and_then(|index| {
+        runs[..index]
+            .iter()
+            .copied()
+            .find(|(_, up)| same_target(runs[index].1, up))
+    });
     let env = escape_field(env);
-    let mut lines = vec![format!(
-        "The last run here ({id}) did not succeed: {}. See `slip receipts show {id}`.",
-        receipt.badge().headline()
-    )];
-    if let Some(DeployOutcome::FailedAtStep { step, .. }) = &receipt.outcome {
-        if *step > 0 {
-            lines.extend(receipt::failed_step_options(&env, *step));
+    let mut lines = Vec::new();
+    if let Some(index) = deploy_index {
+        let (id, deploy) = runs[index];
+        // An Up changes maintenance state, not the result of the deploy. Only
+        // newer runs on the same server checkout can update that state.
+        let app_left_down = relevant_up.map_or(deploy.app_left_down, |(_, up)| {
+            up.status != ReceiptStatus::Final
+                || up.outcome != Some(DeployOutcome::Succeeded)
+                || up.app_left_down
+        });
+        if deploy.status == ReceiptStatus::InProgress || deploy.ended_in_failure() || app_left_down
+        {
+            lines.push(format!(
+                "The last run here ({id}) did not succeed: {}. See `slip receipts show {id}`.",
+                deploy.badge().headline()
+            ));
+            if let Some(DeployOutcome::FailedAtStep { step, .. }) = &deploy.outcome {
+                if *step > 0 {
+                    lines.extend(receipt::failed_step_options(&env, *step));
+                }
+            }
+            // A failed/unfinished Up has more specific recovery instructions,
+            // including attach or checking an unknown result before retrying.
+            if app_left_down && !relevant_up.is_some_and(|(_, up)| needs_attention(up)) {
+                lines.push(format!(
+                    "The app may still be in maintenance mode; `slip up {env}` turns it off."
+                ));
+            }
         }
     }
-    if receipt.app_left_down {
+    let up_recovery = [
+        relevant_up.filter(|(_, up)| needs_attention(up)),
+        latest_up.filter(|(id, _)| !relevant_up.is_some_and(|(relevant_id, _)| relevant_id == *id)),
+    ];
+    for (id, up) in up_recovery.into_iter().flatten() {
         lines.push(format!(
-            "The app may still be in maintenance mode; `slip up {env}` turns it off."
+            "The last `slip up` here ({id}) did not succeed: {}. See `slip receipts show {id}`.",
+            up.badge().headline()
         ));
+        lines.extend(up.next_steps());
     }
-    Some(lines.join("\n"))
+    (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
 fn step_line(

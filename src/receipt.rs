@@ -256,8 +256,7 @@ impl Receipt {
     }
 
     /// A receipt for `php artisan up` on `target`, whose server checkout is
-    /// at `head`. It has no recipe steps; the maintenance-up fields hold the
-    /// result.
+    /// at `head`. Its only step records the maintenance command and output.
     fn for_up(
         project: &str,
         repo_root: &Path,
@@ -286,7 +285,13 @@ impl Receipt {
             commits: Vec::new(),
             more_commits: 0,
             recipe_hash: script_hash.into(),
-            steps: Vec::new(),
+            steps: vec![ReceiptStep {
+                index: 0,
+                command: "php artisan up".into(),
+                status: ReceiptStepStatus::NotStarted,
+                exit_code: None,
+                output: Vec::new(),
+            }],
             maintenance_down_done: false,
             maintenance_up_done: false,
             maintenance_down_status: None,
@@ -473,6 +478,11 @@ impl ReceiptJournal {
                 MaintenancePhase::Up => ReceiptPhase::MaintenanceUp,
             };
             receipt.mutation_started = true;
+            if receipt.kind == ReceiptKind::Up {
+                if let Some(step) = receipt.steps.first_mut() {
+                    step.status = ReceiptStepStatus::Running;
+                }
+            }
             if phase == MaintenancePhase::Down {
                 receipt.app_left_down = true;
             }
@@ -495,6 +505,12 @@ impl ReceiptJournal {
                     receipt.app_left_down = crate::event::down_may_have_started(&status);
                 }
                 MaintenancePhase::Up => {
+                    if receipt.kind == ReceiptKind::Up {
+                        if let Some(step) = receipt.steps.first_mut() {
+                            step.status = status.clone().into();
+                            step.exit_code = exit_code;
+                        }
+                    }
                     receipt.maintenance_up_status = Some(status.clone());
                     receipt.maintenance_up_exit_code = exit_code;
                     receipt.maintenance_up_done = status == StepStatus::Ok;
@@ -506,10 +522,13 @@ impl ReceiptJournal {
 
     pub fn output_line(&self, key: &str, line: &str) {
         let mut receipt = self.state.lock().unwrap();
-        if let Some(index) = key
-            .strip_prefix("step-")
-            .and_then(|index| index.parse::<usize>().ok())
-        {
+        let index = if receipt.kind == ReceiptKind::Up && key == "maintenance-up" {
+            Some(0)
+        } else {
+            key.strip_prefix("step-")
+                .and_then(|index| index.parse::<usize>().ok())
+        };
+        if let Some(index) = index {
             if let Some(step) = receipt.steps.iter_mut().find(|step| step.index == index) {
                 if step.output.len() == OUTPUT_LINES {
                     step.output.remove(0);

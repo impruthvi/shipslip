@@ -690,3 +690,47 @@ fn smoke_results_in_words() {
         assert_eq!(describe_smoke(&smoke), words);
     }
 }
+
+#[test]
+fn up_output_is_bounded_durable_and_only_exported_with_details() {
+    let root = TempRoot::new();
+    let target = parse(receipt_json("output-test", 1000, "staging")).target;
+    let journal = ReceiptJournal::create_up(
+        &root.0,
+        "app",
+        Path::new("/repo"),
+        &target,
+        "1111111111111111111111111111111111111111",
+        "abcd-0003",
+        "hash",
+    )
+    .unwrap();
+    journal.begin_maintenance(MaintenancePhase::Up).unwrap();
+    for n in 0..205 {
+        journal.output_line("maintenance-up", &format!("diagnostic-{n}"));
+    }
+    let long = "é".repeat(OUTPUT_LINE_BYTES);
+    journal.output_line("maintenance-up", &long);
+    journal
+        .finish_maintenance(MaintenancePhase::Up, StepStatus::Failed, Some(7))
+        .unwrap();
+    journal
+        .finish(DeployOutcome::FailedAtStep {
+            step: 0,
+            partial_update: false,
+        })
+        .unwrap();
+    let receipt = read(journal.path()).unwrap();
+    let step = &receipt.steps[0];
+    assert_eq!(step.output.len(), OUTPUT_LINES);
+    assert_eq!(step.output[0], "diagnostic-6");
+    assert_eq!(step.output.last().unwrap().len(), OUTPUT_LINE_BYTES);
+    assert_eq!(step.status, ReceiptStepStatus::Failed);
+    assert_eq!(step.exit_code, Some(7));
+    assert!(markdown(&receipt, true).contains("diagnostic-204"));
+    assert!(!markdown(&receipt, false).contains("diagnostic-204"));
+    assert_eq!(
+        markdown(&receipt, true).matches("`php artisan up`").count(),
+        1
+    );
+}
