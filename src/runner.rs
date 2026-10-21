@@ -269,10 +269,20 @@ pub(crate) async fn run_collect<T: Transport>(
     transport: &T,
     script: &str,
 ) -> (Result<i32, TransportError>, Vec<String>) {
-    let (tx, mut rx) = mpsc::channel(LINE_QUEUE);
+    run_collect_each(transport, script, |_| {}).await
+}
+
+/// Like [`run_collect`], also showing each line to `each` as it arrives.
+pub(crate) async fn run_collect_each<T: Transport>(
+    transport: &T,
+    script: &str,
+    mut each: impl FnMut(&str),
+) -> (Result<i32, TransportError>, Vec<String>) {
+    let (tx, mut rx) = mpsc::channel::<String>(LINE_QUEUE);
     let collect = async {
         let mut lines = Vec::new();
         while let Some(line) = rx.recv().await {
+            each(&line);
             lines.push(line);
         }
         lines

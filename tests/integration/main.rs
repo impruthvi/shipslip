@@ -14,10 +14,10 @@ use shipslip::receipt::{ReceiptJournal, ReceiptStatus};
 use shipslip::transport::{SshTransport, Transport, TransportError, LINE_QUEUE, SCRIPT_LINE_LIMIT};
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute, execute_recorded, lock_status, prepare,
-    prepare_with_plan, AbortReason, BlockReason, BreakLockError, BringUpError, Confirmation,
-    DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle, LogChannel, MaintenancePhase,
-    PrepareError, RunEvents, RunPlan, SmokeResult, StepStatus, StopReason, WatchStatus,
-    POST_DEPLOY_WATCH,
+    prepare_with_plan, prepare_with_progress, AbortReason, BlockReason, BreakLockError,
+    BringUpError, Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle,
+    LogChannel, MaintenancePhase, PrepareError, PreparePhase, RunEvents, RunPlan, SmokeResult,
+    StepStatus, StopReason, WatchStatus, POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 
@@ -2006,6 +2006,32 @@ async fn a_flood_of_output_arrives_complete_and_in_order() {
         .collect();
     let expected: Vec<String> = (1..=20000).map(|n| n.to_string()).collect();
     assert_eq!(output, expected);
+}
+
+#[tokio::test]
+async fn prepare_reports_fetching_checking_and_locking_in_order() {
+    let server = Server::start().await;
+    let ssh = server.connect().await;
+    let path = server.app("app");
+    let mut phases = Vec::new();
+    let preview = prepare_with_progress(
+        &trusted(target(&path, &["true"])),
+        RunPlan::Deploy,
+        &ssh,
+        |phase| phases.push(phase),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        phases,
+        [
+            PreparePhase::Fetching,
+            PreparePhase::Checking,
+            PreparePhase::Locking
+        ]
+    );
+    assert_eq!(preview.commits().len(), 1);
+    cancel(preview, &ssh).await.unwrap();
 }
 
 #[tokio::test]

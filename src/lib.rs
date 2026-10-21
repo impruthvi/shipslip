@@ -33,10 +33,10 @@ pub mod transport;
 
 pub use engine::{
     attach, break_lock, bring_app_up, cancel, check_resumable, execute, execute_recorded,
-    lock_status, prepare, prepare_with_github_token, prepare_with_plan, AttachError,
-    BreakLockError, BringUpError, ConfirmError, Confirmation, DeployTarget, ExecuteError,
-    ExecuteRejected, ExecutionHandle, LockStatusError, LogChannel, PrepareError, Preview,
-    RunEvents, RunPlan, POST_DEPLOY_WATCH,
+    lock_status, prepare, prepare_with_github_token, prepare_with_plan, prepare_with_progress,
+    AttachError, BreakLockError, BringUpError, ConfirmError, Confirmation, DeployTarget,
+    ExecuteError, ExecuteRejected, ExecutionHandle, LockStatusError, LogChannel, PrepareError,
+    PreparePhase, Preview, RunEvents, RunPlan, POST_DEPLOY_WATCH,
 };
 pub use event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason};
 pub use lock::{LockInfo, LockOwner, STALE_AFTER};

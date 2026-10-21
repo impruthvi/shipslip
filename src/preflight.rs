@@ -183,6 +183,7 @@ pub(crate) fn preflight_script_with_token(
     let mut s = state_script(path);
     let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
     s.push_str("export GIT_TERMINAL_PROMPT=0 SSH_ASKPASS_REQUIRE=never\n");
+    s.push_str("echo \"@phase fetch\"\n");
     if let Some((repository, token)) = auth {
         // Disable shell tracing before any secret-bearing line is read.
         s.insert_str(0, "set +x +v\n");
@@ -200,6 +201,7 @@ fi
     }
     s.push_str(&format!(
         r#"
+echo "@phase check"
 h=$(git rev-parse HEAD)
 t=$(git rev-parse {remote})
 echo "@target $t"
@@ -380,6 +382,8 @@ mod tests {
             "@branch main",
             "@dirty  M file",
             "@dirty ?? new",
+            "@phase fetch",
+            "@phase check",
             "@target b",
             "@fetch_head b",
             "@ancestor",
@@ -565,6 +569,26 @@ mod tests {
 
         let (code, _) = local_state("echo garbage > .git/index");
         assert_ne!(code, Some(0));
+    }
+
+    #[test]
+    fn phase_markers_come_before_the_fetch_and_the_checks() {
+        let repository =
+            crate::github_auth::GitHubRepository::from_origin("https://github.com/acme/app.git")
+                .unwrap();
+        let token = crate::github_auth::GitHubToken::new("github_pat_TEST_123".into()).unwrap();
+        let steps = vec!["true".to_string()];
+        for s in [
+            preflight_script("/app", "main", &steps),
+            preflight_script_with_token("/app", "main", &steps, Some((&repository, &token))),
+        ] {
+            let at = |needle: &str| s.find(needle).unwrap_or_else(|| panic!("{needle}:\n{s}"));
+            // Both fetch variants report a failed fetch with `@fetch_failed`.
+            assert!(at("echo \"@phase fetch\"") < at("@fetch_failed"));
+            assert!(at("@fetch_failed") < at("echo \"@phase check\""));
+            assert!(at("echo \"@phase check\"") < at("@target"));
+            assert!(at("@target") < at("@invalid 1"));
+        }
     }
 
     #[test]

@@ -46,6 +46,10 @@ change the library API.
 
 ### Added
 
+- Library: `prepare_with_progress` calls back with each `PreparePhase`
+  (`Fetching`, `Checking`, `Locking`) as it starts, so a front-end can say
+  what a slow preview is waiting on. The preflight script prints `@phase`
+  markers for it.
 - Library: `interrupt` module (`Stage`, `next_stage`, `Interrupt`,
   `on_interrupt`) says what Ctrl-C or closing a window means at each stage of
   a followed run, and `config::trust_changes` lists the settings to review
