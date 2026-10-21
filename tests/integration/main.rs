@@ -11,7 +11,9 @@ use std::time::Duration;
 use shipslip::config::TrustedTarget;
 use shipslip::logs::{self, Badge, ChannelKind, Format, Level, LogsError, Request, Since};
 use shipslip::receipt::{ReceiptJournal, ReceiptStatus};
-use shipslip::transport::{SshTransport, Transport, TransportError, LINE_QUEUE, SCRIPT_LINE_LIMIT};
+use shipslip::transport::{
+    ConnectFailure, SshTransport, Transport, TransportError, LINE_QUEUE, SCRIPT_LINE_LIMIT,
+};
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute, execute_recorded, lock_status, prepare,
     prepare_with_plan, prepare_with_progress, AbortReason, BlockReason, BreakLockError,
@@ -1732,13 +1734,59 @@ async fn unreachable_server_is_a_connect_error() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A new key pair inside the throwaway server's temp directory.
+fn new_key(server: &Server, name: &str) -> PathBuf {
+    let key = server.dir.join(name);
+    let status = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    key
+}
+
+async fn connect_failure(server: &Server, config: &str) -> ConnectFailure {
+    match SshTransport::connect_with_config("server", &server.dir.join(config)).await {
+        Err(error @ TransportError::Connect(_)) => error.connect_failure().unwrap(),
+        result => panic!("{config} did not refuse the connection: {result:?}"),
+    }
+}
+
 #[tokio::test]
 async fn unknown_host_key_is_refused() {
     let server = Server::start().await;
-    let result = SshTransport::connect_with_config("server", &server.dir.join("untrusted")).await;
-    assert!(
-        matches!(result, Err(TransportError::Connect(_))),
-        "{result:?}"
+    assert_eq!(
+        connect_failure(&server, "untrusted").await,
+        ConnectFailure::HostKeyUnknown,
+    );
+}
+
+#[tokio::test]
+async fn changed_host_key_is_refused_as_changed_not_unknown() {
+    let server = Server::start().await;
+    let other = new_key(&server, "other_host_key");
+    let public = std::fs::read_to_string(other.with_extension("pub")).unwrap();
+    server.write_config("changed", &public);
+    assert_eq!(
+        connect_failure(&server, "changed").await,
+        ConnectFailure::HostKeyChanged,
+    );
+}
+
+#[tokio::test]
+async fn a_key_the_server_does_not_accept_is_refused() {
+    let server = Server::start().await;
+    let wrong_key = new_key(&server, "wrong_client_key");
+    let config = std::fs::read_to_string(server.config()).unwrap();
+    let config = config.replace(
+        &format!("IdentityFile {}", server.dir.join("id_ed25519").display()),
+        &format!("IdentityFile {}", wrong_key.display()),
+    );
+    std::fs::write(server.dir.join("wrong-key"), config).unwrap();
+    assert_eq!(
+        connect_failure(&server, "wrong-key").await,
+        ConnectFailure::KeyNotLoaded,
     );
 }
 
@@ -2562,6 +2610,74 @@ async fn bring_app_up_restores_a_deploy_left_in_maintenance_mode() {
             ""
         ),
         "up"
+    );
+    assert!(!server.lock_exists(&path));
+}
+
+#[tokio::test]
+async fn recorded_up_recovers_after_disconnect_without_repeating_the_command() {
+    let server = Server::start().await;
+    let path = server.app("app");
+    server.exec_as("root", "mv /usr/local/bin/php /usr/local/bin/php-original; cat > /usr/local/bin/php; chmod 755 /usr/local/bin/php", r#"#!/bin/sh
+if [ "$1" = artisan ] && [ "$2" = up ]; then
+    echo up-started
+    while [ ! -e "$HOME/.shipslip-allow-up" ]; do sleep 0.05; done
+fi
+exec /usr/local/bin/php-original "$@"
+"#);
+    let ssh = Arc::new(server.connect().await);
+    let target = trusted(target(&path, &["echo recipe-ran > ~/unexpected-recipe"]));
+    let receipts = server.dir.join("receipts");
+    let (mut events, handle) = bring_app_up(&target, ssh.clone(), &receipts).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            if matches!(events.recv().await, Some(DeployEvent::MaintenanceOutput { line, .. }) if line == "up-started") {
+                break;
+            }
+        }
+    }).await.unwrap();
+    server.exec_as("root", "pkill -f 'sshd: deploy'", "");
+    handle.detach();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = events.recv().await {
+            if event == (DeployEvent::Detached { index: 0 }) {
+                return;
+            }
+        }
+        panic!("Up did not detach");
+    })
+    .await
+    .unwrap();
+    drop(events);
+    drop(handle);
+    drop(ssh);
+    let saved = std::fs::read_dir(receipts.join("app/staging"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .unwrap();
+    let journal = Arc::new(ReceiptJournal::load(&saved).unwrap());
+    assert_eq!(journal.snapshot().status, ReceiptStatus::InProgress);
+    let ssh = Arc::new(server.connect().await);
+    server.exec("touch ~/.shipslip-allow-up", "");
+    let (mut events, _) = attach(&target, journal.clone(), ssh).unwrap();
+    let mut last = None;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(event) = events.recv().await {
+            last = Some(event);
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(last, Some(DeployEvent::Finished(DeployOutcome::Succeeded)));
+    let receipt = shipslip::receipt::read(&saved).unwrap();
+    assert_eq!(receipt.status, ReceiptStatus::Final);
+    assert_eq!(receipt.steps.len(), 1);
+    assert!(receipt.steps[0].output.iter().any(|line| line == "up"));
+    assert_eq!(server.exec("cat ~/.shipslip-php-calls", ""), "artisan up");
+    assert_eq!(
+        server.exec("test ! -e ~/unexpected-recipe && echo clean", ""),
+        "clean"
     );
     assert!(!server.lock_exists(&path));
 }

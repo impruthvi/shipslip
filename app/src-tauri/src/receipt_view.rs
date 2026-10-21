@@ -166,14 +166,16 @@ fn receipt_view(receipt: &Receipt) -> ReceiptView {
             &item.output,
         ));
     }
-    if let Some(status) = &receipt.maintenance_up_status {
-        steps.push(step(
-            "off",
-            "Maintenance off: php artisan up",
-            status.clone().into(),
-            receipt.maintenance_up_exit_code,
-            &[],
-        ));
+    if receipt.kind == shipslip::receipt::ReceiptKind::Deploy {
+        if let Some(status) = &receipt.maintenance_up_status {
+            steps.push(step(
+                "off",
+                "Maintenance off: php artisan up",
+                status.clone().into(),
+                receipt.maintenance_up_exit_code,
+                &[],
+            ));
+        }
     }
     ReceiptView {
         run_id: escape_field(&receipt.run_id),
@@ -372,6 +374,24 @@ mod tests {
             .filter(|span| matches!(span, Span::Command { .. }))
             .count();
         assert_eq!(copyable, 2);
+    }
+
+    #[test]
+    fn standalone_up_has_one_step_with_escaped_saved_output() {
+        let fx = Fixture::new();
+        let mut receipt = run(1, "staging");
+        receipt["version"] = json!(2);
+        receipt["kind"] = json!("up");
+        receipt["maintenance_up_status"] = json!("Failed");
+        receipt["maintenance_up_exit_code"] = json!(7);
+        receipt["steps"] = json!([{
+            "index": 0, "command": "php artisan up", "status": "Failed",
+            "exit_code": 7, "output": ["up failed\u{1b}[2J"]
+        }]);
+        let view = open(&fx, &receipt);
+        assert_eq!(view.steps.len(), 1);
+        assert_eq!(view.steps[0].status, StepStatusView::Failed);
+        assert_eq!(view.steps[0].output, ["up failed\\x1b[2J"]);
     }
 
     #[test]

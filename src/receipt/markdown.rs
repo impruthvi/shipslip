@@ -132,14 +132,16 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
             exit(step.exit_code)
         );
     }
-    if let Some(status) = &receipt.maintenance_up_status {
-        maintenance_row(
-            &mut out,
-            "Maintenance off",
-            "php artisan up",
-            status,
-            receipt.maintenance_up_exit_code,
-        );
+    if receipt.kind == super::ReceiptKind::Deploy {
+        if let Some(status) = &receipt.maintenance_up_status {
+            maintenance_row(
+                &mut out,
+                "Maintenance off",
+                "php artisan up",
+                status,
+                receipt.maintenance_up_exit_code,
+            );
+        }
     }
 
     if let Some(watch) = &receipt.watch {

@@ -16,6 +16,46 @@ pub enum TransportError {
     Connect(String),
 }
 
+impl TransportError {
+    /// Classifies a connection refusal using OpenSSH's diagnostic text.
+    /// A lost connection has an unknown command result, not a refusal.
+    pub fn connect_failure(&self) -> Option<ConnectFailure> {
+        match self {
+            Self::Connect(message) => Some(ConnectFailure::of(message)),
+            Self::ConnectionLost(_) => None,
+        }
+    }
+}
+
+/// Why OpenSSH refused a connection. Unrecognized diagnostics stay [`Self::Other`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectFailure {
+    /// No trusted host key was found. Compare the fingerprint in Terminal.
+    HostKeyUnknown,
+    /// The trusted host key changed. Never offer a command to trust its replacement.
+    HostKeyChanged,
+    /// None of the offered keys was accepted, possibly because the key is not loaded.
+    KeyNotLoaded,
+    /// No specific refusal was recognized; show the original diagnostic.
+    Other,
+}
+
+impl ConnectFailure {
+    /// Classifies diagnostic text; the changed-key banner takes precedence
+    /// because it also includes the generic host-key verification failure.
+    pub fn of(message: &str) -> Self {
+        if message.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
+            Self::HostKeyChanged
+        } else if message.contains("Host key verification failed") {
+            Self::HostKeyUnknown
+        } else if message.contains("Permission denied (publickey") {
+            Self::KeyNotLoaded
+        } else {
+            Self::Other
+        }
+    }
+}
+
 /// Remote execution on one server.
 pub trait Transport: Send + Sync + 'static {
     /// Runs a bash script on the remote host.
@@ -57,3 +97,44 @@ pub fn truncation_marker(dropped: usize) -> String {
 mod ssh;
 #[cfg(unix)]
 pub use ssh::SshTransport;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_refusals_preserve_the_original_diagnostic() {
+        for (message, expected) in [
+            (
+                "Host key verification failed.",
+                ConnectFailure::HostKeyUnknown,
+            ),
+            (
+                "REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.",
+                ConnectFailure::HostKeyChanged,
+            ),
+            (
+                "Permission denied (publickey).",
+                ConnectFailure::KeyNotLoaded,
+            ),
+            (
+                "Permission denied (publickey,password).",
+                ConnectFailure::KeyNotLoaded,
+            ),
+            ("Connection refused", ConnectFailure::Other),
+            ("Could not resolve hostname server", ConnectFailure::Other),
+            ("unrecognized diagnostic", ConnectFailure::Other),
+            ("", ConnectFailure::Other),
+        ] {
+            let error = TransportError::Connect(message.into());
+            assert_eq!(error.connect_failure(), Some(expected), "{message}");
+            assert_eq!(error.to_string(), format!("could not connect: {message}"));
+        }
+    }
+
+    #[test]
+    fn a_lost_connection_is_not_a_refusal() {
+        let error = TransportError::ConnectionLost("Host key verification failed".into());
+        assert_eq!(error.connect_failure(), None);
+    }
+}

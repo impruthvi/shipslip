@@ -1,5 +1,4 @@
-//! The CLI refuses every server-changing command for an untrusted config,
-//! before any ssh connection.
+//! The CLI refuses untrusted configs and changed attach settings before SSH.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -67,6 +66,30 @@ impl Fixture {
     fn ssh_called(&self) -> bool {
         Path::new(&self.root.join("ssh-called")).exists()
     }
+
+    fn trust(&self) {
+        let trust = Command::new(env!("CARGO_BIN_EXE_slip"))
+            .args(["trust", "staging"])
+            .current_dir(self.root.join("app"))
+            .env("HOME", self.root.join("home"))
+            .env_remove("SHIPSLIP_CONFIG")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                child.stdin.take().unwrap().write_all(b"staging\n")?;
+                child.wait_with_output()
+            })
+            .unwrap();
+        assert!(
+            trust.status.success()
+                && String::from_utf8_lossy(&trust.stdout).contains("staging: trusted"),
+            "{}",
+            String::from_utf8_lossy(&trust.stderr)
+        );
+    }
 }
 
 impl Drop for Fixture {
@@ -100,26 +123,7 @@ fn untrusted_config_refuses_every_server_command_before_ssh() {
 #[test]
 fn config_changed_after_trust_is_refused_before_ssh() {
     let fixture = Fixture::new("changed");
-    let trust = Command::new(env!("CARGO_BIN_EXE_slip"))
-        .args(["trust", "staging"])
-        .current_dir(fixture.root.join("app"))
-        .env("HOME", fixture.root.join("home"))
-        .env_remove("SHIPSLIP_CONFIG")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .and_then(|mut child| {
-            use std::io::Write;
-            child.stdin.take().unwrap().write_all(b"staging\n")?;
-            child.wait_with_output()
-        })
-        .unwrap();
-    assert!(
-        String::from_utf8_lossy(&trust.stdout).contains("staging: trusted"),
-        "{}",
-        String::from_utf8_lossy(&trust.stderr)
-    );
+    fixture.trust();
     // The trusted config gets past the gate, so the fake ssh does detect a connection.
     let output = fixture.slip(&["deploy", "staging"]);
     assert!(
@@ -138,4 +142,68 @@ fn config_changed_after_trust_is_refused_before_ssh() {
     assert_eq!(output.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("is untrusted"), "{stderr}");
     assert!(!fixture.ssh_called());
+}
+
+#[test]
+fn attach_with_newly_trusted_different_settings_is_refused_before_ssh() {
+    let fixture = Fixture::new("attach-changed");
+    fixture.trust();
+    let config = shipslip::config::LoadedConfig::load(&fixture.root.join("app"), None).unwrap();
+    let receipt = serde_json::json!({
+        "version": 1,
+        "kind": "deploy",
+        "project": config.project_name(),
+        "repo_root": config.repo_root(),
+        "run_id": "aabbccdd",
+        "owner_pid": 0,
+        "confirmed": true,
+        "started_at_ms": 1,
+        "status": "InProgress",
+        "phase": { "Step": 1 },
+        "target": config.target("staging").unwrap(),
+        "run_plan": "Deploy",
+        "from_sha": "a".repeat(40),
+        "target_sha": "b".repeat(40),
+        "commits": [],
+        "recipe_hash": "c".repeat(64),
+        "steps": [{
+            "index": 1,
+            "command": "php artisan migrate --force",
+            "status": "Running",
+            "output": []
+        }],
+        "maintenance_down_done": false,
+        "maintenance_up_done": false,
+        "app_left_down": false,
+        "mutation_started": true
+    });
+    let receipts_root = if cfg!(target_os = "macos") {
+        "home/Library/Application Support/Shipslip/receipts"
+    } else {
+        "home/.local/share/shipslip/receipts"
+    };
+    let receipts = fixture.root.join(receipts_root).join("trust-test/staging");
+    fs::create_dir_all(&receipts).unwrap();
+    let receipt_path = receipts.join("1-aabbccdd.json");
+    let saved = serde_json::to_vec(&receipt).unwrap();
+    fs::write(&receipt_path, &saved).unwrap();
+
+    fs::write(
+        fixture.root.join("app/.shipslip.toml"),
+        CONFIG.replace("migrate --force", "migrate:fresh --force"),
+    )
+    .unwrap();
+    fixture.trust();
+
+    let output = fixture.slip(&["attach", "staging"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains(
+            "the unfinished run uses different deploy settings; inspect the receipt before recovery"
+        ),
+        "{stderr}"
+    );
+    assert!(!fixture.ssh_called(), "ssh was started: {stderr}");
+    assert_eq!(fs::read(receipt_path).unwrap(), saved);
 }
