@@ -185,12 +185,40 @@ fn every_code_state_has_its_own_words() {
 }
 
 #[test]
+fn a_successful_up_reads_as_app_brought_up() {
+    let mut staging = cell("staging", recorded(false, Evidence::FastForward));
+    staging.last_attempt = Some(AttemptSummary {
+        run_id: "ffff0006-0".into(),
+        started_at_ms: NOW - 5 * 60_000,
+        kind: ReceiptKind::Up,
+        run_plan: RunPlan::Deploy,
+        badge: Badge {
+            unfinished: false,
+            outcome: Some(DeployOutcome::Succeeded),
+            flags: vec![],
+        },
+        next_steps: vec![],
+        path: "/r/shop/staging/1-ffff0006-0.json".into(),
+    });
+    let overview = Overview {
+        repos: vec![row("shop", vec![staging])],
+        problems: vec![],
+    };
+    let text = render(&overview, NOW, None, no_compare);
+    assert!(
+        text.contains("\n           app brought up ffff0006 (5m ago)\n"),
+        "{text}"
+    );
+}
+
+#[test]
 fn map_shows_last_runs_targets_hints_and_problems() {
     let mut production = cell("production", recorded(true, Evidence::FastForward));
     production.target = Some("web1:/srv/shop".into());
     production.last_attempt = Some(AttemptSummary {
         run_id: "eeee0005-0".into(),
         started_at_ms: NOW - 20 * 60_000,
+        kind: ReceiptKind::Deploy,
         run_plan: RunPlan::Deploy,
         badge: Badge {
             unfinished: true,

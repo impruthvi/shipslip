@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
 use tokio::sync::{mpsc, watch, Semaphore};
 
 use crate::config::TrustedTarget;
@@ -16,7 +17,9 @@ use crate::event::{
 use crate::lock::{self, Acquire, Break, LockInfo, LockOwner};
 use crate::observation::{self, LogObserver, SmokeResult, WatchResult, WatchStatus};
 use crate::preflight::{self, AbortReason, BlockReason, State};
-use crate::receipt::{Receipt, ReceiptJournal, ReceiptPhase, ReceiptStatus, ReceiptStepStatus};
+use crate::receipt::{
+    Receipt, ReceiptJournal, ReceiptKind, ReceiptPhase, ReceiptStatus, ReceiptStepStatus,
+};
 use crate::runner::{self, run_collect, StepResult};
 use crate::script::{is_full_sha, is_safe_branch, wrap_step};
 use crate::transport::{Transport, TransportError, LINE_QUEUE};
@@ -423,72 +426,230 @@ pub enum BringUpError {
     LockHeld(LockInfo),
     #[error("could not take the deploy lock: {0}")]
     Lock(String),
-    #[error("`php artisan up` exited with {code}: {output}")]
-    Failed { code: i32, output: String },
-    #[error("could not confirm whether `php artisan up` completed; the deploy lock was kept")]
-    Unknown,
-    #[error("`php artisan up` was not started: {0}")]
-    NotStarted(String),
-    #[error("could not follow `php artisan up`: {0}; the deploy lock was kept")]
-    Interrupted(String),
+    #[error("could not read the server checkout: {0}")]
+    Check(String),
+    #[error("could not save the receipt: {0}")]
+    Receipt(String),
     #[error(transparent)]
     Transport(#[from] TransportError),
 }
 
-/// Runs `php artisan up`, e.g. after a failed deploy left the app in
-/// maintenance mode. Holds the deploy lock meanwhile, so it cannot run
-/// during a deploy. Returns the command's output.
+/// The command [`bring_app_up`] runs.
+const UP_COMMAND: &str = "php artisan up";
+
+/// Turns maintenance mode off, e.g. after a failed deploy left the app down,
+/// as a recorded run. Takes the deploy lock, so it cannot run during a
+/// deploy, reads the server HEAD, and writes the receipt before the command
+/// is sent; then follows it in the background like [`execute`]. Ask the user
+/// before calling. The code on the server does not change.
+///
+/// Must be called within a Tokio runtime.
 pub async fn bring_app_up<T: Transport>(
     target: &TrustedTarget,
-    transport: &T,
-) -> Result<Vec<String>, BringUpError> {
-    let target = target.target();
+    transport: Arc<T>,
+    receipts_root: &Path,
+) -> Result<(RunEvents, ExecutionHandle), BringUpError> {
+    let deploy = target.target();
     let run_id = new_run_id();
     let owner = LockOwner::current(&run_id, "");
-    match lock::acquire(transport, &target.path, &owner)
+    match lock::acquire(&*transport, &deploy.path, &owner)
         .await
         .map_err(BringUpError::Lock)?
     {
         Acquire::Acquired => {}
         Acquire::Held(info) => return Err(BringUpError::LockHeld(info)),
     }
-    let (line_tx, mut line_rx) = mpsc::channel(LINE_QUEUE);
-    let script = wrap_step(&target.path, "php artisan up");
-    let run = {
-        let tx = line_tx;
-        let step_run_id = run_id.clone();
-        async move { runner::run_step(transport, &step_run_id, "maintenance-up", &script, &tx).await }
-    };
-    let collect = async {
-        let mut lines = Vec::new();
-        while let Some(line) = line_rx.recv().await {
-            lines.push(line);
+    let journal = async {
+        let (result, lines) =
+            run_collect(&*transport, &preflight::state_script(&deploy.path)).await;
+        let head = preflight::parse_state(&lines).head;
+        match result {
+            Ok(0) if is_full_sha(&head) => {}
+            Ok(_) => return Err(BringUpError::Check(lines.join("\n"))),
+            Err(error) => return Err(error.into()),
         }
-        lines
-    };
-    let (result, lines) = tokio::select! {
-        result = async { tokio::join!(run, collect) } => result,
-        () = heartbeat_forever(transport, &target.path, &run_id) => unreachable!("heartbeat never ends"),
-    };
-    match result {
-        StepResult::Exited(0) => {
-            lock::release(transport, &target.path, &run_id).await?;
-            Ok(lines)
-        }
-        StepResult::Exited(code) => {
-            lock::release(transport, &target.path, &run_id).await?;
-            Err(BringUpError::Failed {
-                code,
-                output: lines.join("\n"),
-            })
-        }
-        StepResult::NotStarted(reason) => {
-            lock::release(transport, &target.path, &run_id).await?;
-            Err(BringUpError::NotStarted(reason))
-        }
-        StepResult::Gone => Err(BringUpError::Unknown),
-        StepResult::Interrupted(reason) => Err(BringUpError::Interrupted(reason)),
+        ReceiptJournal::create_up(
+            receipts_root,
+            target.project(),
+            target.repo_root(),
+            deploy,
+            &head,
+            &run_id,
+            &up_hash(deploy),
+        )
+        .map_err(|error| BringUpError::Receipt(error.to_string()))
     }
+    .await;
+    let journal = match journal {
+        Ok(journal) => Arc::new(journal),
+        Err(error) => {
+            lock::release(&*transport, &deploy.path, &run_id).await?;
+            return Err(error);
+        }
+    };
+    let preview = up_preview(&journal.snapshot());
+    Ok(spawn_up(preview, transport, journal, FollowMode::Launch))
+}
+
+fn up_hash(target: &DeployTarget) -> String {
+    let mut h = Sha256::new();
+    for part in [
+        target.env.as_str(),
+        &target.ssh_alias,
+        &target.path,
+        "up",
+        UP_COMMAND,
+    ] {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part.as_bytes());
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The run an Up receipt describes, so it can be followed like a deploy.
+fn up_preview(receipt: &Receipt) -> Preview {
+    Preview {
+        target: receipt.target.clone(),
+        from_sha: receipt.from_sha.clone(),
+        target_sha: receipt.target_sha.clone(),
+        commits: Vec::new(),
+        more_commits: 0,
+        recipe_hash: receipt.recipe_hash.clone(),
+        run_plan: receipt.run_plan,
+        run_id: receipt.run_id.clone(),
+    }
+}
+
+/// Starts [`run_up`] in the background.
+fn spawn_up<T: Transport>(
+    preview: Preview,
+    transport: Arc<T>,
+    journal: Arc<ReceiptJournal>,
+    mode: FollowMode,
+) -> (RunEvents, ExecutionHandle) {
+    let (events, rx) = mpsc::unbounded_channel();
+    let output_room = Arc::new(Semaphore::new(OUTPUT_QUEUE));
+    let (detach_tx, detach_rx) = watch::channel(false);
+    let handle = ExecutionHandle {
+        stop: Arc::new(AtomicBool::new(false)),
+        detach: detach_tx,
+        watch_cancel: Arc::new(AtomicBool::new(false)),
+    };
+    tokio::spawn(run_up(
+        preview,
+        transport,
+        events,
+        output_room.clone(),
+        detach_rx,
+        journal,
+        mode,
+    ));
+    (RunEvents { rx, output_room }, handle)
+}
+
+async fn run_up<T: Transport>(
+    preview: Preview,
+    transport: Arc<T>,
+    events: mpsc::UnboundedSender<DeployEvent>,
+    output_room: Arc<Semaphore>,
+    mut detach: watch::Receiver<bool>,
+    journal: Arc<ReceiptJournal>,
+    mode: FollowMode,
+) {
+    let (path, run_id) = (&preview.target.path, &preview.run_id);
+    let follow_up = async {
+        if mode == FollowMode::Launch {
+            journal
+                .begin_maintenance(MaintenancePhase::Up)
+                .map_err(|error| error.to_string())?;
+        }
+        let followed = maintenance(
+            &*transport,
+            &preview,
+            MaintenancePhase::Up,
+            &events,
+            &output_room,
+            &mut detach,
+            true,
+            mode,
+            Some(&journal),
+        )
+        .await;
+        if let Followed::Done(result) = &followed {
+            let (status, code) = result_status(result);
+            journal
+                .finish_maintenance(MaintenancePhase::Up, status, code)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok::<_, String>(followed)
+    };
+    let followed = tokio::select! {
+        followed = follow_up => followed,
+        () = heartbeat_forever(&*transport, path, run_id) => unreachable!("heartbeat never ends"),
+    };
+    let outcome = match followed {
+        Err(error) => {
+            send_run_error(
+                &events,
+                Some(journal),
+                format!("could not save the receipt: {error}"),
+            );
+            return;
+        }
+        Ok(Followed::Detached) => {
+            let _ = journal.message("detached while observing `php artisan up`".into());
+            journal.release_claim();
+            drop(journal);
+            let _ = events.send(DeployEvent::Detached { index: 0 });
+            return;
+        }
+        Ok(Followed::Done(StepResult::Interrupted(reason))) => {
+            let _ = journal.message(reason.clone());
+            journal.release_claim();
+            drop(journal);
+            let _ = events.send(DeployEvent::Interrupted { index: 0, reason });
+            return;
+        }
+        Ok(Followed::NotLaunched) => DeployOutcome::StoppedInMaintenance(AbortReason::Cancelled),
+        Ok(Followed::Done(StepResult::Exited(0))) => DeployOutcome::Succeeded,
+        Ok(Followed::Done(StepResult::Exited(_))) => DeployOutcome::FailedAtStep {
+            step: 0,
+            partial_update: false,
+        },
+        Ok(Followed::Done(StepResult::NotStarted(reason))) => {
+            DeployOutcome::StoppedInMaintenance(AbortReason::ConnectFailed(reason))
+        }
+        Ok(Followed::Done(StepResult::Gone)) => DeployOutcome::Unknown {
+            step: 0,
+            reason: "the command's record on the server is gone".into(),
+        },
+    };
+    // After an unknown result the server needs checking first, so the lock
+    // is kept and goes stale.
+    if !matches!(outcome, DeployOutcome::Unknown { .. }) {
+        if let Err(error) = lock::release(&*transport, path, run_id).await {
+            send_run_error(
+                &events,
+                Some(journal),
+                format!("could not release deploy lock: {error}"),
+            );
+            return;
+        }
+    }
+    if let Err(error) = journal.finish(outcome.clone()) {
+        send_run_error(
+            &events,
+            Some(journal),
+            format!("could not finalize the receipt: {error}"),
+        );
+        return;
+    }
+    if journal.snapshot().app_left_down {
+        let _ = events.send(DeployEvent::AppLeftDown);
+    }
+    journal.release_claim();
+    drop(journal);
+    let _ = events.send(DeployEvent::Finished(outcome));
 }
 
 /// Gives up a prepared deploy without running it, releasing its lock.
@@ -729,6 +890,24 @@ pub fn attach<T: Transport>(
         return Err(AttachError::Invalid(
             "mutation began without confirmation".into(),
         ));
+    }
+    if receipt.kind == ReceiptKind::Up {
+        if !is_full_sha(&receipt.from_sha)
+            || receipt.recipe_hash != up_hash(&receipt.target)
+            || !receipt.steps.is_empty()
+        {
+            return Err(AttachError::Invalid("the saved run is inconsistent".into()));
+        }
+        journal
+            .set_owner_pid(std::process::id())
+            .map_err(|error| AttachError::Receipt(error.to_string()))?;
+        // Once started, `php artisan up` is only observed, never sent again.
+        let mode = if receipt.mutation_started {
+            FollowMode::Attach
+        } else {
+            FollowMode::Launch
+        };
+        return Ok(spawn_up(up_preview(&receipt), transport, journal, mode));
     }
     if !is_full_sha(&receipt.from_sha)
         || !is_full_sha(&receipt.target_sha)
@@ -2047,7 +2226,8 @@ fn new_run_id() -> String {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::path::{Path, PathBuf};
+    use std::fs;
+    use std::path::PathBuf;
     use std::sync::atomic::AtomicUsize;
     use std::sync::{Mutex, OnceLock};
 
@@ -3119,37 +3299,174 @@ mod tests {
         );
     }
 
+    fn up_receipt_path(dir: &TempReceipts) -> PathBuf {
+        let env_dir = dir.0.join("app").join("staging");
+        let mut paths: Vec<PathBuf> = fs::read_dir(&env_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .collect();
+        assert_eq!(paths.len(), 1, "{paths:?}");
+        paths.pop().unwrap()
+    }
+
     #[tokio::test]
-    async fn bring_app_up_runs_under_the_lock_and_releases_it() {
-        let fake = preflight().on("php artisan up", &["back up"], 0);
-        let target = trusted(target(false, &[]));
-        let output = bring_app_up(&target, &fake).await.unwrap();
-        assert_eq!(output, ["back up"]);
+    async fn bring_app_up_is_a_recorded_run_that_releases_the_lock() {
+        let fake = Arc::new(preflight().on("php artisan up", &["back up"], 0));
+        let dir = TempReceipts::new();
+        let (events, _handle) = bring_app_up(
+            &trusted(target(false, &["deploy command"])),
+            fake.clone(),
+            &dir.0,
+        )
+        .await
+        .unwrap();
+        let events = collect(events).await;
+        assert!(events.contains(&DeployEvent::MaintenanceOutput {
+            phase: MaintenancePhase::Up,
+            line: "back up".into()
+        }));
+        assert!(!events.contains(&DeployEvent::AppLeftDown));
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
         assert_eq!(fake.lock_owner(), None);
         assert_eq!(fake.launched("php artisan up"), 1);
+        assert_eq!(fake.ran_matching("deploy command"), 0);
+
+        let receipt = crate::receipt::read(&up_receipt_path(&dir)).unwrap();
+        assert_eq!(receipt.kind, ReceiptKind::Up);
+        assert_eq!(receipt.status, ReceiptStatus::Final);
+        assert_eq!(receipt.outcome, Some(DeployOutcome::Succeeded));
+        assert!(!receipt.app_left_down);
+        assert_eq!(receipt.maintenance_up_status, Some(StepStatus::Ok));
+        assert!(is_full_sha(&receipt.from_sha));
+        assert_eq!(receipt.from_sha, receipt.target_sha);
+        assert!(receipt.steps.is_empty());
+        assert!(receipt.badge().flags.is_empty());
+        assert_eq!(
+            receipt.summary().unwrap(),
+            "The app was brought up (`php artisan up` succeeded)."
+        );
     }
 
     #[tokio::test]
     async fn bring_app_up_refuses_to_run_while_a_deploy_holds_the_lock() {
-        let fake = preflight().locked_by_other(false);
-        let err = bring_app_up(&trusted(target(false, &[])), &fake)
-            .await
-            .unwrap_err();
+        let fake = Arc::new(preflight().locked_by_other(false));
+        let dir = TempReceipts::new();
+        let Err(err) = bring_app_up(&trusted(target(false, &[])), fake.clone(), &dir.0).await
+        else {
+            panic!("a held lock must refuse");
+        };
         assert!(matches!(err, BringUpError::LockHeld(_)));
         assert_eq!(fake.ran_matching("php artisan up"), 0);
+        assert!(!dir.0.join("app").exists());
+    }
+
+    #[tokio::test]
+    async fn a_failed_up_is_recorded_with_the_app_still_down() {
+        let fake = Arc::new(preflight().on("php artisan up", &["nope"], 1));
+        let dir = TempReceipts::new();
+        let (events, _handle) = bring_app_up(&trusted(target(false, &[])), fake.clone(), &dir.0)
+            .await
+            .unwrap();
+        let events = collect(events).await;
+        assert!(events.contains(&DeployEvent::AppLeftDown));
+        assert_eq!(fake.lock_owner(), None);
+        let receipt = crate::receipt::read(&up_receipt_path(&dir)).unwrap();
+        assert!(receipt.app_left_down);
+        assert!(receipt
+            .badge()
+            .flags
+            .contains(&crate::receipt::Flag::AppLeftDown));
+        assert_eq!(
+            receipt.summary().unwrap(),
+            "`php artisan up` exited with 1; the app may still be in maintenance mode."
+        );
     }
 
     #[tokio::test(start_paused = true)]
-    async fn bring_app_up_keeps_the_lock_when_its_result_is_unknown() {
-        let fake = preflight()
-            .drops("php artisan up", &[], 0, 0)
-            .unreachable_after_drop();
-        let error = bring_app_up(&trusted(target(false, &[])), &fake)
+    async fn bring_app_up_keeps_the_lock_and_receipt_open_when_its_result_is_unknown() {
+        let fake = Arc::new(
+            preflight()
+                .drops("php artisan up", &[], 0, 0)
+                .unreachable_after_drop(),
+        );
+        let dir = TempReceipts::new();
+        let (events, _handle) = bring_app_up(&trusted(target(false, &[])), fake.clone(), &dir.0)
             .await
-            .unwrap_err();
-
-        assert!(matches!(error, BringUpError::Interrupted(_)));
+            .unwrap();
+        assert!(matches!(
+            collect(events).await.last(),
+            Some(DeployEvent::Interrupted { index: 0, .. })
+        ));
         assert!(fake.lock_owner().is_some());
+        let receipt = crate::receipt::read(&up_receipt_path(&dir)).unwrap();
+        assert_eq!(receipt.status, ReceiptStatus::InProgress);
+        assert!(receipt.mutation_started);
+        assert_eq!(receipt.maintenance_up_status, Some(StepStatus::Unknown));
+        assert!(receipt.app_left_down);
+    }
+
+    #[tokio::test]
+    async fn attach_on_an_up_receipt_observes_up_and_never_relaunches_or_runs_recipe_steps() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(preflight().gated("php artisan up", gate.clone()).on(
+            "deploy command",
+            &[],
+            0,
+        ));
+        let dir = TempReceipts::new();
+        let target = trusted(target(false, &["deploy command"]));
+        let (mut events, handle) = bring_app_up(&target, fake.clone(), &dir.0).await.unwrap();
+        assert_eq!(
+            events.recv().await,
+            Some(DeployEvent::MaintenanceStarted {
+                phase: MaintenancePhase::Up
+            })
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fake.launched("php artisan up") == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The receipt was written before the command was sent.
+        let path = up_receipt_path(&dir);
+        let saved = crate::receipt::read(&path).unwrap();
+        assert_eq!(saved.phase, ReceiptPhase::MaintenanceUp);
+        assert!(saved.mutation_started);
+        handle.detach();
+        assert_eq!(
+            collect(events).await.last(),
+            Some(&DeployEvent::Detached { index: 0 })
+        );
+
+        let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (events, _handle) = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match attach(&target, resumed.clone(), fake.clone()) {
+                    Err(AttachError::Receipt(_)) => tokio::task::yield_now().await,
+                    result => return result.unwrap(),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        gate.notify_one();
+        assert_eq!(
+            collect(events).await.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+        assert_eq!(fake.launched("php artisan up"), 1);
+        assert_eq!(fake.ran_matching("deploy command"), 0);
+        assert_eq!(fake.lock_owner(), None);
+        assert_eq!(
+            crate::receipt::read(&path).unwrap().status,
+            ReceiptStatus::Final
+        );
     }
 
     #[tokio::test(start_paused = true)]

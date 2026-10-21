@@ -203,6 +203,75 @@ fn maintenance_stop_is_the_last_attempt_with_its_flag() {
     assert!(badge.flags.contains(&Flag::AppLeftDown), "{badge:?}");
 }
 
+/// A deploy that failed at step 1 and left maintenance mode on.
+fn left_down(n: u64) -> Value {
+    let mut value = run(n, "staging");
+    value["target"]["maintenance"] = json!(true);
+    value["steps"][1]["status"] = json!("Failed");
+    value["steps"][1]["exit_code"] = json!(1);
+    value["steps"][2]["status"] = json!("NotStarted");
+    value["outcome"] = json!({"FailedAtStep": {"step": 1, "partial_update": false}});
+    value["app_left_down"] = json!(true);
+    value
+}
+
+/// A finished `slip up` on the same target.
+fn up(n: u64, succeeded: bool) -> Value {
+    let mut value = run(n, "staging");
+    value["version"] = json!(2);
+    value["kind"] = json!("up");
+    value["target"]["maintenance"] = json!(true);
+    value["from_sha"] = json!(OTHER);
+    value["target_sha"] = json!(OTHER);
+    value["steps"] = json!([]);
+    value["maintenance_up_status"] = json!(if succeeded { "Ok" } else { "Failed" });
+    value["app_left_down"] = json!(!succeeded);
+    value["outcome"] = if succeeded {
+        json!("Succeeded")
+    } else {
+        json!({"FailedAtStep": {"step": 0, "partial_update": false}})
+    };
+    value
+}
+
+#[test]
+fn a_successful_up_clears_the_maintenance_flag_without_changing_the_code() {
+    let fixture = Fixture::new();
+    fixture.save(&left_down(1));
+    let before = fixture.overview();
+    let staging = cell(&before, "/work/app", "staging");
+    let flags = &staging.code_run.as_ref().unwrap().badge.flags;
+    assert!(flags.contains(&Flag::AppLeftDown), "{flags:?}");
+
+    fixture.save(&up(2, true));
+    let after = fixture.overview();
+    let staging = cell(&after, "/work/app", "staging");
+    assert_eq!(staging.code, recorded(NEW, false, Evidence::FastForward, 1));
+    let code_run = staging.code_run.as_ref().unwrap();
+    assert!(!code_run.badge.flags.contains(&Flag::AppLeftDown));
+    assert!(!code_run
+        .next_steps
+        .iter()
+        .any(|line| line.contains("slip up")));
+    let last = staging.last_attempt.as_ref().unwrap();
+    assert_eq!(last.kind, ReceiptKind::Up);
+    assert!(last.badge.flags.is_empty(), "{:?}", last.badge);
+}
+
+#[test]
+fn a_failed_up_keeps_the_maintenance_flag() {
+    let fixture = Fixture::new();
+    fixture.save(&left_down(1));
+    fixture.save(&up(2, false));
+    let overview = fixture.overview();
+    let staging = cell(&overview, "/work/app", "staging");
+    assert_eq!(staging.code, recorded(NEW, false, Evidence::FastForward, 1));
+    let code_run = staging.code_run.as_ref().unwrap();
+    assert!(code_run.badge.flags.contains(&Flag::AppLeftDown));
+    let last = staging.last_attempt.as_ref().unwrap();
+    assert!(last.badge.flags.contains(&Flag::AppLeftDown));
+}
+
 #[test]
 fn crash_after_the_fast_forward_is_incomplete_and_unfinished() {
     let fixture = Fixture::new();
@@ -501,7 +570,7 @@ fn unreadable_files_mark_cells_stale_and_are_never_skipped_quietly() {
 
     // A newer-version receipt is still attributed, but cannot decide.
     let mut newer = run(4, "staging");
-    newer["version"] = json!(2);
+    newer["version"] = json!(3);
     let newer = fixture.save(&newer);
     let staging = cell(&fixture.overview(), "/work/app", "staging").clone();
     assert_eq!(staging.code, recorded(NEW, true, Evidence::FastForward, 1));
@@ -715,6 +784,32 @@ fn comparisons_carry_each_sides_caveat_and_refuse_unknown_code() {
         Comparison::Unavailable("checkout not found".into())
     );
     compare_envs_with(&row, "staging", "production", never);
+}
+
+#[test]
+fn an_up_from_another_checkout_does_not_flag_the_code_as_out_of_date() {
+    let fixture = Fixture::new();
+    let mut old = run(1, "staging");
+    old["repo_root"] = json!("/old/app");
+    fixture.save(&old);
+    fixture.save(&run(2, "staging"));
+    let mut later_up = up(3, true);
+    later_up["repo_root"] = json!("/old/app");
+    fixture.save(&later_up);
+
+    let overview = fixture.overview();
+    assert_eq!(
+        cell(&overview, "/work/app", "staging").newer_elsewhere,
+        None
+    );
+    // The checkout that only ran `slip up` still sees the newer deploy.
+    assert_eq!(
+        cell(&overview, "/old/app", "staging")
+            .newer_elsewhere
+            .as_ref()
+            .map(|other| other.run_id.as_str()),
+        Some("00000002-0")
+    );
 }
 
 #[test]
@@ -1005,6 +1100,7 @@ fn needs_attention_for_each_kind_of_cell() {
     let attempt = |unfinished, outcome, flags| AttemptSummary {
         run_id: "00000001-0".into(),
         started_at_ms: 1000,
+        kind: ReceiptKind::Deploy,
         run_plan: RunPlan::Deploy,
         badge: Badge {
             unfinished,

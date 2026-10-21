@@ -142,23 +142,6 @@ fn parse_probe(lines: &[String]) -> Option<Probe> {
     }
 }
 
-/// Launches `script` detached as `key` (e.g. `step-2`) of `run_id` and
-/// follows it to the end, re-attaching after dropped connections. Output
-/// lines go to `output`.
-pub(crate) async fn run_step<T: Transport>(
-    transport: &T,
-    run_id: &str,
-    key: &str,
-    script: &str,
-    output: &mpsc::Sender<String>,
-) -> StepResult {
-    let mut reattaches = 0;
-    if let Err(result) = launch_step(transport, run_id, key, script, &mut reattaches).await {
-        return result;
-    }
-    follow_existing(transport, run_id, key, output, &mut reattaches).await
-}
-
 /// Sends the step's launch once and settles whether it started. `Ok` means
 /// the step is on the server (running or already ended); follow it with
 /// [`follow_existing`]. Callers must not cancel this midway, or whether the

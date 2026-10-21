@@ -8,6 +8,20 @@ change the library API.
 
 ### Changed
 
+- `slip up` is a recorded run. It saves a receipt before sending
+  `php artisan up`, keeps the deploy lock's heartbeat while it runs, and if
+  interrupted, `slip attach` follows the command again without sending it
+  twice. `slip receipts` and `slip status` show it ("app brought up"); it
+  never changes the code a release map cell shows, and a successful `up`
+  clears the "app may be in maintenance mode" flag of the deploy before it.
+- Receipts gain `kind` (`deploy` or `up`). Deploy receipts are unchanged and
+  stay schema version 1; `up` receipts are version 2, which releases before
+  0.9.0 list as unreadable instead of misreading them.
+- Library: `bring_app_up` takes the receipts root and returns `RunEvents`
+  and an `ExecutionHandle` like `execute`; `BringUpError` keeps only the
+  errors before the command starts. `attach` resumes `up` receipts.
+  `Receipt::summary` and `Receipt::plan_text` give kind-aware wording;
+  `AttemptSummary::kind`.
 - Library: the trust check moved from the CLI into the library. `prepare`,
   `prepare_with_plan`, `prepare_with_github_token`, `attach`, `bring_app_up`
   and `break_lock` take a `TrustedTarget`, which only

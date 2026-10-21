@@ -8,7 +8,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{
-    io_error, read_receipt, safe_component, Receipt, ReceiptError, ReceiptStatus, ReceiptStepStatus,
+    io_error, read_receipt, safe_component, Receipt, ReceiptError, ReceiptKind, ReceiptStatus,
+    ReceiptStepStatus,
 };
 use crate::logs::escape_field;
 use crate::{DeployOutcome, RunPlan, SmokeResult, WatchStatus};
@@ -264,18 +265,20 @@ pub enum Flag {
 impl Receipt {
     pub fn badge(&self) -> Badge {
         let mut flags = Vec::new();
-        // Checks never apply to a run that stopped before changing anything.
-        let checks_apply = !matches!(
-            (self.status, &self.outcome),
-            (
-                ReceiptStatus::Final,
-                Some(
-                    DeployOutcome::CancelledBeforeChanges
-                        | DeployOutcome::AbortedBeforeChanges(_)
-                        | DeployOutcome::StoppedInMaintenance(_)
+        // Checks never apply to bringing the app up, or to a run that
+        // stopped before changing anything.
+        let checks_apply = self.kind == ReceiptKind::Deploy
+            && !matches!(
+                (self.status, &self.outcome),
+                (
+                    ReceiptStatus::Final,
+                    Some(
+                        DeployOutcome::CancelledBeforeChanges
+                            | DeployOutcome::AbortedBeforeChanges(_)
+                            | DeployOutcome::StoppedInMaintenance(_)
+                    )
                 )
-            )
-        );
+            );
         match &self.watch {
             None if checks_apply => flags.push(Flag::LogNotRecorded),
             None => {}
@@ -376,6 +379,39 @@ impl Receipt {
         )
     }
 
+    /// What the run was for, e.g. `deploy` or `rerun on the deployed commit`.
+    pub fn plan_text(&self) -> String {
+        match self.kind {
+            ReceiptKind::Deploy => describe_plan(self.run_plan),
+            ReceiptKind::Up => "bring the app up (`php artisan up`)".into(),
+        }
+    }
+
+    /// How the run ended, in one sentence with any recorded reason.
+    pub fn summary(&self) -> Option<String> {
+        let outcome = self.outcome.as_ref()?;
+        if self.kind == ReceiptKind::Deploy {
+            return Some(outcome.summary());
+        }
+        Some(match outcome {
+            DeployOutcome::Succeeded => {
+                "The app was brought up (`php artisan up` succeeded).".into()
+            }
+            DeployOutcome::FailedAtStep { .. } => format!(
+                "`php artisan up` exited with {}; the app may still be in maintenance mode.",
+                self.maintenance_up_exit_code
+                    .map_or_else(|| "an error".to_string(), |code| code.to_string())
+            ),
+            DeployOutcome::StoppedInMaintenance(reason) => format!(
+                "`php artisan up` did not run ({reason}); the app may still be in maintenance mode."
+            ),
+            DeployOutcome::Unknown { reason, .. } => {
+                format!("The result of `php artisan up` is unknown: {reason}.")
+            }
+            outcome => outcome.summary(),
+        })
+    }
+
     /// Recovery hints built only from what the receipt recorded. Server text
     /// is escaped, so the lines are safe to print as-is.
     pub fn next_steps(&self) -> Vec<String> {
@@ -386,6 +422,19 @@ impl Receipt {
                 "The run did not finish. If no deploy is running, resume it from {} with `slip attach {env}`.",
                 escape_field(&self.repo_root)
             ));
+        }
+        if self.kind == ReceiptKind::Up {
+            if let Some(DeployOutcome::Unknown { .. }) = &self.outcome {
+                lines.push(
+                    "Check the server before running anything again; the deploy lock was kept."
+                        .into(),
+                );
+            } else if self.app_left_down && self.status == ReceiptStatus::Final {
+                lines.push(format!(
+                    "The app may still be in maintenance mode. After checking the server, `slip up {env}` tries again."
+                ));
+            }
+            return lines;
         }
         match &self.outcome {
             Some(DeployOutcome::FailedAtStep { step: 0, .. }) => lines.push(

@@ -6,8 +6,8 @@ use std::io;
 use serde::Serialize;
 use shipslip::logs::escape_field;
 use shipslip::receipt::{
-    describe_plan, describe_smoke, describe_watch, format_duration, strip_color, Receipt,
-    ReceiptError, ReceiptStepStatus,
+    describe_smoke, describe_watch, format_duration, strip_color, Receipt, ReceiptError,
+    ReceiptStepStatus,
 };
 use shipslip::{ErrorGroup, WatchResult, WatchStatus};
 
@@ -182,10 +182,9 @@ fn receipt_view(receipt: &Receipt) -> ReceiptView {
             tone: tone(&badge),
         },
         summary: receipt
-            .outcome
-            .as_ref()
+            .summary()
             .filter(|_| !badge.unfinished)
-            .map(|outcome| escape_field(&outcome.summary())),
+            .map(|summary| escape_field(&summary)),
         flags: flags(&badge),
         project: escape_field(&receipt.project),
         repo_root: escape_field(&receipt.repo_root),
@@ -193,7 +192,7 @@ fn receipt_view(receipt: &Receipt) -> ReceiptView {
         production: target.production,
         target: escape_field(&format!("{}:{}", target.ssh_alias, target.path)),
         branch: escape_field(&target.branch),
-        plan: describe_plan(receipt.run_plan),
+        plan: receipt.plan_text(),
         started_at_ms: millis(receipt.started_at_ms),
         finished_at_ms: receipt.finished_at_ms.map(millis),
         duration: receipt

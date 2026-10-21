@@ -195,7 +195,7 @@ fn list_shows_unreadable_and_newer_receipts_and_skips_other_files() {
     let good = write_receipt(&root.0, &receipt_json("aaaa0001-0", 1000, "staging"));
     write(&root.0, "staging", "2000-bbbb0002-0.json", b"{ not json");
     let mut newer = receipt_json("cccc0003-0", 3000, "staging");
-    newer["version"] = json!(2);
+    newer["version"] = json!(3);
     newer["status"] = json!("SomethingNew");
     write_receipt(&root.0, &newer);
     // The claim lock and unrelated files are never read as receipts.
@@ -207,7 +207,7 @@ fn list_shows_unreadable_and_newer_receipts_and_skips_other_files() {
     assert!(matches!(
         &listing.rows[0],
         Listed::Newer {
-            version: 2,
+            version: 3,
             started_at_ms: Some(3000),
             ..
         }
@@ -251,6 +251,79 @@ fn find_matches_unique_prefixes_only() {
         Found::Missing
     ));
     assert!(matches!(find(&root.0, "app", "").unwrap(), Found::Missing));
+}
+
+/// A finished, successful `slip up`.
+fn up_json(run_id: &str, started_at_ms: u64) -> Value {
+    let mut value = receipt_json(run_id, started_at_ms, "staging");
+    value["version"] = json!(2);
+    value["kind"] = json!("up");
+    value["from_sha"] = value["target_sha"].clone();
+    value["commits"] = json!([]);
+    value["steps"] = json!([]);
+    value["maintenance_down_status"] = Value::Null;
+    value["maintenance_down_exit_code"] = Value::Null;
+    value["maintenance_down_done"] = json!(false);
+    value["watch"] = Value::Null;
+    value["smoke"] = Value::Null;
+    value
+}
+
+#[test]
+fn deploy_receipts_stay_version_1_without_a_kind_and_up_receipts_are_version_2() {
+    let root = TempRoot::new();
+    let deploy = parse(receipt_json("aaaa0001-0", 1000, "staging"));
+    assert_eq!(deploy.kind, ReceiptKind::Deploy);
+    let saved = serde_json::to_value(&deploy).unwrap();
+    assert_eq!(saved["version"], json!(1));
+    assert!(saved.get("kind").is_none(), "{saved}");
+
+    let up = read(&write_receipt(&root.0, &up_json("bbbb0002-0", 2000))).unwrap();
+    assert_eq!(up.kind, ReceiptKind::Up);
+    assert_eq!(up.plan_text(), "bring the app up (`php artisan up`)");
+    assert!(up.badge().flags.is_empty());
+    assert!(up.next_steps().is_empty());
+    assert!(markdown(&up, true).contains("The app was brought up"));
+
+    // A kind that does not match the version is not trusted.
+    let mut wrong = up_json("cccc0003-0", 3000);
+    wrong["version"] = json!(1);
+    assert!(matches!(
+        read(&write_receipt(&root.0, &wrong)),
+        Err(ReceiptError::Invalid(_))
+    ));
+    let mut wrong = receipt_json("dddd0004-0", 4000, "staging");
+    wrong["version"] = json!(2);
+    assert!(matches!(
+        read(&write_receipt(&root.0, &wrong)),
+        Err(ReceiptError::Invalid(_))
+    ));
+}
+
+#[test]
+fn an_unfinished_or_failed_up_points_at_attach_or_another_up() {
+    let mut running = up_json("aaaa0001-0", 1000);
+    running["status"] = json!("InProgress");
+    running["outcome"] = Value::Null;
+    running["app_left_down"] = json!(true);
+    let running = parse(running);
+    assert!(running.next_steps()[0].contains("`slip attach staging`"));
+    assert_eq!(running.next_steps().len(), 1);
+
+    let mut failed = up_json("bbbb0002-0", 2000);
+    failed["outcome"] = json!({"FailedAtStep": {"step": 0, "partial_update": false}});
+    failed["app_left_down"] = json!(true);
+    failed["maintenance_up_exit_code"] = json!(1);
+    let failed = parse(failed);
+    assert_eq!(
+        failed.summary().unwrap(),
+        "`php artisan up` exited with 1; the app may still be in maintenance mode."
+    );
+    assert!(failed.badge().flags.contains(&Flag::AppLeftDown));
+    assert_eq!(
+        failed.next_steps(),
+        ["The app may still be in maintenance mode. After checking the server, `slip up staging` tries again."]
+    );
 }
 
 #[test]

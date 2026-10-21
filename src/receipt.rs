@@ -1,4 +1,5 @@
-//! Durable local record of a deploy, written before every remote mutation.
+//! Durable local record of a deploy or of bringing the app up, written
+//! before every remote mutation.
 
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -30,7 +31,11 @@ pub use overview::{
     NotKnownReason, Overview, Problem, ProblemKind, Qualifier, RepoRow, StaleHint, WALK_LIMIT,
 };
 
-const VERSION: u32 = 1;
+/// Deploy receipts keep version 1 so older releases still read them.
+const DEPLOY_VERSION: u32 = 1;
+/// Up receipts are version 2, which older releases report as unreadable
+/// instead of misreading as a deploy.
+const UP_VERSION: u32 = 2;
 const OUTPUT_LINES: usize = 200;
 const OUTPUT_LINE_BYTES: usize = 16 * 1024;
 
@@ -102,9 +107,28 @@ pub struct ReceiptStep {
     pub output: Vec<String>,
 }
 
+/// What a run did on the server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReceiptKind {
+    #[default]
+    Deploy,
+    /// `php artisan up` on its own; the code on the server did not change.
+    Up,
+}
+
+impl ReceiptKind {
+    fn is_deploy(&self) -> bool {
+        *self == Self::Deploy
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Receipt {
     pub version: u32,
+    /// Receipts written before kinds existed are deploys.
+    #[serde(default, skip_serializing_if = "ReceiptKind::is_deploy")]
+    pub kind: ReceiptKind,
     pub project: String,
     pub repo_root: String,
     pub run_id: String,
@@ -193,7 +217,8 @@ impl Receipt {
             })
             .collect();
         Self {
-            version: VERSION,
+            version: DEPLOY_VERSION,
+            kind: ReceiptKind::Deploy,
             project: project.into(),
             repo_root: repo_root.to_string_lossy().into_owned(),
             run_id: preview.run_id().into(),
@@ -218,6 +243,58 @@ impl Receipt {
             maintenance_up_status: None,
             maintenance_up_exit_code: None,
             app_left_down: false,
+            mutation_started: false,
+            outcome: None,
+            server_head_at_end: None,
+            tree_dirty: None,
+            last_message: None,
+            warnings: Vec::new(),
+            watch: None,
+            smoke: None,
+            actor: Some(Actor::local(repo_root)),
+        }
+    }
+
+    /// A receipt for `php artisan up` on `target`, whose server checkout is
+    /// at `head`. It has no recipe steps; the maintenance-up fields hold the
+    /// result.
+    fn for_up(
+        project: &str,
+        repo_root: &Path,
+        target: &DeployTarget,
+        head: &str,
+        run_id: &str,
+        script_hash: &str,
+    ) -> Self {
+        Self {
+            version: UP_VERSION,
+            kind: ReceiptKind::Up,
+            project: project.into(),
+            repo_root: repo_root.to_string_lossy().into_owned(),
+            run_id: run_id.into(),
+            owner_pid: std::process::id(),
+            // The front-end asked the user before starting it.
+            confirmed: true,
+            started_at_ms: now_ms(),
+            finished_at_ms: None,
+            status: ReceiptStatus::InProgress,
+            phase: ReceiptPhase::Preview,
+            target: target.clone(),
+            run_plan: RunPlan::Deploy,
+            from_sha: head.into(),
+            target_sha: head.into(),
+            commits: Vec::new(),
+            more_commits: 0,
+            recipe_hash: script_hash.into(),
+            steps: Vec::new(),
+            maintenance_down_done: false,
+            maintenance_up_done: false,
+            maintenance_down_status: None,
+            maintenance_down_exit_code: None,
+            maintenance_up_status: None,
+            maintenance_up_exit_code: None,
+            // Up runs because the app may be down.
+            app_left_down: true,
             mutation_started: false,
             outcome: None,
             server_head_at_end: None,
@@ -258,8 +335,25 @@ impl ReceiptJournal {
         repo_root: &Path,
         preview: &Preview,
     ) -> Result<Self, ReceiptError> {
-        let receipt = Receipt::from_preview(project, repo_root, preview);
-        let dir = receipt_dir(root, project, &receipt.target.env);
+        Self::write_new(root, Receipt::from_preview(project, repo_root, preview))
+    }
+
+    /// Writes the receipt for bringing the app up and claims it.
+    pub(crate) fn create_up(
+        root: &Path,
+        project: &str,
+        repo_root: &Path,
+        target: &DeployTarget,
+        head: &str,
+        run_id: &str,
+        script_hash: &str,
+    ) -> Result<Self, ReceiptError> {
+        let receipt = Receipt::for_up(project, repo_root, target, head, run_id, script_hash);
+        Self::write_new(root, receipt)
+    }
+
+    fn write_new(root: &Path, receipt: Receipt) -> Result<Self, ReceiptError> {
+        let dir = receipt_dir(root, &receipt.project, &receipt.target.env);
         fs::create_dir_all(&dir).map_err(|source| io_error(&dir, source))?;
         private_dir(&dir)?;
         let path = dir.join(format!("{}-{}.json", receipt.started_at_ms, receipt.run_id));
@@ -600,7 +694,7 @@ fn read_receipt(path: &Path) -> Result<Receipt, ReceiptError> {
             path: path.to_path_buf(),
             source,
         })?;
-    if probe.version != VERSION {
+    if probe.version != DEPLOY_VERSION && probe.version != UP_VERSION {
         return Err(ReceiptError::Version(probe.version));
     }
     let receipt: Receipt =
@@ -608,6 +702,11 @@ fn read_receipt(path: &Path) -> Result<Receipt, ReceiptError> {
             path: path.to_path_buf(),
             source,
         })?;
+    if (receipt.kind == ReceiptKind::Up) != (receipt.version == UP_VERSION) {
+        return Err(ReceiptError::Invalid(
+            "receipt kind does not match its schema version".into(),
+        ));
+    }
     if receipt.run_id.is_empty()
         || !receipt
             .run_id

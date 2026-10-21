@@ -14,7 +14,9 @@ use shipslip::config::{
 use shipslip::github_auth::discover_repository;
 use shipslip::interrupt::{next_stage, on_interrupt, Interrupt, Stage};
 use shipslip::logs::{self, Level, Lookup, Since};
-use shipslip::receipt::{default_receipts_root, find_open, strip_color, ReceiptJournal};
+use shipslip::receipt::{
+    default_receipts_root, find_open, strip_color, ReceiptJournal, ReceiptKind,
+};
 use shipslip::transport::SshTransport;
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, check_resumable, execute_recorded, lock_status,
@@ -156,7 +158,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
             return break_lock_command(&config, &trust_path, &environment).await;
         }
         Action::Up { environment } => {
-            return up_command(&config, &trust_path, &environment).await;
+            return up_command(&config, &trust_path, &receipts_root, &environment).await;
         }
         Action::Logs { .. } => unreachable!("logs runs before deploy setup"),
         Action::Receipts(_) => unreachable!("receipts runs before deploy setup"),
@@ -1390,7 +1392,11 @@ async fn attach_command(
         return Ok(ExitCode::SUCCESS);
     }
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
+    let kind = receipt.kind;
     let (events, handle) = attach(&trusted, journal, transport)?;
+    if kind == ReceiptKind::Up {
+        return follow_up(events, environment).await;
+    }
     // Installed only now: Ctrl-C at the prompt above must leave the run as it is.
     let mut interrupts = Interrupts::listen();
     follow_events(events, &handle, &mut interrupts, &RunView::new(target)).await
@@ -1450,6 +1456,7 @@ async fn break_lock_command(
 async fn up_command(
     config: &LoadedConfig,
     trust_path: &Path,
+    receipts_root: &Path,
     environment: &str,
 ) -> Result<ExitCode, Box<dyn Error>> {
     let trusted = trusted_target(config, trust_path, environment)?;
@@ -1473,8 +1480,8 @@ async fn up_command(
         println!("Maintenance mode was not changed.");
         return Ok(ExitCode::SUCCESS);
     }
-    let transport = SshTransport::connect(&target.ssh_alias).await?;
-    let lines = bring_app_up(&trusted, &transport)
+    let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
+    let (events, _handle) = bring_app_up(&trusted, transport, receipts_root)
         .await
         .map_err(|error| match error {
             BringUpError::LockHeld(info) => format!(
@@ -1484,11 +1491,45 @@ async fn up_command(
             .into(),
             error => Box::<dyn Error>::from(error),
         })?;
-    for line in lines {
-        println!("  {line}");
+    follow_up(events, environment).await
+}
+
+/// Prints a recorded `php artisan up` run. Ctrl-C leaves the command running
+/// on the server and the receipt unfinished; `slip attach` follows it again.
+async fn follow_up(mut events: RunEvents, environment: &str) -> Result<ExitCode, Box<dyn Error>> {
+    while let Some(event) = events.recv().await {
+        match event {
+            DeployEvent::MaintenanceOutput { line, .. } => println!("  {}", server_line(&line)),
+            DeployEvent::Finished(DeployOutcome::Succeeded) => {
+                println!("Maintenance mode disabled for `{environment}`.");
+                return Ok(ExitCode::SUCCESS);
+            }
+            DeployEvent::Finished(outcome) => {
+                return Err(match outcome {
+                    DeployOutcome::FailedAtStep { .. } => {
+                        "`php artisan up` failed; the app may still be in maintenance mode"
+                            .to_string()
+                    }
+                    DeployOutcome::Unknown { reason, .. } => format!(
+                        "could not confirm whether `php artisan up` completed ({reason}); \
+                         the deploy lock was kept"
+                    ),
+                    outcome => outcome.summary(),
+                }
+                .into())
+            }
+            DeployEvent::Interrupted { reason, .. } => {
+                return Err(format!(
+                    "could not follow `php artisan up`: {reason}; \
+                     `slip attach {environment}` resumes following it"
+                )
+                .into())
+            }
+            DeployEvent::RunError { reason } => return Err(reason.into()),
+            _ => {}
+        }
     }
-    println!("Maintenance mode disabled for `{environment}`.");
-    Ok(ExitCode::SUCCESS)
+    Err("the run ended without a result".into())
 }
 
 fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) {
