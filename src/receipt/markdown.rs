@@ -103,6 +103,9 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
         for commit in &receipt.commits {
             let _ = writeln!(out, "- {}", inline(commit));
         }
+        if receipt.more_commits > 0 {
+            let _ = writeln!(out, "- and {} more commits", receipt.more_commits);
+        }
     }
 
     out.push_str("\n## Steps\n\n| Step | Command | Status | Exit |\n|---|---|---|---|\n");

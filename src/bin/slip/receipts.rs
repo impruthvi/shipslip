@@ -314,6 +314,9 @@ fn render_show(receipt: &Receipt) -> String {
         for commit in &receipt.commits {
             let _ = writeln!(out, "  {}", escape_field(commit));
         }
+        if receipt.more_commits > 0 {
+            let _ = writeln!(out, "  and {} more commits", receipt.more_commits);
+        }
     }
 
     out.push_str("\nSteps:\n");

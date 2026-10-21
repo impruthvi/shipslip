@@ -11,12 +11,13 @@ use std::time::Duration;
 use shipslip::config::TrustedTarget;
 use shipslip::logs::{self, Badge, ChannelKind, Format, Level, LogsError, Request, Since};
 use shipslip::receipt::{ReceiptJournal, ReceiptStatus};
-use shipslip::transport::{SshTransport, Transport, TransportError};
+use shipslip::transport::{SshTransport, Transport, TransportError, LINE_QUEUE, SCRIPT_LINE_LIMIT};
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute, execute_recorded, lock_status, prepare,
     prepare_with_plan, AbortReason, BlockReason, BreakLockError, BringUpError, Confirmation,
     DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle, LogChannel, MaintenancePhase,
-    PrepareError, RunPlan, SmokeResult, StepStatus, StopReason, WatchStatus, POST_DEPLOY_WATCH,
+    PrepareError, RunEvents, RunPlan, SmokeResult, StepStatus, StopReason, WatchStatus,
+    POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 
@@ -263,14 +264,15 @@ impl Transport for LogsTransport {
     async fn run(
         &self,
         script: &str,
-        output: mpsc::UnboundedSender<String>,
+        output: mpsc::Sender<String>,
+        line_limit: usize,
     ) -> Result<i32, TransportError> {
         if self.calls.fetch_add(1, Ordering::Relaxed) == 1 && !self.before_read.is_empty() {
             let (code, _) = run(&self.ssh, &self.before_read).await;
             assert_eq!(code, Ok(0));
         }
         self.ssh
-            .run(&format!("{}\n{script}", self.prefix), output)
+            .run(&format!("{}\n{script}", self.prefix), output, line_limit)
             .await
     }
 
@@ -1502,13 +1504,15 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
 }
 
 async fn run(transport: &SshTransport, script: &str) -> (Result<i32, TransportError>, Vec<String>) {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let result = transport.run(script, tx).await;
-    let mut lines = Vec::new();
-    while let Some(line) = rx.recv().await {
-        lines.push(line);
-    }
-    (result, lines)
+    let (tx, mut rx) = mpsc::channel(LINE_QUEUE);
+    let collect = async {
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+        lines
+    };
+    tokio::join!(transport.run(script, tx, SCRIPT_LINE_LIMIT), collect)
 }
 
 fn trusted(target: DeployTarget) -> TrustedTarget {
@@ -1583,7 +1587,7 @@ async fn deploy_until(
 }
 
 struct Running {
-    rx: mpsc::UnboundedReceiver<DeployEvent>,
+    rx: RunEvents,
     handle: ExecutionHandle,
     run_id: String,
 }
@@ -1922,6 +1926,86 @@ async fn detach_at_step_start_never_abandons_the_launch() {
         "",
     );
     assert_eq!(result, "ok\n0");
+}
+
+#[tokio::test]
+async fn a_huge_line_without_a_newline_is_cut_with_a_marker() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    let events = deploy(
+        ssh,
+        target(
+            &path,
+            &["head -c 10485760 /dev/zero | tr '\\0' x; echo; echo after"],
+        ),
+    )
+    .await;
+    let output: Vec<&String> = events
+        .iter()
+        .filter_map(|event| match event {
+            DeployEvent::Output { index: 1, line } => Some(line),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        output.len(),
+        2,
+        "{:?}",
+        output.iter().map(|l| l.len()).collect::<Vec<_>>()
+    );
+    let expected = format!(
+        "{}… [line truncated, {} bytes]",
+        "x".repeat(16 * 1024),
+        10485760 - 16 * 1024
+    );
+    assert!(*output[0] == expected, "{}", output[0].len());
+    assert_eq!(output[1], "after");
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+}
+
+#[tokio::test]
+async fn a_flood_of_output_arrives_complete_and_in_order() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("app");
+    let events = deploy(ssh, target(&path, &["seq 20000"])).await;
+    let output: Vec<String> = events
+        .into_iter()
+        .filter_map(|event| match event {
+            DeployEvent::Output { index: 1, line } => Some(line),
+            _ => None,
+        })
+        .collect();
+    let expected: Vec<String> = (1..=20000).map(|n| n.to_string()).collect();
+    assert_eq!(output, expected);
+}
+
+#[tokio::test]
+async fn preview_lists_the_first_2000_commits_and_counts_the_rest() {
+    let server = Server::start().await;
+    let ssh = server.connect().await;
+    let path = server.app("app");
+    server.exec(
+        "git clone -q ~/origin.git /tmp/many && cd /tmp/many \
+         && c=$(git rev-parse HEAD) && t=$(git rev-parse 'HEAD^{tree}') \
+         && for i in $(seq 2104); do c=$(git commit-tree \"$t\" -p \"$c\" -m \"c$i\"); done \
+         && git push -q origin \"$c:refs/heads/main\"",
+        "",
+    );
+    let preview = prepare(&trusted(target(&path, &[])), &ssh).await.unwrap();
+    assert_eq!(preview.commits().len(), 2000);
+    assert!(
+        preview.commits()[0].ends_with(" c2104"),
+        "{}",
+        preview.commits()[0]
+    );
+    // The app is one commit behind origin before the 2,104 new ones.
+    assert_eq!(preview.more_commits(), 105);
+    cancel(preview, &ssh).await.unwrap();
 }
 
 #[tokio::test]

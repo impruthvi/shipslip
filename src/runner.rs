@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::script::shell_quote;
-use crate::transport::{Transport, TransportError};
+use crate::transport::{Transport, TransportError, LINE_QUEUE, SCRIPT_LINE_LIMIT, STEP_LINE_LIMIT};
 
 /// Waits before each reconnect attempt after the connection drops.
 const RECONNECT_DELAYS: [Duration; 4] = [
@@ -150,7 +150,7 @@ pub(crate) async fn run_step<T: Transport>(
     run_id: &str,
     key: &str,
     script: &str,
-    output: &mpsc::UnboundedSender<String>,
+    output: &mpsc::Sender<String>,
 ) -> StepResult {
     let mut reattaches = 0;
     if let Err(result) = launch_step(transport, run_id, key, script, &mut reattaches).await {
@@ -208,7 +208,7 @@ pub(crate) async fn attach_step<T: Transport>(
     transport: &T,
     run_id: &str,
     key: &str,
-    output: &mpsc::UnboundedSender<String>,
+    output: &mpsc::Sender<String>,
 ) -> StepResult {
     let mut reattaches = 0;
     loop {
@@ -237,7 +237,7 @@ pub(crate) async fn follow_existing<T: Transport>(
     transport: &T,
     run_id: &str,
     key: &str,
-    output: &mpsc::UnboundedSender<String>,
+    output: &mpsc::Sender<String>,
     reattaches: &mut usize,
 ) -> StepResult {
     // After a reconnect, observe again before probing so output written
@@ -280,17 +280,21 @@ fn unexpected(lines: &[String]) -> StepResult {
     ))
 }
 
+/// Runs one of Shipslip's own scripts and returns all of its output, read
+/// while the script runs. Their output is small or limited on the server.
 pub(crate) async fn run_collect<T: Transport>(
     transport: &T,
     script: &str,
 ) -> (Result<i32, TransportError>, Vec<String>) {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let result = transport.run(script, tx).await;
-    let mut lines = Vec::new();
-    while let Some(line) = rx.recv().await {
-        lines.push(line);
-    }
-    (result, lines)
+    let (tx, mut rx) = mpsc::channel(LINE_QUEUE);
+    let collect = async {
+        let mut lines = Vec::new();
+        while let Some(line) = rx.recv().await {
+            lines.push(line);
+        }
+        lines
+    };
+    tokio::join!(transport.run(script, tx, SCRIPT_LINE_LIMIT), collect)
 }
 
 /// Forwards log lines after the first `seen` to `output`, counting them.
@@ -299,10 +303,10 @@ async fn observe<T: Transport>(
     run_id: &str,
     key: &str,
     seen: &mut usize,
-    output: &mpsc::UnboundedSender<String>,
+    output: &mpsc::Sender<String>,
 ) -> Result<i32, TransportError> {
     let script = observe_script(run_id, key, *seen);
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(LINE_QUEUE);
     let forward = async {
         let mut started = false;
         while let Some(line) = rx.recv().await {
@@ -311,10 +315,10 @@ async fn observe<T: Transport>(
                 continue;
             }
             *seen += 1;
-            let _ = output.send(line);
+            let _ = output.send(line).await;
         }
     };
-    let (result, ()) = tokio::join!(transport.run(&script, tx), forward);
+    let (result, ()) = tokio::join!(transport.run(&script, tx, STEP_LINE_LIMIT), forward);
     result
 }
 

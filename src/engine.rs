@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, watch, Semaphore};
 
 use crate::config::TrustedTarget;
 use crate::event::{
@@ -19,7 +19,7 @@ use crate::preflight::{self, AbortReason, BlockReason, State};
 use crate::receipt::{Receipt, ReceiptJournal, ReceiptPhase, ReceiptStatus, ReceiptStepStatus};
 use crate::runner::{self, run_collect, StepResult};
 use crate::script::{is_full_sha, is_safe_branch, wrap_step};
-use crate::transport::{Transport, TransportError};
+use crate::transport::{Transport, TransportError, LINE_QUEUE};
 
 /// One environment of one project, as resolved from config.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -152,6 +152,7 @@ pub struct Preview {
     from_sha: String,
     target_sha: String,
     commits: Vec<String>,
+    more_commits: usize,
     recipe_hash: String,
     run_plan: RunPlan,
     run_id: String,
@@ -170,6 +171,10 @@ impl Preview {
     /// `git log --oneline FROM..TARGET`, newest first.
     pub fn commits(&self) -> &[String] {
         &self.commits
+    }
+    /// Commits in the range beyond those listed in [`Preview::commits`].
+    pub fn more_commits(&self) -> usize {
+        self.more_commits
     }
     pub fn recipe_hash(&self) -> &str {
         &self.recipe_hash
@@ -386,6 +391,7 @@ async fn prepare_inner<T: Transport>(
     if !is_full_sha(&checks.target) {
         return Err(unexpected());
     }
+    let more_commits = checks.commit_count.saturating_sub(checks.commits.len());
     let (from_sha, target_sha, commits) = (checks.state.head, checks.target, checks.commits);
 
     let run_id = new_run_id();
@@ -404,6 +410,7 @@ async fn prepare_inner<T: Transport>(
         from_sha,
         target_sha,
         commits,
+        more_commits,
         recipe_hash,
         run_plan,
         run_id,
@@ -445,7 +452,7 @@ pub async fn bring_app_up<T: Transport>(
         Acquire::Acquired => {}
         Acquire::Held(info) => return Err(BringUpError::LockHeld(info)),
     }
-    let (line_tx, mut line_rx) = mpsc::unbounded_channel();
+    let (line_tx, mut line_rx) = mpsc::channel(LINE_QUEUE);
     let script = wrap_step(&target.path, "php artisan up");
     let run = {
         let tx = line_tx;
@@ -538,6 +545,49 @@ pub async fn lock_status<T: Transport>(
         .map_err(LockStatusError::Failed)
 }
 
+/// Output events a run queues for its reader before more output waits.
+const OUTPUT_QUEUE: usize = 256;
+
+/// The events of one run, in order. While [`OUTPUT_QUEUE`] output lines are
+/// unread, more output waits and the step's log is read from the server more
+/// slowly, so a slow reader never grows memory or loses a line. Other events
+/// never wait, so the lock release and receipt never depend on the reader.
+#[derive(Debug)]
+pub struct RunEvents {
+    rx: mpsc::UnboundedReceiver<DeployEvent>,
+    output_room: Arc<Semaphore>,
+}
+
+impl RunEvents {
+    /// The next event, or `None` after the run's last one.
+    pub async fn recv(&mut self) -> Option<DeployEvent> {
+        let event = self.rx.recv().await?;
+        if matches!(
+            event,
+            DeployEvent::Output { .. } | DeployEvent::MaintenanceOutput { .. }
+        ) {
+            self.output_room.add_permits(1);
+        }
+        Some(event)
+    }
+}
+
+/// Events from any source, e.g. a front-end's tests.
+impl From<mpsc::UnboundedReceiver<DeployEvent>> for RunEvents {
+    fn from(rx: mpsc::UnboundedReceiver<DeployEvent>) -> Self {
+        Self {
+            rx,
+            output_room: Arc::new(Semaphore::new(0)),
+        }
+    }
+}
+
+impl Drop for RunEvents {
+    fn drop(&mut self) {
+        self.output_room.close();
+    }
+}
+
 /// Runs the confirmed deploy in the background. Events arrive on the
 /// returned receiver; the last one is `Finished`, `Detached`, `Interrupted`,
 /// or `RunError`.
@@ -547,7 +597,7 @@ pub fn execute<T: Transport>(
     preview: Preview,
     confirmation: Confirmation,
     transport: Arc<T>,
-) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteRejected> {
+) -> Result<(RunEvents, ExecutionHandle), ExecuteRejected> {
     execute_inner(preview, confirmation, transport, None)
 }
 
@@ -557,7 +607,7 @@ pub fn execute_recorded<T: Transport>(
     confirmation: Confirmation,
     transport: Arc<T>,
     journal: Arc<ReceiptJournal>,
-) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteRejected> {
+) -> Result<(RunEvents, ExecutionHandle), ExecuteRejected> {
     execute_inner(preview, confirmation, transport, Some(journal))
 }
 
@@ -566,7 +616,7 @@ fn execute_inner<T: Transport>(
     confirmation: Confirmation,
     transport: Arc<T>,
     journal: Option<Arc<ReceiptJournal>>,
-) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), ExecuteRejected> {
+) -> Result<(RunEvents, ExecutionHandle), ExecuteRejected> {
     if let Err(error) = check_execute(&preview, &confirmation, journal.as_deref()) {
         return Err(ExecuteRejected {
             error,
@@ -612,8 +662,9 @@ fn spawn_run<T: Transport>(
     transport: Arc<T>,
     journal: Option<Arc<ReceiptJournal>>,
     resume: Option<Receipt>,
-) -> (mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle) {
+) -> (RunEvents, ExecutionHandle) {
     let (events, rx) = mpsc::unbounded_channel();
+    let output_room = Arc::new(Semaphore::new(OUTPUT_QUEUE));
     let (detach_tx, detach_rx) = watch::channel(false);
     let handle = ExecutionHandle {
         stop: Arc::new(AtomicBool::new(false)),
@@ -624,13 +675,14 @@ fn spawn_run<T: Transport>(
         preview,
         transport,
         events,
+        output_room.clone(),
         handle.stop.clone(),
         detach_rx,
         journal,
         resume,
         handle.watch_cancel.clone(),
     ));
-    (rx, handle)
+    (RunEvents { rx, output_room }, handle)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -664,7 +716,7 @@ pub fn attach<T: Transport>(
     trusted: &TrustedTarget,
     journal: Arc<ReceiptJournal>,
     transport: Arc<T>,
-) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), AttachError> {
+) -> Result<(RunEvents, ExecutionHandle), AttachError> {
     journal
         .claim()
         .map_err(|error| AttachError::Receipt(error.to_string()))?;
@@ -692,6 +744,7 @@ pub fn attach<T: Transport>(
         from_sha: receipt.from_sha.clone(),
         target_sha: receipt.target_sha.clone(),
         commits: receipt.commits.clone(),
+        more_commits: receipt.more_commits,
         recipe_hash: receipt.recipe_hash.clone(),
         run_plan: receipt.run_plan,
         run_id: receipt.run_id.clone(),
@@ -849,6 +902,7 @@ async fn run_steps<T: Transport>(
     preview: Preview,
     transport: Arc<T>,
     events: mpsc::UnboundedSender<DeployEvent>,
+    output_room: Arc<Semaphore>,
     stop: Arc<AtomicBool>,
     detach: watch::Receiver<bool>,
     journal: Option<Arc<ReceiptJournal>>,
@@ -877,7 +931,7 @@ async fn run_steps<T: Transport>(
     };
     let mut app_down = resume.as_ref().is_some_and(|receipt| receipt.app_left_down);
     let end = tokio::select! {
-        end = run_steps_locked(&preview, &*transport, &events, &stop, detach, &mut app_down, journal.as_deref(), resume.as_ref(), observer.as_ref()) => end,
+        end = run_steps_locked(&preview, &*transport, &events, &output_room, &stop, detach, &mut app_down, journal.as_deref(), resume.as_ref(), observer.as_ref()) => end,
         () = heartbeat_forever(&*transport, path, run_id) => unreachable!("heartbeat never ends"),
     };
     let end = match end {
@@ -1188,6 +1242,7 @@ async fn run_steps_locked<T: Transport>(
     preview: &Preview,
     transport: &T,
     events: &mpsc::UnboundedSender<DeployEvent>,
+    output_room: &Semaphore,
     stop: &AtomicBool,
     mut detach: watch::Receiver<bool>,
     app_down: &mut bool,
@@ -1408,6 +1463,7 @@ async fn run_steps_locked<T: Transport>(
                     preview,
                     MaintenancePhase::Down,
                     events,
+                    output_room,
                     &mut detach,
                     true,
                     if active_down {
@@ -1534,6 +1590,7 @@ async fn run_steps_locked<T: Transport>(
             &key,
             &body,
             events,
+            output_room,
             Some(&mut detach),
             output,
             if active_step {
@@ -1667,6 +1724,7 @@ async fn run_steps_locked<T: Transport>(
             preview,
             MaintenancePhase::Up,
             events,
+            output_room,
             &mut detach,
             false,
             if active_up {
@@ -1736,6 +1794,7 @@ async fn follow<T: Transport>(
     key: &str,
     body: &str,
     events: &mpsc::UnboundedSender<DeployEvent>,
+    output_room: &Semaphore,
     detach: Option<&mut watch::Receiver<bool>>,
     to_event: impl Fn(String) -> DeployEvent,
     mode: FollowMode,
@@ -1755,7 +1814,7 @@ async fn follow<T: Transport>(
             return Followed::Done(result);
         }
     }
-    let (line_tx, mut line_rx) = mpsc::unbounded_channel();
+    let (line_tx, mut line_rx) = mpsc::channel(LINE_QUEUE);
     let step = async {
         let tx = line_tx;
         match mode {
@@ -1770,6 +1829,10 @@ async fn follow<T: Transport>(
         while let Some(line) = line_rx.recv().await {
             if let Some(journal) = journal {
                 journal.output_line(key, &line);
+            }
+            // Waits while the reader is behind; closed when nobody reads.
+            if let Ok(permit) = output_room.acquire().await {
+                permit.forget();
             }
             let _ = events.send(to_event(line));
         }
@@ -1792,6 +1855,7 @@ async fn maintenance<T: Transport>(
     preview: &Preview,
     phase: MaintenancePhase,
     events: &mpsc::UnboundedSender<DeployEvent>,
+    output_room: &Semaphore,
     detach: &mut watch::Receiver<bool>,
     detachable: bool,
     mode: FollowMode,
@@ -1809,6 +1873,7 @@ async fn maintenance<T: Transport>(
         key,
         command,
         events,
+        output_room,
         if detachable { Some(detach) } else { None },
         output,
         mode,
@@ -2384,7 +2449,7 @@ mod tests {
         async fn observe(
             &self,
             script: &str,
-            output: &mpsc::UnboundedSender<String>,
+            output: &mpsc::Sender<String>,
         ) -> Result<i32, TransportError> {
             let key = runner_key(script);
             let skip = number_after(script, "tail -n +") - 1;
@@ -2400,11 +2465,11 @@ mod tests {
                     f();
                 }
             }
-            let _ = output.send(runner::LOG_START.to_string());
+            let _ = output.send(runner::LOG_START.to_string()).await;
             let drop_after = rule.drop_after.lock().unwrap().take();
             let end = drop_after.map_or(rule.lines.len(), |n| skip + n);
             for line in &rule.lines[skip..end] {
-                let _ = output.send(line.to_string());
+                let _ = output.send(line.to_string()).await;
             }
             match drop_after {
                 Some(_) => Err(lost()),
@@ -2426,14 +2491,15 @@ mod tests {
         async fn run(
             &self,
             script: &str,
-            output: mpsc::UnboundedSender<String>,
+            output: mpsc::Sender<String>,
+            _line_limit: usize,
         ) -> Result<i32, TransportError> {
             self.ran.lock().unwrap().push(script.to_string());
             if script.contains("# @marker-start") {
-                let _ = output.send("@marker-written".into());
+                let _ = output.send("@marker-written".into()).await;
                 Ok(0)
             } else if script.contains("shipslip.lock") {
-                let _ = output.send(self.lock_script(script));
+                let _ = output.send(self.lock_script(script)).await;
                 if script.contains("echo acquired")
                     && self.lose_acquire_response.swap(false, Ordering::SeqCst)
                 {
@@ -2450,32 +2516,37 @@ mod tests {
             } else if script.contains(runner::LOG_START) {
                 self.observe(script, &output).await
             } else if script.contains("not-started") {
-                let _ = output.send(self.probe(script));
+                let _ = output.send(self.probe(script)).await;
                 Ok(0)
             } else if script.contains("@missing") && script.contains("@file") {
-                let _ = output.send("@missing".into());
+                let _ = output.send("@missing".into()).await;
                 Ok(0)
             } else if script.contains("@fetch_head") {
-                for line in self.server.lock().unwrap().preflight_lines() {
-                    let _ = output.send(line);
+                let lines = self.server.lock().unwrap().preflight_lines();
+                for line in lines {
+                    let _ = output.send(line).await;
                 }
                 Ok(0)
             } else if script.contains("@head") {
                 if let Some(f) = self.on_state_check.lock().unwrap().take() {
                     f();
                 }
-                let server = self.server.lock().unwrap();
-                if server.inspect_fails && self.launched.lock().unwrap().contains_key("step-0") {
-                    return Err(lost());
-                }
-                for line in server.state_lines() {
-                    let _ = output.send(line);
+                let lines = {
+                    let server = self.server.lock().unwrap();
+                    if server.inspect_fails && self.launched.lock().unwrap().contains_key("step-0")
+                    {
+                        return Err(lost());
+                    }
+                    server.state_lines()
+                };
+                for line in lines {
+                    let _ = output.send(line).await;
                 }
                 Ok(0)
             } else {
                 let rule = &self.rules[self.matching(script)];
                 for line in &rule.lines {
-                    let _ = output.send(line.to_string());
+                    let _ = output.send(line.to_string()).await;
                 }
                 Ok(rule.code)
             }
@@ -2540,7 +2611,7 @@ mod tests {
             .unwrap()
     }
 
-    async fn collect(mut rx: mpsc::UnboundedReceiver<DeployEvent>) -> Vec<DeployEvent> {
+    async fn collect(mut rx: RunEvents) -> Vec<DeployEvent> {
         let mut out = Vec::new();
         while let Some(e) = rx.recv().await {
             out.push(e);
@@ -3192,6 +3263,7 @@ mod tests {
             "step-1",
             "php artisan migrate --force",
             &events,
+            &Semaphore::new(OUTPUT_QUEUE),
             Some(&mut detach),
             |line| DeployEvent::Output { index: 1, line },
             FollowMode::Launch,
@@ -4329,6 +4401,97 @@ mod tests {
             recipe_hash(&base, RunPlan::FromStep(1)),
             recipe_hash(&base, RunPlan::FromStep(2))
         );
+    }
+
+    fn flood(count: usize) -> Vec<&'static str> {
+        (0..count)
+            .map(|n| &*Box::leak(format!("line {n}").into_boxed_str()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_slow_reader_gets_every_line_while_unread_output_stays_bounded() {
+        let lines = flood(5000);
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &["Fast-forward"], 0)
+                .on("flood", &lines, 0),
+        );
+        let preview = prepared(&fake, false, &["flood"]).await;
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (mut events, _handle) = execute(preview, confirmation, fake.clone()).unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let unread = events.rx.len();
+        assert!(
+            (OUTPUT_QUEUE..OUTPUT_QUEUE + 10).contains(&unread),
+            "{unread} events queued"
+        );
+        let mut output = Vec::new();
+        let mut last = None;
+        while let Some(event) = events.recv().await {
+            assert!(events.rx.len() < OUTPUT_QUEUE + 10);
+            match event {
+                DeployEvent::Output { index: 1, line } => output.push(line),
+                DeployEvent::Output { .. } => {}
+                event => last = Some(event),
+            }
+        }
+        assert_eq!(output, lines);
+        assert_eq!(last, Some(DeployEvent::Finished(DeployOutcome::Succeeded)));
+        assert_eq!(fake.lock_owner(), None);
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_stops_reading_never_holds_up_the_lock_or_receipt() {
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &["Fast-forward"], 0)
+                .on("deploy command", &["done"], 0),
+        );
+        let preview = prepared(&fake, false, &["deploy command"]).await;
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (events, _handle) =
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
+        // Never read: every event of the run is still queued at the end.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while journal.snapshot().status != ReceiptStatus::Final || fake.lock_owner().is_some() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(journal.snapshot().outcome, Some(DeployOutcome::Succeeded));
+        drop(events);
+    }
+
+    #[tokio::test]
+    async fn a_reader_that_goes_away_mid_output_lets_the_run_finish() {
+        let lines = flood(5000);
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &["Fast-forward"], 0)
+                .on("flood", &lines, 0),
+        );
+        let preview = prepared(&fake, false, &["flood"]).await;
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (events, _handle) =
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(events);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while journal.snapshot().status != ReceiptStatus::Final {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(fake.lock_owner(), None);
     }
 
     #[tokio::test]

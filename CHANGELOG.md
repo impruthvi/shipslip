@@ -17,6 +17,18 @@ change the library API.
 - Library: `attach` refuses a run whose project, checkout or deploy settings
   differ from the approved ones (`AttachError::SettingsChanged`);
   `check_resumable` runs the same check before asking to resume.
+- A deploy step's output line longer than 16 KiB is cut and ends in
+  `… [line truncated, N bytes]`, so a step printing a huge line without a
+  newline can't exhaust memory.
+- When the screen falls behind a step's output, Shipslip reads the step's log
+  from the server more slowly instead of buffering it; no line is lost, and
+  the lock release and receipt never wait on the screen.
+- The deploy preview lists at most 2,000 commits and ends with
+  `and N more commits`; receipts keep the count (`more_commits`).
+- Library: `execute`, `execute_recorded` and `attach` return `RunEvents`
+  (read with `recv`). `Transport::run` takes a bounded `mpsc::Sender` and a
+  line limit (`STEP_LINE_LIMIT`, `SCRIPT_LINE_LIMIT`); callers must read the
+  output while the command runs. `Preview::more_commits`.
 
 ### Added
 
