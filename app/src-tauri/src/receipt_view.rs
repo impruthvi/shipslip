@@ -6,8 +6,8 @@ use std::io;
 use serde::Serialize;
 use shipslip::logs::escape_field;
 use shipslip::receipt::{
-    describe_smoke, describe_watch, format_duration, strip_color, Receipt,
-    ReceiptError, ReceiptStepStatus,
+    describe_smoke, describe_watch, format_duration, strip_color, Receipt, ReceiptError,
+    ReceiptStepStatus,
 };
 use shipslip::{ErrorGroup, WatchResult, WatchStatus};
 
