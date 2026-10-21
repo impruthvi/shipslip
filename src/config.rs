@@ -258,6 +258,26 @@ impl LoadedConfig {
         })
     }
 
+    /// The target for `name`, only if its current settings are the ones the
+    /// user approved with `slip trust`.
+    pub fn trusted_target(
+        &self,
+        name: &str,
+        trust_path: &Path,
+    ) -> Result<TrustedTarget, TrustError> {
+        let (Some(target), Some(snapshot)) = (self.target(name), self.trust_snapshot(name)) else {
+            return Err(TrustError::UnknownEnvironment(name.to_string()));
+        };
+        match trust_status(trust_path, &self.repo_root, name, &snapshot)? {
+            TrustStatus::Trusted => Ok(TrustedTarget {
+                target,
+                project: self.project_name.clone(),
+                repo_root: self.repo_root.clone(),
+            }),
+            TrustStatus::Untrusted { .. } => Err(TrustError::Untrusted(name.to_string())),
+        }
+    }
+
     pub fn trust_snapshot(&self, name: &str) -> Option<TrustSnapshot> {
         let Environment {
             ssh_alias,
@@ -748,6 +768,50 @@ pub struct TrustSnapshot {
     pub steps: Vec<String>,
 }
 
+/// A deploy target whose settings the user approved. Built only by
+/// [`LoadedConfig::trusted_target`]; every entry point that changes the
+/// server takes one, so an unapproved recipe cannot run.
+#[derive(Debug, Clone)]
+pub struct TrustedTarget {
+    target: DeployTarget,
+    project: String,
+    repo_root: PathBuf,
+}
+
+impl TrustedTarget {
+    pub fn target(&self) -> &DeployTarget {
+        &self.target
+    }
+
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+
+    pub fn repo_root(&self) -> &Path {
+        &self.repo_root
+    }
+
+    /// Skips the trust check. Exists only in unit tests and the real-sshd suite.
+    #[cfg(any(test, feature = "integration"))]
+    pub fn for_test(target: DeployTarget, project: &str, repo_root: &Path) -> Self {
+        Self {
+            target,
+            project: project.to_string(),
+            repo_root: repo_root.to_path_buf(),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TrustError {
+    #[error("environment `{0}` is not in the config")]
+    UnknownEnvironment(String),
+    #[error("config for `{0}` is untrusted; run `slip trust {0}` first")]
+    Untrusted(String),
+    #[error(transparent)]
+    Store(#[from] ConfigError),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustStatus {
     Trusted,
@@ -929,6 +993,125 @@ fn save_trust_store(path: &Path, store: &TrustStore) -> Result<(), ConfigError> 
             source,
         })?;
     Ok(())
+}
+
+/// The settings a user reviews before trusting an environment: all of them
+/// for a first approval, only the changed ones after that.
+pub fn trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) -> Vec<String> {
+    // Destructured without `..` so a new setting must be shown here.
+    let TrustSnapshot {
+        ssh_alias,
+        path,
+        branch,
+        production,
+        maintenance,
+        log,
+        log_daily,
+        smoke_url,
+        timezone,
+        logs,
+        steps,
+    } = current;
+    let mut lines = Vec::new();
+    let mut change = |label: &str, previous: Option<String>, current: String| {
+        if previous.as_deref() == Some(current.as_str()) {
+            return;
+        }
+        lines.push(match previous {
+            Some(previous) => format!("  {label}: {previous} -> {current}"),
+            None => format!("  {label}: {current}"),
+        });
+    };
+    let log_setting = |log: &Option<String>| setting(log, "not set (Laravel default)");
+    let smoke_setting = |url: &Option<String>| setting(url, "not set");
+    let timezone_setting = |zone: &Option<String>| setting(zone, "not set (UTC)");
+    change(
+        "ssh",
+        previous.map(|old| old.ssh_alias.clone()),
+        ssh_alias.clone(),
+    );
+    change("path", previous.map(|old| old.path.clone()), path.clone());
+    change(
+        "branch",
+        previous.map(|old| old.branch.clone()),
+        branch.clone(),
+    );
+    change(
+        "production",
+        previous.map(|old| old.production.to_string()),
+        production.to_string(),
+    );
+    change(
+        "maintenance",
+        previous.map(|old| old.maintenance.to_string()),
+        maintenance.to_string(),
+    );
+    change(
+        "log",
+        previous.map(|old| log_setting(&old.log)),
+        log_setting(log),
+    );
+    change(
+        "log_daily",
+        previous.map(|old| old.log_daily.to_string()),
+        log_daily.to_string(),
+    );
+    change(
+        "smoke_url",
+        previous.map(|old| smoke_setting(&old.smoke_url)),
+        smoke_setting(smoke_url),
+    );
+    change(
+        "timezone",
+        previous.map(|old| timezone_setting(&old.timezone)),
+        timezone_setting(timezone),
+    );
+    change(
+        "logs",
+        previous.map(|old| describe_log_channels(&old.logs)),
+        describe_log_channels(logs),
+    );
+    if previous.is_none_or(|old| old.steps != *steps) {
+        if let Some(old) = previous {
+            lines.push("  recipe steps before:".into());
+            for (index, step) in old.steps.iter().enumerate() {
+                lines.push(format!("    {}. {step}", index + 1));
+            }
+        }
+        lines.push("  recipe steps now:".into());
+        for (index, step) in steps.iter().enumerate() {
+            lines.push(format!("    {}. {step}", index + 1));
+        }
+    }
+    lines
+}
+
+/// An optional setting as the user wrote it, or what applies when unset.
+fn setting(value: &Option<String>, unset: &str) -> String {
+    value.clone().unwrap_or_else(|| unset.into())
+}
+
+fn describe_log_channels(channels: &BTreeMap<String, LogChannel>) -> String {
+    if channels.is_empty() {
+        return "none".into();
+    }
+    channels
+        .iter()
+        .map(|(name, LogChannel { hide, rename, path })| {
+            let mut parts = Vec::new();
+            if *hide {
+                parts.push("hidden".to_string());
+            }
+            if let Some(rename) = rename {
+                parts.push(format!("shown as {rename}"));
+            }
+            if let Some(path) = path {
+                parts.push(format!("path {path}"));
+            }
+            format!("{name} ({})", parts.join(", "))
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(test)]
@@ -1507,6 +1690,54 @@ mod tests {
     }
 
     #[test]
+    fn trusted_target_requires_the_current_settings_to_be_approved() {
+        let fixture = Fixture::new();
+        let store = fixture.root.join("trust.json");
+        fixture.write_config("", "staging-host", "echo ok");
+        let config = fixture.load().unwrap();
+        assert!(matches!(
+            config.trusted_target("staging", &store),
+            Err(TrustError::Untrusted(env)) if env == "staging"
+        ));
+        assert!(matches!(
+            config.trusted_target("production", &store),
+            Err(TrustError::UnknownEnvironment(env)) if env == "production"
+        ));
+        approve_trust(
+            &store,
+            config.repo_root(),
+            "staging",
+            config.trust_snapshot("staging").unwrap(),
+        )
+        .unwrap();
+        let trusted = config.trusted_target("staging", &store).unwrap();
+        assert_eq!(trusted.target(), &config.target("staging").unwrap());
+        assert_eq!(trusted.project(), "example");
+        assert_eq!(trusted.repo_root(), config.repo_root());
+
+        fixture.write_config("", "staging-host", "echo changed");
+        let changed = fixture.load().unwrap();
+        let error = changed.trusted_target("staging", &store).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config for `staging` is untrusted; run `slip trust staging` first"
+        );
+    }
+
+    #[test]
+    fn trusted_target_reports_an_unreadable_trust_store() {
+        let fixture = Fixture::new();
+        let store = fixture.root.join("trust.json");
+        fs::write(&store, "not json").unwrap();
+        fixture.write_config("", "staging-host", "echo ok");
+        let config = fixture.load().unwrap();
+        assert!(matches!(
+            config.trusted_target("staging", &store),
+            Err(TrustError::Store(ConfigError::TrustParse { .. }))
+        ));
+    }
+
+    #[test]
     fn new_or_changed_alias_and_step_require_new_approval() {
         let fixture = Fixture::new();
         let store = fixture.root.join("trust.json");
@@ -1556,5 +1787,41 @@ mod tests {
             .replace("production = false\n", "");
         fs::write(path, raw).unwrap();
         assert!(matches!(fixture.load(), Err(ConfigError::Parse { .. })));
+    }
+
+    #[test]
+    fn trust_review_shows_settings_without_debug_syntax() {
+        let snapshot = TrustSnapshot {
+            ssh_alias: "app-staging".into(),
+            path: "/srv/app".into(),
+            branch: "main".into(),
+            production: false,
+            maintenance: true,
+            log: None,
+            log_daily: false,
+            smoke_url: Some("https://staging.example.test/".into()),
+            timezone: None,
+            logs: BTreeMap::new(),
+            steps: vec!["php artisan migrate --force".into()],
+        };
+        let lines = trust_changes(None, &snapshot);
+        for expected in [
+            "  log: not set (Laravel default)",
+            "  smoke_url: https://staging.example.test/",
+            "  timezone: not set (UTC)",
+            "    1. php artisan migrate --force",
+        ] {
+            assert!(lines.iter().any(|line| line == expected), "{lines:#?}");
+        }
+        assert!(!lines
+            .iter()
+            .any(|line| line.contains("Some(") || line.contains("None")));
+
+        let mut changed = snapshot.clone();
+        changed.smoke_url = None;
+        assert_eq!(
+            trust_changes(Some(&snapshot), &changed),
+            ["  smoke_url: https://staging.example.test/ -> not set"]
+        );
     }
 }

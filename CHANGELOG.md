@@ -6,6 +6,26 @@ change the library API.
 
 ## [Unreleased]
 
+### Changed
+
+- Library: the trust check moved from the CLI into the library. `prepare`,
+  `prepare_with_plan`, `prepare_with_github_token`, `attach`, `bring_app_up`
+  and `break_lock` take a `TrustedTarget`, which only
+  `LoadedConfig::trusted_target` builds, after checking the environment's
+  settings match the ones approved with `slip trust`. A front-end can no
+  longer run an unapproved recipe. CLI messages and exit codes are unchanged.
+- Library: `attach` refuses a run whose project, checkout or deploy settings
+  differ from the approved ones (`AttachError::SettingsChanged`);
+  `check_resumable` runs the same check before asking to resume.
+
+### Added
+
+- Library: `interrupt` module (`Stage`, `next_stage`, `Interrupt`,
+  `on_interrupt`) says what Ctrl-C or closing a window means at each stage of
+  a followed run, and `config::trust_changes` lists the settings to review
+  before trusting an environment. Both moved from the CLI so the desktop app
+  can share them; CLI behavior is unchanged.
+
 ## [0.8.0] - 2026-10-21
 
 ### Added
