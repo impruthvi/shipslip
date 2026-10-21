@@ -11,7 +11,9 @@ use std::time::Duration;
 use shipslip::config::TrustedTarget;
 use shipslip::logs::{self, Badge, ChannelKind, Format, Level, LogsError, Request, Since};
 use shipslip::receipt::{ReceiptJournal, ReceiptStatus};
-use shipslip::transport::{SshTransport, Transport, TransportError, LINE_QUEUE, SCRIPT_LINE_LIMIT};
+use shipslip::transport::{
+    ConnectFailure, SshTransport, Transport, TransportError, LINE_QUEUE, SCRIPT_LINE_LIMIT,
+};
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute, execute_recorded, lock_status, prepare,
     prepare_with_plan, prepare_with_progress, AbortReason, BlockReason, BreakLockError,
@@ -1732,13 +1734,59 @@ async fn unreachable_server_is_a_connect_error() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A new key pair inside the throwaway server's temp directory.
+fn new_key(server: &Server, name: &str) -> PathBuf {
+    let key = server.dir.join(name);
+    let status = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(&key)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    key
+}
+
+async fn connect_failure(server: &Server, config: &str) -> ConnectFailure {
+    match SshTransport::connect_with_config("server", &server.dir.join(config)).await {
+        Err(error @ TransportError::Connect(_)) => error.connect_failure().unwrap(),
+        result => panic!("{config} did not refuse the connection: {result:?}"),
+    }
+}
+
 #[tokio::test]
 async fn unknown_host_key_is_refused() {
     let server = Server::start().await;
-    let result = SshTransport::connect_with_config("server", &server.dir.join("untrusted")).await;
-    assert!(
-        matches!(result, Err(TransportError::Connect(_))),
-        "{result:?}"
+    assert_eq!(
+        connect_failure(&server, "untrusted").await,
+        ConnectFailure::HostKeyUnknown,
+    );
+}
+
+#[tokio::test]
+async fn changed_host_key_is_refused_as_changed_not_unknown() {
+    let server = Server::start().await;
+    let other = new_key(&server, "other_host_key");
+    let public = std::fs::read_to_string(other.with_extension("pub")).unwrap();
+    server.write_config("changed", &public);
+    assert_eq!(
+        connect_failure(&server, "changed").await,
+        ConnectFailure::HostKeyChanged,
+    );
+}
+
+#[tokio::test]
+async fn a_key_the_server_does_not_accept_is_refused() {
+    let server = Server::start().await;
+    let wrong_key = new_key(&server, "wrong_client_key");
+    let config = std::fs::read_to_string(server.config()).unwrap();
+    let config = config.replace(
+        &format!("IdentityFile {}", server.dir.join("id_ed25519").display()),
+        &format!("IdentityFile {}", wrong_key.display()),
+    );
+    std::fs::write(server.dir.join("wrong-key"), config).unwrap();
+    assert_eq!(
+        connect_failure(&server, "wrong-key").await,
+        ConnectFailure::KeyNotLoaded,
     );
 }
 

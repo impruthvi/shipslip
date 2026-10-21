@@ -46,6 +46,10 @@ change the library API.
 
 ### Added
 
+- Library: `TransportError::connect_failure` identifies unknown host keys,
+  changed host keys and rejected public keys as `ConnectFailure` values.
+  Unrecognized connection errors stay `Other`, and a lost connection is
+  never treated as a refusal. Original diagnostics are preserved.
 - Library: `prepare_with_progress` calls back with each `PreparePhase`
   (`Fetching`, `Checking`, `Locking`) as it starts, so a front-end can say
   what a slow preview is waiting on. The preflight script prints `@phase`
