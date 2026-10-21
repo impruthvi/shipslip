@@ -8,7 +8,7 @@
 
 use std::fmt::Write;
 
-use super::{describe_plan, describe_watch, format_duration, format_utc, strip_color, Receipt};
+use super::{describe_watch, format_duration, format_utc, strip_color, Receipt};
 use crate::logs::{escape, escape_field};
 use crate::{SmokeResult, StepStatus};
 
@@ -27,14 +27,14 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
             "> Includes server output and error text. Review it for secrets before sharing.\n\n",
         );
     }
-    let outcome = match (&receipt.outcome, details) {
-        (Some(outcome), true) if !badge.unfinished => inline(&outcome.summary()),
+    let outcome = match (receipt.summary(), details) {
+        (Some(summary), true) if !badge.unfinished => inline(&summary),
         _ => inline(&badge.headline()),
     };
     out.push_str("| | |\n|---|---|\n");
     row(&mut out, "Run", &code(&receipt.run_id));
     row(&mut out, "Outcome", &outcome);
-    row(&mut out, "Plan", &inline(&describe_plan(receipt.run_plan)));
+    row(&mut out, "Plan", &inline(&receipt.plan_text()));
     row(
         &mut out,
         "Server",
@@ -78,15 +78,19 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
             .unwrap_or_else(|| "not recorded".into()),
         ),
     );
-    row(
-        &mut out,
-        "From → target",
-        &format!(
-            "{} → {}",
-            code(short(&receipt.from_sha)),
-            code(short(&receipt.target_sha))
-        ),
-    );
+    if receipt.kind == super::ReceiptKind::Up {
+        row(&mut out, "Server HEAD", &code(short(&receipt.from_sha)));
+    } else {
+        row(
+            &mut out,
+            "From → target",
+            &format!(
+                "{} → {}",
+                code(short(&receipt.from_sha)),
+                code(short(&receipt.target_sha))
+            ),
+        );
+    }
     if receipt.ended_in_failure() {
         row(&mut out, "Server HEAD at end", &server_head(receipt));
     }

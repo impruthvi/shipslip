@@ -7,8 +7,9 @@ use shipslip::git::Git;
 use shipslip::logs::escape_field;
 use shipslip::receipt::{
     self, age, comparison_text, newer_elsewhere_text, sentence, short_id, stale_hint_text,
-    target_moved_text, EnvComparison, Overview, RepoRow, StaleHint,
+    target_moved_text, EnvComparison, Overview, ReceiptKind, RepoRow, StaleHint,
 };
+use shipslip::DeployOutcome;
 
 use super::invalid_input;
 
@@ -86,12 +87,28 @@ fn render(
             let _ = writeln!(out, "  {env:<width$}  {}", sentence(cell, now_ms));
             if let Some(attempt) = &cell.last_attempt {
                 let badge = &attempt.badge;
-                let mut line = format!(
-                    "last run {} ({}): {}",
-                    short_id(&attempt.run_id),
-                    age(now_ms, attempt.started_at_ms),
-                    badge.headline()
-                );
+                let brought_up = attempt.kind == ReceiptKind::Up
+                    && !badge.unfinished
+                    && badge.outcome == Some(DeployOutcome::Succeeded);
+                let mut line = if brought_up {
+                    format!(
+                        "app brought up {} ({})",
+                        short_id(&attempt.run_id),
+                        age(now_ms, attempt.started_at_ms)
+                    )
+                } else {
+                    format!(
+                        "last {} {} ({}): {}",
+                        if attempt.kind == ReceiptKind::Up {
+                            "`slip up`"
+                        } else {
+                            "run"
+                        },
+                        short_id(&attempt.run_id),
+                        age(now_ms, attempt.started_at_ms),
+                        badge.headline()
+                    )
+                };
                 for flag in &badge.flags {
                     line.push_str("  ");
                     line.push_str(&flag.text());

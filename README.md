@@ -485,7 +485,9 @@ slip up staging
 `break-lock` shows who holds the lock and its run ID, and only clears a lock
 whose heartbeat is at least two minutes old; it asks you to type the
 environment name. `up` takes a new deploy lock and runs
-`php artisan up`; it asks for confirmation. Neither command resumes the old
+`php artisan up`; it asks for confirmation. `up` saves its own receipt
+before sending the command, so if it is interrupted, `slip attach staging`
+follows it again without sending it twice. Neither command resumes the old
 deploy. Check the receipt and server state before choosing a new run plan.
 
 ### What is on each server

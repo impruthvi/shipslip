@@ -1515,6 +1515,30 @@ async fn run(transport: &SshTransport, script: &str) -> (Result<i32, TransportEr
     tokio::join!(transport.run(script, tx, SCRIPT_LINE_LIMIT), collect)
 }
 
+/// Runs a recorded `php artisan up` and returns all of its events.
+async fn bring_up(
+    target: &TrustedTarget,
+    ssh: &Arc<SshTransport>,
+    receipts: &Path,
+) -> Result<Vec<DeployEvent>, BringUpError> {
+    let (mut rx, _handle) = bring_app_up(target, ssh.clone(), receipts).await?;
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        events.push(event);
+    }
+    Ok(events)
+}
+
+fn up_output(events: &[DeployEvent]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            DeployEvent::MaintenanceOutput { line, .. } => Some(line.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn trusted(target: DeployTarget) -> TrustedTarget {
     TrustedTarget::for_test(target, "app", Path::new("/repo"))
 }
@@ -2484,14 +2508,28 @@ async fn failed_deploy_leaves_the_app_in_maintenance_mode() {
 #[tokio::test]
 async fn bring_app_up_restores_a_deploy_left_in_maintenance_mode() {
     let server = Server::start().await;
-    let ssh = server.connect().await;
+    let ssh = Arc::new(server.connect().await);
     let path = server.app("app");
     server.exec(&format!("cd {path} && php artisan down"), "");
 
-    let output = bring_app_up(&trusted(target(&path, &[])), &ssh)
+    let receipts = server.dir.join("receipts");
+    let events = bring_up(&trusted(target(&path, &[])), &ssh, &receipts)
         .await
         .unwrap();
-    assert_eq!(output, ["up"]);
+    assert_eq!(up_output(&events), ["up"]);
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+    );
+    let saved = std::fs::read_dir(receipts.join("app").join("staging"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "json"))
+        .unwrap();
+    let receipt = shipslip::receipt::read(&saved).unwrap();
+    assert_eq!(receipt.kind, shipslip::receipt::ReceiptKind::Up);
+    assert_eq!(receipt.status, ReceiptStatus::Final);
+    assert!(!receipt.app_left_down);
     assert_eq!(
         server.exec(
             &format!("test -e {path}/storage/framework/down && echo down || echo up"),
@@ -2509,9 +2547,13 @@ async fn bring_app_up_does_not_run_while_a_deploy_holds_the_lock() {
     let path = server.app("app");
     let preview = prepare(&trusted(target(&path, &[])), &ssh).await.unwrap();
 
-    let error = bring_app_up(&trusted(target(&path, &[])), &ssh)
-        .await
-        .unwrap_err();
+    let error = bring_up(
+        &trusted(target(&path, &[])),
+        &Arc::new(server.connect().await),
+        &server.dir.join("receipts"),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, BringUpError::LockHeld(_)));
     assert_eq!(
         server.exec(
@@ -2844,14 +2886,19 @@ async fn stale_lock_recovery_shows_the_holder_then_breaks_and_brings_the_app_up(
     let info = lock_status(t.target(), &ssh).await.unwrap().unwrap();
     assert!(info.is_stale());
     assert_eq!(info.owner.unwrap().run_id, held.run_id());
+    let receipts = server.dir.join("receipts");
+    let up_ssh = Arc::new(server.connect().await);
     assert!(matches!(
-        bring_app_up(&t, &ssh).await,
+        bring_up(&t, &up_ssh, &receipts).await,
         Err(BringUpError::LockHeld(_))
     ));
 
     assert_eq!(break_lock(&t, &ssh, "staging").await, Ok(()));
     assert_eq!(lock_status(t.target(), &ssh).await, Ok(None));
-    assert_eq!(bring_app_up(&t, &ssh).await.unwrap(), ["up"]);
+    assert_eq!(
+        up_output(&bring_up(&t, &up_ssh, &receipts).await.unwrap()),
+        ["up"]
+    );
     assert_eq!(
         server.exec(
             &format!("test -e {path}/storage/framework/down && echo down || echo up"),

@@ -276,7 +276,7 @@ fn build() -> (Fixtures, Vec<String>) {
     let gone = empty.dir().join("missing.json");
     slips.insert("missing", serde_json::to_value(slip(read(&gone))).unwrap());
     let mut newer = b.deploy("shop", "staging", 1, &sha('a'));
-    newer["version"] = json!(2);
+    newer["version"] = json!(3);
     let newer_path = empty.save(&newer);
     slips.insert(
         "newerVersion",

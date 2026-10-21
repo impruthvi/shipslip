@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use shipslip::config::LoadedConfig;
 use shipslip::logs::{escape, escape_field};
 use shipslip::receipt::{
-    self, describe_plan, describe_smoke, describe_watch, format_duration, strip_color, Found,
-    Listed, Receipt, ReceiptError, ReceiptStatus, ReceiptStepStatus,
+    self, describe_smoke, describe_watch, format_duration, strip_color, Found, Listed, Receipt,
+    ReceiptError, ReceiptKind, ReceiptStatus, ReceiptStepStatus,
 };
 use shipslip::{DeployOutcome, WatchStatus};
 
@@ -227,8 +227,8 @@ fn render_show(receipt: &Receipt) -> String {
         let _ = writeln!(out, "{label:<20}{value}");
     };
     let _ = writeln!(out, "Receipt {}\n", escape_field(&receipt.run_id));
-    let outcome = match &receipt.outcome {
-        Some(outcome) if !badge.unfinished => outcome.summary(),
+    let outcome = match receipt.summary() {
+        Some(summary) if !badge.unfinished => summary,
         _ => badge.headline(),
     };
     field(&mut out, "Outcome:", &escape_field(&outcome));
@@ -261,7 +261,7 @@ fn render_show(receipt: &Receipt) -> String {
             escape_field(&target.branch)
         ),
     );
-    field(&mut out, "Plan:", &describe_plan(receipt.run_plan));
+    field(&mut out, "Plan:", &receipt.plan_text());
     field(
         &mut out,
         "Started:",
@@ -288,15 +288,19 @@ fn render_show(receipt: &Receipt) -> String {
                 .unwrap_or_else(|| "not recorded".into()),
         ),
     );
-    field(
-        &mut out,
-        "From → target:",
-        &format!(
-            "{} → {}",
-            short(&receipt.from_sha),
-            short(&receipt.target_sha)
-        ),
-    );
+    if receipt.kind == ReceiptKind::Up {
+        field(&mut out, "Server HEAD:", &short(&receipt.from_sha));
+    } else {
+        field(
+            &mut out,
+            "From → target:",
+            &format!(
+                "{} → {}",
+                short(&receipt.from_sha),
+                short(&receipt.target_sha)
+            ),
+        );
+    }
     if receipt.ended_in_failure() {
         field(
             &mut out,

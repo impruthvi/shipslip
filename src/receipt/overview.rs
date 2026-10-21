@@ -11,7 +11,10 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::history::{entries_in, Entry};
-use super::{io_error, read_receipt, safe_component, Badge, Receipt, ReceiptError, ReceiptStatus};
+use super::{
+    io_error, read_receipt, safe_component, Badge, Receipt, ReceiptError, ReceiptKind,
+    ReceiptStatus,
+};
 use super::{Flag, ReceiptStepStatus, ReceiptSummary};
 use crate::git::{Comparison, Git};
 use crate::{DeployOutcome, RunPlan};
@@ -128,6 +131,7 @@ pub enum NotKnownReason {
 pub struct AttemptSummary {
     pub run_id: String,
     pub started_at_ms: u128,
+    pub kind: ReceiptKind,
     pub run_plan: RunPlan,
     pub badge: Badge,
     /// [`Receipt::next_steps`], already escaped.
@@ -141,6 +145,7 @@ impl AttemptSummary {
         Self {
             run_id: receipt.run_id.clone(),
             started_at_ms: receipt.started_at_ms,
+            kind: receipt.kind,
             run_plan: receipt.run_plan,
             badge: receipt.badge(),
             next_steps: receipt.next_steps(),
@@ -434,11 +439,20 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
 }
 
 /// Cells are per checkout, but two checkouts can deploy to one server path.
+/// The newest run of a cell that could have changed the code: `slip up`
+/// never does.
+fn last_deploy(cell: &EnvCell) -> Option<&AttemptSummary> {
+    cell.last_attempt
+        .as_ref()
+        .filter(|attempt| attempt.kind == ReceiptKind::Deploy)
+        .or(cell.code_run.as_ref())
+}
+
 fn mark_newer_elsewhere(repos: &mut [RepoRow]) {
     let mut runs: BTreeMap<String, Vec<NewerElsewhere>> = BTreeMap::new();
     for row in repos.iter() {
         for cell in &row.envs {
-            if let (Some(target), Some(attempt)) = (&cell.target, &cell.last_attempt) {
+            if let (Some(target), Some(attempt)) = (&cell.target, last_deploy(cell)) {
                 runs.entry(target.clone())
                     .or_default()
                     .push(NewerElsewhere {
@@ -452,15 +466,16 @@ fn mark_newer_elsewhere(repos: &mut [RepoRow]) {
     }
     for row in repos.iter_mut() {
         for cell in &mut row.envs {
-            let (Some(target), Some(attempt)) = (&cell.target, &cell.last_attempt) else {
+            let (Some(target), Some(attempt)) = (&cell.target, last_deploy(cell)) else {
                 continue;
             };
+            let started_at_ms = attempt.started_at_ms;
             cell.newer_elsewhere = runs
                 .get(target)
                 .into_iter()
                 .flatten()
                 .filter(|other| {
-                    other.repo_root != row.repo_root && other.started_at_ms > attempt.started_at_ms
+                    other.repo_root != row.repo_root && other.started_at_ms > started_at_ms
                 })
                 .max_by_key(|other| other.started_at_ms)
                 .cloned();
@@ -560,6 +575,8 @@ fn walk(owns: &[Own]) -> Walk {
     let mut unreadable = 0;
     let mut first_on_target: Option<String> = None;
     let mut saw_other_target = false;
+    // A newer successful `slip up` turned maintenance mode off.
+    let mut brought_up = false;
     for own in owns {
         if counted == WALK_LIMIT {
             result.code = CodeState::NoCodeChangeInLast { records: counted };
@@ -595,9 +612,22 @@ fn walk(owns: &[Own]) -> Walk {
         }
         counted += 1;
         first_on_target = Some(receipt.run_id.clone());
+        brought_up |= receipt.kind == ReceiptKind::Up
+            && receipt.status == ReceiptStatus::Final
+            && receipt.outcome == Some(DeployOutcome::Succeeded);
         if let Some(code) = code_of(&receipt) {
+            let mut code_run = AttemptSummary::of(&receipt, &own.path);
+            if brought_up {
+                code_run
+                    .badge
+                    .flags
+                    .retain(|flag| *flag != Flag::AppLeftDown);
+                code_run
+                    .next_steps
+                    .retain(|line| !line.contains("`slip up "));
+            }
             result.code = code;
-            result.code_run = Some(AttemptSummary::of(&receipt, &own.path));
+            result.code_run = Some(code_run);
             result.decided_at_ms = Some(receipt.started_at_ms);
             return result;
         }
@@ -620,6 +650,9 @@ fn walk(owns: &[Own]) -> Walk {
 /// What one run says about the server's code, or `None` when it did not
 /// change it.
 fn code_of(receipt: &Receipt) -> Option<CodeState> {
+    if receipt.kind == ReceiptKind::Up {
+        return None;
+    }
     let run_id = receipt.run_id.clone();
     let at_ms = receipt.finished_at_ms.unwrap_or(receipt.started_at_ms);
     if let Some(head) = &receipt.server_head_at_end {
