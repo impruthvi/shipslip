@@ -20,8 +20,8 @@ use shipslip::{
     attach, break_lock, bring_app_up, cancel, check_resumable, execute_recorded, lock_status,
     prepare_with_github_token, prepare_with_plan, BlockReason, BreakLockError, BringUpError,
     Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecuteRejected, ExecutionHandle,
-    MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus, WatchResult, WatchStatus,
-    POST_DEPLOY_WATCH,
+    MaintenancePhase, PrepareError, RunEvents, RunPlan, SmokeResult, StepStatus, WatchResult,
+    WatchStatus, POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -437,7 +437,7 @@ fn watch_summary(result: &WatchResult) -> String {
 }
 
 async fn follow_events(
-    mut events: mpsc::UnboundedReceiver<DeployEvent>,
+    mut events: RunEvents,
     controls: &impl RunControls,
     interrupts: &mut Interrupts,
     view: &RunView,
@@ -1115,6 +1115,9 @@ fn show_preview(preview: &shipslip::Preview) {
         println!("Commits to deploy:");
         for commit in preview.commits() {
             println!("  {}", server_field(commit));
+        }
+        if preview.more_commits() > 0 {
+            println!("  and {} more commits", preview.more_commits());
         }
     }
     let first_step = preview.run_plan().first_recipe_step();
@@ -1891,7 +1894,7 @@ mod tests {
             ctrl_c
         };
         let (code, _ctrl_c) = tokio::join!(
-            follow_events(events, &controls, &mut interrupts, &view),
+            follow_events(events.into(), &controls, &mut interrupts, &view),
             feed
         );
         (code.unwrap(), controls)

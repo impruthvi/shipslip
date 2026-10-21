@@ -9,10 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use openssh::{Error, KnownHosts, Session, SessionBuilder, Stdio};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc::Sender;
 
-use super::{Transport, TransportError};
+use super::{truncation_marker, Transport, TransportError};
 
 /// A connection to one server. Dropping it closes the master connection.
 #[derive(Debug)]
@@ -71,7 +71,8 @@ impl Transport for SshTransport {
     async fn run(
         &self,
         script: &str,
-        output: UnboundedSender<String>,
+        output: Sender<String>,
+        line_limit: usize,
     ) -> Result<i32, TransportError> {
         let session = self.session.lock().unwrap().clone();
         let mut child = session
@@ -96,8 +97,8 @@ impl Transport for SshTransport {
         };
         let (_, out, err) = tokio::join!(
             send,
-            forward_lines(child.stdout().take(), &output),
-            forward_lines(child.stderr().take(), &output),
+            forward_lines(child.stdout().take(), &output, line_limit),
+            forward_lines(child.stderr().take(), &output, line_limit),
         );
         drop(output);
         out.map_err(lost)?;
@@ -125,21 +126,55 @@ impl Transport for SshTransport {
 
 async fn forward_lines(
     stream: Option<impl AsyncRead + Unpin>,
-    output: &UnboundedSender<String>,
+    output: &Sender<String>,
+    line_limit: usize,
 ) -> io::Result<()> {
     let Some(stream) = stream else {
         return Ok(());
     };
     let mut reader = BufReader::new(stream);
     let mut buf = Vec::new();
-    loop {
-        buf.clear();
-        if reader.read_until(b'\n', &mut buf).await? == 0 {
-            return Ok(());
+    while let Some(dropped) = read_line_capped(&mut reader, &mut buf, line_limit).await? {
+        let mut line = String::from_utf8_lossy(&buf).into_owned();
+        if dropped > 0 {
+            line.push_str(&truncation_marker(dropped));
         }
-        let line = buf.strip_suffix(b"\n").unwrap_or(&buf);
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        let _ = output.send(String::from_utf8_lossy(line).into_owned());
+        // A closed channel means nobody reads the output; keep draining so
+        // the remote command is not blocked on a full pipe.
+        let _ = output.send(line).await;
+    }
+    Ok(())
+}
+
+/// Reads one line into `buf` without its line ending, keeping at most
+/// `limit` bytes. Returns the number of bytes cut, or `None` at the end.
+async fn read_line_capped(
+    reader: &mut (impl AsyncBufRead + Unpin),
+    buf: &mut Vec<u8>,
+    limit: usize,
+) -> io::Result<Option<usize>> {
+    buf.clear();
+    let mut dropped = 0;
+    let mut read_any = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(read_any.then_some(dropped));
+        }
+        read_any = true;
+        let newline = available.iter().position(|&byte| byte == b'\n');
+        let chunk = &available[..newline.unwrap_or(available.len())];
+        let keep = chunk.len().min(limit.saturating_sub(buf.len()));
+        buf.extend_from_slice(&chunk[..keep]);
+        dropped += chunk.len() - keep;
+        let consumed = chunk.len() + usize::from(newline.is_some());
+        reader.consume(consumed);
+        if newline.is_some() {
+            if dropped == 0 && buf.last() == Some(&b'\r') {
+                buf.pop();
+            }
+            return Ok(Some(dropped));
+        }
     }
 }
 
@@ -172,4 +207,49 @@ fn connect_error(e: impl StdError) -> TransportError {
 
 fn lost(e: impl StdError) -> TransportError {
     TransportError::ConnectionLost(describe(&e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn lines(input: &[u8], limit: usize) -> Vec<(String, usize)> {
+        let mut reader = BufReader::with_capacity(7, input);
+        let mut buf = Vec::new();
+        let mut lines = Vec::new();
+        while let Some(dropped) = read_line_capped(&mut reader, &mut buf, limit)
+            .await
+            .unwrap()
+        {
+            lines.push((String::from_utf8(buf.clone()).unwrap(), dropped));
+        }
+        lines
+    }
+
+    #[tokio::test]
+    async fn lines_are_split_without_endings_and_cut_at_the_limit() {
+        assert_eq!(
+            lines(b"one\r\ntwo\n\nlast", 10).await,
+            [
+                ("one".into(), 0),
+                ("two".into(), 0),
+                (String::new(), 0),
+                ("last".into(), 0)
+            ]
+        );
+        assert_eq!(
+            lines(b"0123456789abcdef\nnext\n", 10).await,
+            [("0123456789".into(), 6), ("next".into(), 0)]
+        );
+        assert!(lines(b"", 10).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_huge_line_without_a_newline_keeps_only_the_limit() {
+        let input = vec![b'x'; 10 * 1024 * 1024];
+        let read = lines(&input, 16 * 1024).await;
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].0.len(), 16 * 1024);
+        assert_eq!(read[0].1, 10 * 1024 * 1024 - 16 * 1024);
+    }
 }

@@ -119,6 +119,9 @@ pub struct Receipt {
     pub from_sha: String,
     pub target_sha: String,
     pub commits: Vec<String>,
+    /// Commits in the range beyond those listed in `commits`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more_commits: usize,
     pub recipe_hash: String,
     pub steps: Vec<ReceiptStep>,
     pub maintenance_down_done: bool,
@@ -205,6 +208,7 @@ impl Receipt {
             from_sha: preview.from_sha().into(),
             target_sha: preview.target_sha().into(),
             commits: preview.commits().to_vec(),
+            more_commits: preview.more_commits(),
             recipe_hash: preview.recipe_hash().into(),
             steps,
             maintenance_down_done: false,
@@ -500,6 +504,10 @@ impl ReceiptJournal {
 pub struct HistoryPaths {
     pub current: PathBuf,
     pub legacy: PathBuf,
+}
+
+fn is_zero(value: &usize) -> bool {
+    *value == 0
 }
 
 pub fn default_receipts_root() -> Result<PathBuf, ReceiptError> {

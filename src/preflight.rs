@@ -133,6 +133,9 @@ pub(crate) struct State {
     pub dirty: Vec<String>,
 }
 
+/// Commits listed in a preview; the rest are only counted.
+pub(crate) const PREVIEW_COMMITS: usize = 2000;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Preflight {
     pub state: State,
@@ -141,6 +144,8 @@ pub(crate) struct Preflight {
     pub fetch_head: String,
     pub ancestor: bool,
     pub commits: Vec<String>,
+    /// Commits in the range, including those past [`PREVIEW_COMMITS`].
+    pub commit_count: usize,
     pub invalid_step: Option<(usize, String)>,
 }
 
@@ -200,7 +205,8 @@ t=$(git rev-parse {remote})
 echo "@target $t"
 echo "@fetch_head $(git rev-parse FETCH_HEAD)"
 git merge-base --is-ancestor "$h" "$t" && echo "@ancestor"
-git log --oneline "$h..$t" | sed 's/^/@commit /'
+echo "@commit_count $(git rev-list --count "$h..$t")"
+git log --oneline -n {PREVIEW_COMMITS} "$h..$t" | sed 's/^/@commit /'
 "#,
         remote = shell_quote(&format!("origin/{branch}")),
     ));
@@ -255,6 +261,7 @@ pub(crate) fn parse_preflight(lines: &[String]) -> Preflight {
             "fetch_head" => p.fetch_head = value.to_string(),
             "ancestor" => p.ancestor = true,
             "commit" => p.commits.push(value.to_string()),
+            "commit_count" => p.commit_count = value.parse().unwrap_or_default(),
             // Only the first invalid step is reported, with its own messages.
             "invalid" => {
                 collecting = p.invalid_step.is_none();
@@ -376,6 +383,7 @@ mod tests {
             "@target b",
             "@fetch_head b",
             "@ancestor",
+            "@commit_count 1",
             "@commit b2 Second",
             "@invalid 1",
             "@message bash: line 7: unexpected EOF",
@@ -385,6 +393,7 @@ mod tests {
         assert_eq!(p.state.dirty, [" M file", "?? new"]);
         assert!(p.ancestor);
         assert_eq!(p.commits, ["b2 Second"]);
+        assert_eq!(p.commit_count, 1);
         assert_eq!(
             p.invalid_step,
             Some((1, "bash: line 7: unexpected EOF\nbash: syntax error".into()))

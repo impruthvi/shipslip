@@ -536,6 +536,19 @@ fn markdown_keeps_server_text_out_unless_details_are_requested() {
 }
 
 #[test]
+fn commits_past_the_preview_list_are_counted_and_old_receipts_have_none() {
+    let mut value = receipt_json("aaaa0001-0", 1000, "staging");
+    assert_eq!(parse(value.clone()).more_commits, 0);
+    assert!(!markdown(&parse(value.clone()), false).contains("more commits"));
+    value["more_commits"] = json!(3000);
+    let text = markdown(&parse(value), false);
+    assert!(
+        text.contains("- 2222222 Add billing\n- and 3000 more commits\n"),
+        "{text}"
+    );
+}
+
+#[test]
 fn markdown_lists_maintenance_and_escapes_untrusted_text() {
     let mut value = receipt_json("aaaa0001-0", 1000, "staging");
     value["commits"] = json!(["2222222 [click](https://evil.test) <b>x</b> | y"]);

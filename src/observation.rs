@@ -1053,7 +1053,8 @@ mod tests {
         async fn run(
             &self,
             script: &str,
-            output: mpsc::UnboundedSender<String>,
+            output: mpsc::Sender<String>,
+            _line_limit: usize,
         ) -> Result<i32, TransportError> {
             self.scripts.lock().unwrap().push(script.into());
             let read = {
@@ -1067,18 +1068,20 @@ mod tests {
             match read {
                 Read::Lost => Err(TransportError::ConnectionLost("lost".into())),
                 Read::Missing => {
-                    let _ = output.send("@missing".into());
+                    let _ = output.send("@missing".into()).await;
                     Ok(0)
                 }
                 Read::File { size, start, bytes } => {
                     let engine = base64::engine::general_purpose::STANDARD;
-                    let _ = output.send(format!(
-                        "@file 42 {size} {start} {} {}",
-                        bytes.len(),
-                        u8::from(start == 0)
-                    ));
-                    let _ = output.send(engine.encode("storage/logs/laravel.log"));
-                    let _ = output.send(engine.encode(bytes));
+                    let _ = output
+                        .send(format!(
+                            "@file 42 {size} {start} {} {}",
+                            bytes.len(),
+                            u8::from(start == 0)
+                        ))
+                        .await;
+                    let _ = output.send(engine.encode("storage/logs/laravel.log")).await;
+                    let _ = output.send(engine.encode(bytes)).await;
                     Ok(0)
                 }
             }

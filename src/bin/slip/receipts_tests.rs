@@ -98,6 +98,18 @@ fn show_escapes_server_text_and_cannot_forge_fields() {
 }
 
 #[test]
+fn show_counts_commits_past_the_preview_list() {
+    let text = render_show(&receipt(|value| {
+        value["commits"] = serde_json::json!(["2222222 Add billing"]);
+        value["more_commits"] = serde_json::json!(3000);
+    }));
+    assert!(
+        text.contains("Commits:\n  2222222 Add billing\n  and 3000 more commits\n"),
+        "{text}"
+    );
+}
+
+#[test]
 fn list_rows_stay_on_one_line() {
     let listing = receipt::Listing {
         rows: vec![
