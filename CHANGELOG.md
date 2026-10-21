@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-21
+
 ### Changed
 
 - `slip up` is a recorded run. It saves a receipt before sending
@@ -14,6 +16,9 @@ change the library API.
   twice. `slip receipts` and `slip status` show it ("app brought up"); it
   never changes the code a release map cell shows, and a successful `up`
   clears the "app may be in maintenance mode" flag of the deploy before it.
+- Up receipts keep the maintenance command's exit status and last 200 output
+  lines. Recovery observes the saved command without launching it again,
+  and a successful Up preserves recovery guidance for an earlier failed deploy.
 - Receipts gain `kind` (`deploy` or `up`). Deploy receipts are unchanged and
   stay schema version 1; `up` receipts are version 2, which releases before
   0.9.0 list as unreadable instead of misreading them.
