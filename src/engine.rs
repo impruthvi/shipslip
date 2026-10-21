@@ -20,7 +20,7 @@ use crate::preflight::{self, AbortReason, BlockReason, State};
 use crate::receipt::{
     Receipt, ReceiptJournal, ReceiptKind, ReceiptPhase, ReceiptStatus, ReceiptStepStatus,
 };
-use crate::runner::{self, run_collect, StepResult};
+use crate::runner::{self, run_collect, run_collect_each, StepResult};
 use crate::script::{is_full_sha, is_safe_branch, wrap_step};
 use crate::transport::{Transport, TransportError, LINE_QUEUE};
 
@@ -289,6 +289,35 @@ pub async fn prepare<T: Transport>(
     prepare_with_plan(target, RunPlan::Deploy, transport).await
 }
 
+/// What [`prepare_with_progress`] is doing on the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreparePhase {
+    /// Fetching the branch from origin.
+    Fetching,
+    /// Reading the commits and checking the recipe steps.
+    Checking,
+    /// Taking the deploy lock.
+    Locking,
+}
+
+/// Like [`prepare_with_plan`], calling `on_phase` as each phase starts, so a
+/// front-end can say what a slow preview is waiting on.
+pub async fn prepare_with_progress<T: Transport>(
+    target: &TrustedTarget,
+    run_plan: RunPlan,
+    transport: &T,
+    mut on_phase: impl FnMut(PreparePhase) + Send,
+) -> Result<Preview, PrepareError> {
+    prepare_inner(
+        target.target().clone(),
+        run_plan,
+        transport,
+        None,
+        &mut on_phase,
+    )
+    .await
+}
+
 /// Prepares a deploy, recipe rerun, or recipe restart from a selected step.
 /// Reruns require `origin/<branch>` to match the server's current clean HEAD.
 pub async fn prepare_with_plan<T: Transport>(
@@ -296,7 +325,14 @@ pub async fn prepare_with_plan<T: Transport>(
     run_plan: RunPlan,
     transport: &T,
 ) -> Result<Preview, PrepareError> {
-    prepare_inner(target.target().clone(), run_plan, transport, None).await
+    prepare_inner(
+        target.target().clone(),
+        run_plan,
+        transport,
+        None,
+        &mut |_| {},
+    )
+    .await
 }
 
 /// Like [`prepare_with_plan`], using a local token only for the server's
@@ -314,6 +350,7 @@ pub async fn prepare_with_github_token<T: Transport>(
         run_plan,
         transport,
         Some((repository, token)),
+        &mut |_| {},
     )
     .await
 }
@@ -326,6 +363,7 @@ async fn prepare_inner<T: Transport>(
         &crate::github_auth::GitHubRepository,
         &crate::github_auth::GitHubToken,
     )>,
+    on_phase: &mut (dyn FnMut(PreparePhase) + Send),
 ) -> Result<Preview, PrepareError> {
     match run_plan {
         RunPlan::Deploy => {}
@@ -358,7 +396,12 @@ async fn prepare_inner<T: Transport>(
         ),
         None => preflight::preflight_script(&target.path, &target.branch, &target.steps),
     });
-    let (result, mut lines) = run_collect(transport, &script).await;
+    let (result, mut lines) = run_collect_each(transport, &script, |line| match line {
+        "@phase fetch" => on_phase(PreparePhase::Fetching),
+        "@phase check" => on_phase(PreparePhase::Checking),
+        _ => {}
+    })
+    .await;
     let result = if let Some((_, token)) = auth {
         for line in &mut lines {
             *line = token.redact(line);
@@ -399,6 +442,7 @@ async fn prepare_inner<T: Transport>(
 
     let run_id = new_run_id();
     let owner = LockOwner::current(&run_id, &target_sha);
+    on_phase(PreparePhase::Locking);
     match lock::acquire(transport, &target.path, &owner)
         .await
         .map_err(PrepareError::Lock)?
@@ -2325,11 +2369,13 @@ mod tests {
 
         fn preflight_lines(&self) -> Vec<String> {
             let mut out = self.state_lines();
+            out.push("@phase fetch".into());
             if let Some(message) = &self.fetch_failed {
                 out.push("@fetch_failed".into());
                 out.push(format!("@message {message}"));
                 return out;
             }
+            out.push("@phase check".into());
             out.push(format!("@target {}", self.target));
             out.push(format!("@fetch_head {}", self.target));
             if self.ancestor {
@@ -2797,6 +2843,44 @@ mod tests {
             out.push(e);
         }
         out
+    }
+
+    #[tokio::test]
+    async fn prepare_with_progress_reports_each_phase_in_order() {
+        let fake = preflight();
+        let mut phases = Vec::new();
+        let preview = prepare_with_progress(
+            &trusted(target(false, &[])),
+            RunPlan::Deploy,
+            &fake,
+            |phase| phases.push(phase),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            phases,
+            [
+                PreparePhase::Fetching,
+                PreparePhase::Checking,
+                PreparePhase::Locking
+            ]
+        );
+        assert_eq!(preview.commits().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_fetch_stops_progress_before_checking() {
+        let fake = preflight().server(|s| s.fetch_failed = Some("denied".into()));
+        let mut phases = Vec::new();
+        let result = prepare_with_progress(
+            &trusted(target(false, &[])),
+            RunPlan::Deploy,
+            &fake,
+            |phase| phases.push(phase),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(phases, [PreparePhase::Fetching]);
     }
 
     #[tokio::test]
