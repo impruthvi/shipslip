@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::error::Error;
 use std::future::Future;
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -9,18 +8,20 @@ use std::time::Duration;
 
 use shipslip::config::{
     approve_trust, default_trust_path, is_branch_name, is_env_name, is_smoke_url, is_ssh_alias,
-    trust_status, InitAnswers, InitPlan, LoadedConfig, TrustSnapshot, TrustStatus,
+    trust_changes, trust_status, InitAnswers, InitPlan, LoadedConfig, TrustError, TrustSnapshot,
+    TrustStatus, TrustedTarget,
 };
 use shipslip::github_auth::discover_repository;
+use shipslip::interrupt::{next_stage, on_interrupt, Interrupt, Stage};
 use shipslip::logs::{self, Level, Lookup, Since};
 use shipslip::receipt::{default_receipts_root, find_open, strip_color, ReceiptJournal};
 use shipslip::transport::SshTransport;
 use shipslip::{
-    attach, break_lock, bring_app_up, cancel, execute_recorded, lock_status,
+    attach, break_lock, bring_app_up, cancel, check_resumable, execute_recorded, lock_status,
     prepare_with_github_token, prepare_with_plan, BlockReason, BreakLockError, BringUpError,
     Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecuteRejected, ExecutionHandle,
-    LogChannel, MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus, WatchResult,
-    WatchStatus, POST_DEPLOY_WATCH,
+    MaintenancePhase, PrepareError, RunPlan, SmokeResult, StepStatus, WatchResult, WatchStatus,
+    POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -165,7 +166,8 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
             token_source,
         } => (environment, plan, token_source),
     };
-    let target = trusted_target(&config, &trust_path, &environment)?;
+    let trusted = trusted_target(&config, &trust_path, &environment)?;
+    let target = trusted.target();
 
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
     let mut interrupts = Interrupts::listen();
@@ -204,16 +206,10 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
     let preparing = async {
         match &auth {
             Some((repository, token)) => {
-                prepare_with_github_token(
-                    target.clone(),
-                    plan,
-                    transport.as_ref(),
-                    repository,
-                    token,
-                )
-                .await
+                prepare_with_github_token(&trusted, plan, transport.as_ref(), repository, token)
+                    .await
             }
-            None => prepare_with_plan(target.clone(), plan, transport.as_ref()).await,
+            None => prepare_with_plan(&trusted, plan, transport.as_ref()).await,
         }
     };
     let preview = interrupts
@@ -263,7 +259,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
 
     let Some((preview, confirmation)) = confirm(
         preview,
-        &target,
+        target,
         transport.as_ref(),
         &journal,
         &mut interrupts,
@@ -280,7 +276,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
                 return Err(error.into());
             }
         };
-    follow_events(events, &handle, &mut interrupts, &RunView::new(&target)).await
+    follow_events(events, &handle, &mut interrupts, &RunView::new(target)).await
 }
 
 /// Ctrl-C presses, delivered as messages once the listener is installed.
@@ -385,55 +381,6 @@ impl RunControls for ExecutionHandle {
 
     fn cancel_watch(&self) {
         ExecutionHandle::cancel_watch(self);
-    }
-}
-
-/// Where a followed run is, for deciding what Ctrl-C does.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stage {
-    Running,
-    BringingUp,
-    Watching,
-    Finishing,
-}
-
-fn next_stage(stage: Stage, event: &DeployEvent) -> Stage {
-    match event {
-        DeployEvent::MaintenanceStarted {
-            phase: MaintenancePhase::Up,
-        } => Stage::BringingUp,
-        DeployEvent::MaintenanceFinished {
-            phase: MaintenancePhase::Up,
-            ..
-        }
-        | DeployEvent::WatchFinished(_) => Stage::Finishing,
-        DeployEvent::WatchStarted { .. } => Stage::Watching,
-        _ => stage,
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum Interrupt {
-    /// Start no new step and stop following the running one.
-    Detach,
-    /// Maintenance up cannot be left half-done; skip the watch after it.
-    SkipWatch,
-    StopWatch,
-    /// Only the lock release and receipt remain.
-    Wait,
-    Quit,
-}
-
-/// A second Ctrl-C in the same stage quits; a new stage starts over.
-fn on_interrupt(stage: Stage, again: bool) -> Interrupt {
-    if again {
-        return Interrupt::Quit;
-    }
-    match stage {
-        Stage::Running => Interrupt::Detach,
-        Stage::BringingUp => Interrupt::SkipWatch,
-        Stage::Watching => Interrupt::StopWatch,
-        Stage::Finishing => Interrupt::Wait,
     }
 }
 
@@ -1405,7 +1352,8 @@ async fn attach_command(
     receipts_root: &Path,
     environment: &str,
 ) -> Result<ExitCode, Box<dyn Error>> {
-    let target = trusted_target(config, trust_path, environment)?;
+    let trusted = trusted_target(config, trust_path, environment)?;
+    let target = trusted.target();
     let path = find_open(
         receipts_root,
         config.project_name(),
@@ -1416,15 +1364,7 @@ async fn attach_command(
     let journal = Arc::new(ReceiptJournal::load(&path)?);
     journal.claim()?;
     let receipt = journal.snapshot();
-    if receipt.project != config.project_name()
-        || receipt.repo_root != config.repo_root().to_string_lossy()
-        || !saved_target_matches_current(&receipt.target, &target)
-    {
-        return Err(invalid_input(
-            "the unfinished run uses different deploy settings; inspect the receipt before recovery",
-        )
-        .into());
-    }
+    check_resumable(&trusted, &receipt).map_err(|error| invalid_input(error.to_string()))?;
     println!("Run:        {}", receipt.run_id);
     println!("Environment: {}", receipt.target.env);
     println!("Target SHA:  {}", receipt.target_sha);
@@ -1447,33 +1387,23 @@ async fn attach_command(
         return Ok(ExitCode::SUCCESS);
     }
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
-    let (events, handle) = attach(journal, transport)?;
+    let (events, handle) = attach(&trusted, journal, transport)?;
     // Installed only now: Ctrl-C at the prompt above must leave the run as it is.
     let mut interrupts = Interrupts::listen();
-    follow_events(events, &handle, &mut interrupts, &RunView::new(&target)).await
+    follow_events(events, &handle, &mut interrupts, &RunView::new(target)).await
 }
 
 fn trusted_target(
     config: &LoadedConfig,
     trust_path: &Path,
     environment: &str,
-) -> Result<DeployTarget, Box<dyn Error>> {
-    let target = config.target(environment).ok_or_else(|| {
-        invalid_input(format!("environment `{environment}` is not in the config"))
-    })?;
-    let snapshot = config
-        .trust_snapshot(environment)
-        .expect("target has an environment");
-    if !matches!(
-        trust_status(trust_path, config.repo_root(), environment, &snapshot)?,
-        TrustStatus::Trusted
-    ) {
-        return Err(invalid_input(format!(
-            "config for `{environment}` is untrusted; run `slip trust {environment}` first"
-        ))
-        .into());
-    }
-    Ok(target)
+) -> Result<TrustedTarget, Box<dyn Error>> {
+    config
+        .trusted_target(environment, trust_path)
+        .map_err(|error| match error {
+            TrustError::Store(error) => error.into(),
+            error => invalid_input(error.to_string()).into(),
+        })
 }
 
 async fn break_lock_command(
@@ -1481,12 +1411,13 @@ async fn break_lock_command(
     trust_path: &Path,
     environment: &str,
 ) -> Result<ExitCode, Box<dyn Error>> {
-    let target = trusted_target(config, trust_path, environment)?;
+    let trusted = trusted_target(config, trust_path, environment)?;
+    let target = trusted.target();
     let transport = SshTransport::connect(&target.ssh_alias).await?;
     println!("Environment: {environment}");
     println!("SSH alias:   {}", target.ssh_alias);
     println!("Path:        {}", target.path);
-    let Some(info) = lock_status(&target, &transport).await? else {
+    let Some(info) = lock_status(target, &transport).await? else {
         println!("No deploy lock is held.");
         return Ok(ExitCode::SUCCESS);
     };
@@ -1508,7 +1439,7 @@ async fn break_lock_command(
         println!("Lock was not changed.");
         return Ok(ExitCode::SUCCESS);
     }
-    break_lock(&target, &transport, environment).await?;
+    break_lock(&trusted, &transport, environment).await?;
     println!("Stale deploy lock cleared for `{environment}`.");
     Ok(ExitCode::SUCCESS)
 }
@@ -1518,7 +1449,8 @@ async fn up_command(
     trust_path: &Path,
     environment: &str,
 ) -> Result<ExitCode, Box<dyn Error>> {
-    let target = trusted_target(config, trust_path, environment)?;
+    let trusted = trusted_target(config, trust_path, environment)?;
+    let target = trusted.target();
     println!("Environment: {environment}");
     println!("SSH alias:   {}", target.ssh_alias);
     println!("Path:        {}", target.path);
@@ -1539,7 +1471,7 @@ async fn up_command(
         return Ok(ExitCode::SUCCESS);
     }
     let transport = SshTransport::connect(&target.ssh_alias).await?;
-    let lines = bring_app_up(&target, &transport)
+    let lines = bring_app_up(&trusted, &transport)
         .await
         .map_err(|error| match error {
             BringUpError::LockHeld(info) => format!(
@@ -1556,163 +1488,10 @@ async fn up_command(
     Ok(ExitCode::SUCCESS)
 }
 
-fn saved_target_matches_current(saved: &DeployTarget, current: &DeployTarget) -> bool {
-    if saved == current {
-        return true;
-    }
-    // Receipts from before log observation was added have no observation
-    // fields. Keep their exact approved deploy commands attachable.
-    let DeployTarget {
-        env,
-        production,
-        ssh_alias,
-        path,
-        branch,
-        steps,
-        maintenance,
-        watch_log,
-        log,
-        log_daily,
-        smoke_url,
-        timezone,
-        logs,
-    } = saved;
-    !watch_log
-        && log.is_none()
-        && !log_daily
-        && smoke_url.is_none()
-        && timezone.is_none()
-        && logs.is_empty()
-        && *env == current.env
-        && *production == current.production
-        && *ssh_alias == current.ssh_alias
-        && *path == current.path
-        && *branch == current.branch
-        && *steps == current.steps
-        && *maintenance == current.maintenance
-}
-
 fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) {
     for line in trust_changes(previous, current) {
         println!("{line}");
     }
-}
-
-fn trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) -> Vec<String> {
-    // Destructured without `..` so a new setting must be shown here.
-    let TrustSnapshot {
-        ssh_alias,
-        path,
-        branch,
-        production,
-        maintenance,
-        log,
-        log_daily,
-        smoke_url,
-        timezone,
-        logs,
-        steps,
-    } = current;
-    let mut lines = Vec::new();
-    let mut change = |label: &str, previous: Option<String>, current: String| {
-        if previous.as_deref() == Some(current.as_str()) {
-            return;
-        }
-        lines.push(match previous {
-            Some(previous) => format!("  {label}: {previous} -> {current}"),
-            None => format!("  {label}: {current}"),
-        });
-    };
-    let log_setting = |log: &Option<String>| setting(log, "not set (Laravel default)");
-    let smoke_setting = |url: &Option<String>| setting(url, "not set");
-    let timezone_setting = |zone: &Option<String>| setting(zone, "not set (UTC)");
-    change(
-        "ssh",
-        previous.map(|old| old.ssh_alias.clone()),
-        ssh_alias.clone(),
-    );
-    change("path", previous.map(|old| old.path.clone()), path.clone());
-    change(
-        "branch",
-        previous.map(|old| old.branch.clone()),
-        branch.clone(),
-    );
-    change(
-        "production",
-        previous.map(|old| old.production.to_string()),
-        production.to_string(),
-    );
-    change(
-        "maintenance",
-        previous.map(|old| old.maintenance.to_string()),
-        maintenance.to_string(),
-    );
-    change(
-        "log",
-        previous.map(|old| log_setting(&old.log)),
-        log_setting(log),
-    );
-    change(
-        "log_daily",
-        previous.map(|old| old.log_daily.to_string()),
-        log_daily.to_string(),
-    );
-    change(
-        "smoke_url",
-        previous.map(|old| smoke_setting(&old.smoke_url)),
-        smoke_setting(smoke_url),
-    );
-    change(
-        "timezone",
-        previous.map(|old| timezone_setting(&old.timezone)),
-        timezone_setting(timezone),
-    );
-    change(
-        "logs",
-        previous.map(|old| describe_log_channels(&old.logs)),
-        describe_log_channels(logs),
-    );
-    if previous.is_none_or(|old| old.steps != *steps) {
-        if let Some(old) = previous {
-            lines.push("  recipe steps before:".into());
-            for (index, step) in old.steps.iter().enumerate() {
-                lines.push(format!("    {}. {step}", index + 1));
-            }
-        }
-        lines.push("  recipe steps now:".into());
-        for (index, step) in steps.iter().enumerate() {
-            lines.push(format!("    {}. {step}", index + 1));
-        }
-    }
-    lines
-}
-
-/// An optional setting as the user wrote it, or what applies when unset.
-fn setting(value: &Option<String>, unset: &str) -> String {
-    value.clone().unwrap_or_else(|| unset.into())
-}
-
-fn describe_log_channels(channels: &BTreeMap<String, LogChannel>) -> String {
-    if channels.is_empty() {
-        return "none".into();
-    }
-    channels
-        .iter()
-        .map(|(name, LogChannel { hide, rename, path })| {
-            let mut parts = Vec::new();
-            if *hide {
-                parts.push("hidden".to_string());
-            }
-            if let Some(rename) = rename {
-                parts.push(format!("shown as {rename}"));
-            }
-            if let Some(path) = path {
-                parts.push(format!("path {path}"));
-            }
-            format!("{name} ({})", parts.join(", "))
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
 }
 
 async fn confirm(
@@ -2129,60 +1908,6 @@ mod tests {
             index: 1,
             name: "migrate".into(),
         }
-    }
-
-    #[test]
-    fn ctrl_c_acts_on_the_current_stage_and_quits_when_repeated() {
-        assert_eq!(on_interrupt(Stage::Running, false), Interrupt::Detach);
-        assert_eq!(on_interrupt(Stage::BringingUp, false), Interrupt::SkipWatch);
-        assert_eq!(on_interrupt(Stage::Watching, false), Interrupt::StopWatch);
-        assert_eq!(on_interrupt(Stage::Finishing, false), Interrupt::Wait);
-        for stage in [
-            Stage::Running,
-            Stage::BringingUp,
-            Stage::Watching,
-            Stage::Finishing,
-        ] {
-            assert_eq!(on_interrupt(stage, true), Interrupt::Quit);
-        }
-    }
-
-    #[test]
-    fn stages_follow_maintenance_up_and_the_log_watch() {
-        let up = |phase| DeployEvent::MaintenanceStarted { phase };
-        assert_eq!(
-            next_stage(Stage::Running, &up(MaintenancePhase::Down)),
-            Stage::Running
-        );
-        assert_eq!(next_stage(Stage::Running, &step_started()), Stage::Running);
-        assert_eq!(
-            next_stage(Stage::Running, &up(MaintenancePhase::Up)),
-            Stage::BringingUp
-        );
-        assert_eq!(
-            next_stage(
-                Stage::BringingUp,
-                &DeployEvent::MaintenanceFinished {
-                    phase: MaintenancePhase::Up,
-                    status: StepStatus::Ok,
-                    exit_code: Some(0),
-                }
-            ),
-            Stage::Finishing
-        );
-        assert_eq!(
-            next_stage(
-                Stage::Finishing,
-                &DeployEvent::WatchStarted {
-                    window: Duration::from_secs(120)
-                }
-            ),
-            Stage::Watching
-        );
-        assert_eq!(
-            next_stage(Stage::Watching, &watch_finished(WatchStatus::Complete)),
-            Stage::Finishing
-        );
     }
 
     #[tokio::test]

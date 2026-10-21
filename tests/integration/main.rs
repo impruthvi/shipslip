@@ -2,12 +2,13 @@
 //! Run with `cargo test --features integration`.
 
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Once};
 use std::time::Duration;
 
+use shipslip::config::TrustedTarget;
 use shipslip::logs::{self, Badge, ChannelKind, Format, Level, LogsError, Request, Since};
 use shipslip::receipt::{ReceiptJournal, ReceiptStatus};
 use shipslip::transport::{SshTransport, Transport, TransportError};
@@ -578,7 +579,7 @@ async fn logs_anchor_fallbacks_distinguish_corrupt_missing_and_failed_git() {
     server.exec(&format!("seed-logs {path}"), "");
     let ssh = Arc::new(server.connect().await);
     let target = target(&path, &["true"]);
-    let preview = prepare(target.clone(), &*ssh).await.unwrap();
+    let preview = prepare(&trusted(target.clone()), &*ssh).await.unwrap();
     cancel(preview, &*ssh).await.unwrap();
     assert_eq!(
         server.exec(
@@ -672,7 +673,7 @@ async fn logs_marker_start_failure_warns_in_receipt_removes_old_marker_and_still
     let ssh = Arc::new(server.connect().await);
     deploy(ssh, target.clone()).await;
     let transport = Arc::new(LogsTransport { ssh: server.connect().await, calls: AtomicUsize::new(0), before_read: String::new(), prefix: "mv() { case \"${@: -1}\" in */shipslip.last-run) return 1 ;; *) command mv \"$@\" ;; esac; }".into() });
-    let preview = prepare_with_plan(target.clone(), RunPlan::Rerun, &*transport)
+    let preview = prepare_with_plan(&trusted(target.clone()), RunPlan::Rerun, &*transport)
         .await
         .unwrap();
     let journal = Arc::new(
@@ -1510,6 +1511,10 @@ async fn run(transport: &SshTransport, script: &str) -> (Result<i32, TransportEr
     (result, lines)
 }
 
+fn trusted(target: DeployTarget) -> TrustedTarget {
+    TrustedTarget::for_test(target, "app", Path::new("/repo"))
+}
+
 fn target(path: &str, steps: &[&str]) -> DeployTarget {
     DeployTarget {
         env: "staging".into(),
@@ -1544,7 +1549,7 @@ async fn deploy_with_plan<T: Transport>(
     target: DeployTarget,
     run_plan: RunPlan,
 ) -> Vec<DeployEvent> {
-    let preview = prepare_with_plan(target, run_plan, &*transport)
+    let preview = prepare_with_plan(&trusted(target), run_plan, &*transport)
         .await
         .unwrap();
     let confirmation = Confirmation::from(&preview, None).unwrap();
@@ -1562,7 +1567,7 @@ async fn deploy_until(
     target: DeployTarget,
     until: impl Fn(&DeployEvent) -> bool,
 ) -> (Vec<DeployEvent>, Running) {
-    let preview = prepare(target, &*transport).await.unwrap();
+    let preview = prepare(&trusted(target), &*transport).await.unwrap();
     let run_id = preview.run_id().to_string();
     let confirmation = Confirmation::from(&preview, None).unwrap();
     let (mut rx, handle) = execute(preview, confirmation, transport).unwrap();
@@ -1842,7 +1847,7 @@ async fn steps_run_in_strict_mode() {
 async fn missing_app_path_blocks_prepare() {
     let server = Server::start().await;
     let ssh = server.connect().await;
-    let result = prepare(target("/home/deploy/missing", &[]), &ssh).await;
+    let result = prepare(&trusted(target("/home/deploy/missing", &[])), &ssh).await;
     assert!(result.is_err(), "{result:?}");
 }
 
@@ -1925,13 +1930,13 @@ async fn attach_recovers_a_detached_run_without_relaunching_the_step() {
     let ssh = Arc::new(server.connect().await);
     let path = server.app("app");
     let preview = prepare(
-        target(
+        &trusted(target(
             &path,
             &[
                 "echo first >> ~/receipt-counter; echo started; sleep 2; echo done",
                 "echo second >> ~/receipt-counter",
             ],
-        ),
+        )),
         &*ssh,
     )
     .await
@@ -1960,7 +1965,8 @@ async fn attach_recovers_a_detached_run_without_relaunching_the_step() {
 
     let resumed = Arc::new(ReceiptJournal::load(&receipt_path).unwrap());
     let ssh = Arc::new(server.connect().await);
-    let (mut events, _handle) = attach(resumed.clone(), ssh).unwrap();
+    let trusted = TrustedTarget::for_test(resumed.snapshot().target, "app", &server.dir);
+    let (mut events, _handle) = attach(&trusted, resumed.clone(), ssh).unwrap();
     let mut final_event = None;
     tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(event) = events.recv().await {
@@ -2074,8 +2080,10 @@ async fn lock_blocks_a_second_deploy_until_cancelled() {
     let ssh = server.connect().await;
     let path = server.app("app");
 
-    let first = prepare(target(&path, &[]), &ssh).await.unwrap();
-    let err = prepare(target(&path, &[]), &ssh).await.unwrap_err();
+    let first = prepare(&trusted(target(&path, &[])), &ssh).await.unwrap();
+    let err = prepare(&trusted(target(&path, &[])), &ssh)
+        .await
+        .unwrap_err();
     let PrepareError::LockHeld(info) = err else {
         panic!("{err:?}");
     };
@@ -2086,7 +2094,7 @@ async fn lock_blocks_a_second_deploy_until_cancelled() {
 
     cancel(first, &ssh).await.unwrap();
     assert!(!server.lock_exists(&path));
-    let second = prepare(target(&path, &[]), &ssh).await.unwrap();
+    let second = prepare(&trusted(target(&path, &[])), &ssh).await.unwrap();
     cancel(second, &ssh).await.unwrap();
 }
 
@@ -2095,8 +2103,8 @@ async fn only_a_stale_lock_can_be_broken() {
     let server = Server::start().await;
     let ssh = server.connect().await;
     let path = server.app("app");
-    let t = target(&path, &[]);
-    let held = prepare(t.clone(), &ssh).await.unwrap();
+    let t = trusted(target(&path, &[]));
+    let held = prepare(&t, &ssh).await.unwrap();
 
     assert!(matches!(
         break_lock(&t, &ssh, "staging").await,
@@ -2138,9 +2146,11 @@ async fn lock_broken_mid_deploy_stops_after_the_step_and_spares_the_successor() 
 
     let (events, running) = deploy_until(ssh, t.clone(), is_output("one")).await;
     server.exec(&format!("echo 0 > {path}/.git/shipslip.lock/heartbeat"), "");
-    break_lock(&t, &other, "staging").await.unwrap();
+    break_lock(&trusted(t.clone()), &other, "staging")
+        .await
+        .unwrap();
     server.push_commit("third");
-    let successor = prepare(target(&path, &[]), &other).await.unwrap();
+    let successor = prepare(&trusted(target(&path, &[])), &other).await.unwrap();
     server.exec(
         &format!("printf successor > {path}/.git/shipslip.last-run"),
         "",
@@ -2215,7 +2225,9 @@ async fn unsafe_checkouts_are_blocked_before_the_lock() {
     for (name, setup, steps, expected) in cases {
         let path = server.app(name);
         server.exec(&format!("cd {path} && {setup}"), "");
-        let err = prepare(target(&path, steps), &ssh).await.unwrap_err();
+        let err = prepare(&trusted(target(&path, steps)), &ssh)
+            .await
+            .unwrap_err();
         assert!(
             matches!(&err, PrepareError::Blocked(r) if expected(r)),
             "{name}: {err:?}"
@@ -2229,7 +2241,9 @@ async fn head_moved_after_the_preview_aborts_before_changes() {
     let server = Server::start().await;
     let ssh = Arc::new(server.connect().await);
     let path = server.app("app");
-    let preview = prepare(target(&path, &["true"]), &*ssh).await.unwrap();
+    let preview = prepare(&trusted(target(&path, &["true"])), &*ssh)
+        .await
+        .unwrap();
     let run_id = preview.run_id().to_string();
     server.exec(
         &format!("git -C {path} commit -q --allow-empty -m sneaky"),
@@ -2390,7 +2404,9 @@ async fn bring_app_up_restores_a_deploy_left_in_maintenance_mode() {
     let path = server.app("app");
     server.exec(&format!("cd {path} && php artisan down"), "");
 
-    let output = bring_app_up(&target(&path, &[]), &ssh).await.unwrap();
+    let output = bring_app_up(&trusted(target(&path, &[])), &ssh)
+        .await
+        .unwrap();
     assert_eq!(output, ["up"]);
     assert_eq!(
         server.exec(
@@ -2407,9 +2423,11 @@ async fn bring_app_up_does_not_run_while_a_deploy_holds_the_lock() {
     let server = Server::start().await;
     let ssh = server.connect().await;
     let path = server.app("app");
-    let preview = prepare(target(&path, &[]), &ssh).await.unwrap();
+    let preview = prepare(&trusted(target(&path, &[])), &ssh).await.unwrap();
 
-    let error = bring_app_up(&target(&path, &[]), &ssh).await.unwrap_err();
+    let error = bring_app_up(&trusted(target(&path, &[])), &ssh)
+        .await
+        .unwrap_err();
     assert!(matches!(error, BringUpError::LockHeld(_)));
     assert_eq!(
         server.exec(
@@ -2731,15 +2749,15 @@ async fn stale_lock_recovery_shows_the_holder_then_breaks_and_brings_the_app_up(
     let server = Server::start().await;
     let ssh = server.connect().await;
     let path = server.app("app");
-    let t = target(&path, &[]);
-    assert_eq!(lock_status(&t, &ssh).await, Ok(None));
+    let t = trusted(target(&path, &[]));
+    assert_eq!(lock_status(t.target(), &ssh).await, Ok(None));
 
     // An abandoned run: it holds the lock, left the app down and stopped heartbeating.
-    let held = prepare(t.clone(), &ssh).await.unwrap();
+    let held = prepare(&t, &ssh).await.unwrap();
     server.exec(&format!("cd {path} && php artisan down"), "");
     server.exec(&format!("echo 0 > {path}/.git/shipslip.lock/heartbeat"), "");
 
-    let info = lock_status(&t, &ssh).await.unwrap().unwrap();
+    let info = lock_status(t.target(), &ssh).await.unwrap().unwrap();
     assert!(info.is_stale());
     assert_eq!(info.owner.unwrap().run_id, held.run_id());
     assert!(matches!(
@@ -2748,7 +2766,7 @@ async fn stale_lock_recovery_shows_the_holder_then_breaks_and_brings_the_app_up(
     ));
 
     assert_eq!(break_lock(&t, &ssh, "staging").await, Ok(()));
-    assert_eq!(lock_status(&t, &ssh).await, Ok(None));
+    assert_eq!(lock_status(t.target(), &ssh).await, Ok(None));
     assert_eq!(bring_app_up(&t, &ssh).await.unwrap(), ["up"]);
     assert_eq!(
         server.exec(

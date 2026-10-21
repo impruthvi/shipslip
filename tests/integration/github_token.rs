@@ -43,7 +43,7 @@ async fn temporary_github_token_fetches_over_ssh_without_persisting_or_reaching_
     let token = GitHubToken::new("ghp_TEST_ONLY_work".into()).unwrap();
     let deploy_target = target(&path, &["test -z \"${SHIPSLIP_GITHUB_TOKEN+x}\" && test -z \"${GH_TOKEN+x}\" && echo token-not-in-step"]);
     let preview = prepare_with_github_token(
-        deploy_target,
+        &trusted(deploy_target),
         RunPlan::Deploy,
         ssh.as_ref(),
         &repository,
@@ -94,7 +94,7 @@ async fn temporary_github_token_fetches_over_ssh_without_persisting_or_reaching_
         "",
     );
     let error = prepare_with_github_token(
-        target(&path, &["true"]),
+        &trusted(target(&path, &["true"])),
         RunPlan::Rerun,
         ssh.as_ref(),
         &repository,

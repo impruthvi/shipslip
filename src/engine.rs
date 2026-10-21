@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
+use crate::config::TrustedTarget;
 use crate::event::{
     down_may_have_started, DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason,
 };
@@ -274,7 +275,7 @@ impl ExecutionHandle {
 /// fetching refs and taking the lock. Release it with [`cancel`] if the
 /// deploy does not go ahead.
 pub async fn prepare<T: Transport>(
-    target: DeployTarget,
+    target: &TrustedTarget,
     transport: &T,
 ) -> Result<Preview, PrepareError> {
     prepare_with_plan(target, RunPlan::Deploy, transport).await
@@ -283,24 +284,30 @@ pub async fn prepare<T: Transport>(
 /// Prepares a deploy, recipe rerun, or recipe restart from a selected step.
 /// Reruns require `origin/<branch>` to match the server's current clean HEAD.
 pub async fn prepare_with_plan<T: Transport>(
-    target: DeployTarget,
+    target: &TrustedTarget,
     run_plan: RunPlan,
     transport: &T,
 ) -> Result<Preview, PrepareError> {
-    prepare_inner(target, run_plan, transport, None).await
+    prepare_inner(target.target().clone(), run_plan, transport, None).await
 }
 
 /// Like [`prepare_with_plan`], using a local token only for the server's
 /// GitHub fetch. Supports standard github.com HTTPS and SSH origins without
 /// rewriting their saved configuration. The token never enters the preview.
 pub async fn prepare_with_github_token<T: Transport>(
-    target: DeployTarget,
+    target: &TrustedTarget,
     run_plan: RunPlan,
     transport: &T,
     repository: &crate::github_auth::GitHubRepository,
     token: &crate::github_auth::GitHubToken,
 ) -> Result<Preview, PrepareError> {
-    prepare_inner(target, run_plan, transport, Some((repository, token))).await
+    prepare_inner(
+        target.target().clone(),
+        run_plan,
+        transport,
+        Some((repository, token)),
+    )
+    .await
 }
 
 async fn prepare_inner<T: Transport>(
@@ -425,9 +432,10 @@ pub enum BringUpError {
 /// maintenance mode. Holds the deploy lock meanwhile, so it cannot run
 /// during a deploy. Returns the command's output.
 pub async fn bring_app_up<T: Transport>(
-    target: &DeployTarget,
+    target: &TrustedTarget,
     transport: &T,
 ) -> Result<Vec<String>, BringUpError> {
+    let target = target.target();
     let run_id = new_run_id();
     let owner = LockOwner::current(&run_id, "");
     match lock::acquire(transport, &target.path, &owner)
@@ -496,10 +504,11 @@ pub enum BreakLockError {
 /// Breaks a stale deploy lock (see [`LockInfo::is_stale`]). Check over SSH
 /// first that no step of the old run is still running.
 pub async fn break_lock<T: Transport>(
-    target: &DeployTarget,
+    target: &TrustedTarget,
     transport: &T,
     typed_env: &str,
 ) -> Result<(), BreakLockError> {
+    let target = target.target();
     if typed_env != target.env {
         return Err(BreakLockError::EnvNameRequired(target.env.clone()));
     }
@@ -632,10 +641,27 @@ pub enum AttachError {
     Invalid(String),
     #[error("could not update the receipt: {0}")]
     Receipt(String),
+    #[error(
+        "the unfinished run uses different deploy settings; inspect the receipt before recovery"
+    )]
+    SettingsChanged,
+}
+
+/// Whether an unfinished run belongs to this checkout and still uses its
+/// approved settings, so resuming it runs only what the user approved.
+pub fn check_resumable(trusted: &TrustedTarget, receipt: &Receipt) -> Result<(), AttachError> {
+    if receipt.project != trusted.project()
+        || receipt.repo_root != trusted.repo_root().to_string_lossy()
+        || !saved_target_matches_current(&receipt.target, trusted.target())
+    {
+        return Err(AttachError::SettingsChanged);
+    }
+    Ok(())
 }
 
 /// Resumes observation of an unfinished run; an active step is never launched again.
 pub fn attach<T: Transport>(
+    trusted: &TrustedTarget,
     journal: Arc<ReceiptJournal>,
     transport: Arc<T>,
 ) -> Result<(mpsc::UnboundedReceiver<DeployEvent>, ExecutionHandle), AttachError> {
@@ -646,6 +672,7 @@ pub fn attach<T: Transport>(
     if receipt.status != ReceiptStatus::InProgress {
         return Err(AttachError::Final);
     }
+    check_resumable(trusted, &receipt)?;
     if receipt.mutation_started && !receipt.confirmed {
         return Err(AttachError::Invalid(
             "mutation began without confirmation".into(),
@@ -673,6 +700,42 @@ pub fn attach<T: Transport>(
         .set_owner_pid(std::process::id())
         .map_err(|error| AttachError::Receipt(error.to_string()))?;
     Ok(spawn_run(preview, transport, Some(journal), Some(receipt)))
+}
+
+fn saved_target_matches_current(saved: &DeployTarget, current: &DeployTarget) -> bool {
+    if saved == current {
+        return true;
+    }
+    // Receipts from before log observation was added have no observation
+    // fields. Keep their exact approved deploy commands attachable.
+    let DeployTarget {
+        env,
+        production,
+        ssh_alias,
+        path,
+        branch,
+        steps,
+        maintenance,
+        watch_log,
+        log,
+        log_daily,
+        smoke_url,
+        timezone,
+        logs,
+    } = saved;
+    !watch_log
+        && log.is_none()
+        && !log_daily
+        && smoke_url.is_none()
+        && timezone.is_none()
+        && logs.is_empty()
+        && *env == current.env
+        && *production == current.production
+        && *ssh_alias == current.ssh_alias
+        && *path == current.path
+        && *branch == current.branch
+        && *steps == current.steps
+        && *maintenance == current.maintenance
 }
 
 fn validate_receipt_plan(receipt: &Receipt) -> Result<(), String> {
@@ -2427,6 +2490,10 @@ mod tests {
         }
     }
 
+    fn trusted(target: DeployTarget) -> TrustedTarget {
+        TrustedTarget::for_test(target, "app", Path::new("/repo"))
+    }
+
     fn target(production: bool, steps: &[&str]) -> DeployTarget {
         DeployTarget {
             env: if production { "production" } else { "staging" }.into(),
@@ -2457,7 +2524,9 @@ mod tests {
     }
 
     async fn prepared(fake: &Fake, production: bool, steps: &[&str]) -> Preview {
-        prepare(target(production, steps), fake).await.unwrap()
+        prepare(&trusted(target(production, steps)), fake)
+            .await
+            .unwrap()
     }
 
     async fn prepared_with_plan(
@@ -2466,7 +2535,7 @@ mod tests {
         steps: &[&str],
         run_plan: RunPlan,
     ) -> Preview {
-        prepare_with_plan(target(production, steps), run_plan, fake)
+        prepare_with_plan(&trusted(target(production, steps)), run_plan, fake)
             .await
             .unwrap()
     }
@@ -2496,7 +2565,9 @@ mod tests {
     #[tokio::test]
     async fn prepare_blocks_when_up_to_date() {
         let fake = preflight().server(|s| s.target = FROM.into());
-        let err = prepare(target(false, &[]), &fake).await.unwrap_err();
+        let err = prepare(&trusted(target(false, &[])), &fake)
+            .await
+            .unwrap_err();
         assert!(matches!(err, PrepareError::Blocked(BlockReason::UpToDate)));
     }
 
@@ -2517,7 +2588,7 @@ mod tests {
     async fn rerun_preview_blocks_when_target_is_not_already_checked_out() {
         let fake = preflight();
         let err = prepare_with_plan(
-            target(false, &["php artisan migrate"]),
+            &trusted(target(false, &["php artisan migrate"])),
             RunPlan::Rerun,
             &fake,
         )
@@ -2536,7 +2607,7 @@ mod tests {
             let fake = preflight();
             assert!(matches!(
                 prepare_with_plan(
-                    target(false, &["only step"]),
+                    &trusted(target(false, &["only step"])),
                     RunPlan::FromStep(step),
                     &fake
                 )
@@ -2550,7 +2621,9 @@ mod tests {
     #[tokio::test]
     async fn prepare_rejects_garbage_sha() {
         let fake = preflight().server(|s| s.head = "not a sha".into());
-        let err = prepare(target(false, &[]), &fake).await.unwrap_err();
+        let err = prepare(&trusted(target(false, &[])), &fake)
+            .await
+            .unwrap_err();
         assert!(matches!(err, PrepareError::UnexpectedOutput { .. }));
     }
 
@@ -2558,7 +2631,7 @@ mod tests {
     async fn prepare_rejects_unsafe_branch() {
         let mut t = target(false, &[]);
         t.branch = "main;rm -rf /".into();
-        let err = prepare(t, &Fake::default()).await.unwrap_err();
+        let err = prepare(&trusted(t), &Fake::default()).await.unwrap_err();
         assert!(matches!(err, PrepareError::InvalidTarget(_)));
     }
 
@@ -2706,7 +2779,7 @@ mod tests {
     }
 
     async fn deploy_target(fake: &Arc<Fake>, target: DeployTarget) -> Vec<DeployEvent> {
-        let p = prepare(target, &**fake).await.unwrap();
+        let p = prepare(&trusted(target), &**fake).await.unwrap();
         let c = Confirmation::from(&p, None).unwrap();
         let (rx, _h) = execute(p, c, fake.clone()).unwrap();
         collect(rx).await
@@ -2827,7 +2900,7 @@ mod tests {
     async fn detached_maintenance_down_warns_and_matches_the_receipt() {
         let gate = Arc::new(Notify::new());
         let fake = Arc::new(preflight().gated("php artisan down", gate));
-        let preview = prepare(maintenance_target(false, &[]), &*fake)
+        let preview = prepare(&trusted(maintenance_target(false, &[])), &*fake)
             .await
             .unwrap();
         let dir = TempReceipts::new();
@@ -2855,7 +2928,7 @@ mod tests {
             &[],
             0,
         ));
-        let p = prepare(maintenance_target(false, &[]), &*fake)
+        let p = prepare(&trusted(maintenance_target(false, &[])), &*fake)
             .await
             .unwrap();
         let c = Confirmation::from(&p, None).unwrap();
@@ -2950,7 +3023,7 @@ mod tests {
             s.target = TO.into();
         }));
         let p = prepare_with_plan(
-            target(false, &["first command", "second command"]),
+            &trusted(target(false, &["first command", "second command"])),
             RunPlan::FromStep(2),
             &*fake,
         )
@@ -2978,7 +3051,7 @@ mod tests {
     #[tokio::test]
     async fn bring_app_up_runs_under_the_lock_and_releases_it() {
         let fake = preflight().on("php artisan up", &["back up"], 0);
-        let target = target(false, &[]);
+        let target = trusted(target(false, &[]));
         let output = bring_app_up(&target, &fake).await.unwrap();
         assert_eq!(output, ["back up"]);
         assert_eq!(fake.lock_owner(), None);
@@ -2988,7 +3061,9 @@ mod tests {
     #[tokio::test]
     async fn bring_app_up_refuses_to_run_while_a_deploy_holds_the_lock() {
         let fake = preflight().locked_by_other(false);
-        let err = bring_app_up(&target(false, &[]), &fake).await.unwrap_err();
+        let err = bring_app_up(&trusted(target(false, &[])), &fake)
+            .await
+            .unwrap_err();
         assert!(matches!(err, BringUpError::LockHeld(_)));
         assert_eq!(fake.ran_matching("php artisan up"), 0);
     }
@@ -2998,7 +3073,9 @@ mod tests {
         let fake = preflight()
             .drops("php artisan up", &[], 0, 0)
             .unreachable_after_drop();
-        let error = bring_app_up(&target(false, &[]), &fake).await.unwrap_err();
+        let error = bring_app_up(&trusted(target(false, &[])), &fake)
+            .await
+            .unwrap_err();
 
         assert!(matches!(error, BringUpError::Interrupted(_)));
         assert!(fake.lock_owner().is_some());
@@ -3126,6 +3203,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn attach_refuses_a_run_from_other_settings_or_checkout_without_remote_work() {
+        let fake = Arc::new(preflight());
+        let saved = target(false, &["php artisan migrate"]);
+        let preview = prepare(&trusted(saved.clone()), &*fake).await.unwrap();
+        let dir = TempReceipts::new();
+        let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        journal.confirm().unwrap();
+        let path = journal.path().to_path_buf();
+        drop(journal);
+        let ran = fake.ran.lock().unwrap().len();
+
+        let mut changed = saved.clone();
+        changed.steps = vec!["php artisan migrate:fresh".into()];
+        for current in [
+            TrustedTarget::for_test(changed, "app", Path::new("/repo")),
+            TrustedTarget::for_test(saved.clone(), "other", Path::new("/repo")),
+            TrustedTarget::for_test(saved.clone(), "app", Path::new("/elsewhere")),
+        ] {
+            let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+            let Err(error) = attach(&current, resumed, fake.clone()) else {
+                panic!("changed settings must not resume");
+            };
+            assert_eq!(
+                error.to_string(),
+                "the unfinished run uses different deploy settings; inspect the receipt before recovery"
+            );
+        }
+        assert_eq!(fake.ran.lock().unwrap().len(), ran);
+    }
+
+    #[tokio::test]
+    async fn receipts_from_before_log_watch_stay_resumable() {
+        let fake = preflight();
+        let preview = prepare(&trusted(target(false, &["true"])), &fake)
+            .await
+            .unwrap();
+        let dir = TempReceipts::new();
+        let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        let receipt = journal.snapshot();
+        let mut current = receipt.target.clone();
+        current.watch_log = true;
+        current.log_daily = true;
+        current.smoke_url = Some("https://example.com/up".into());
+        assert!(check_resumable(
+            &TrustedTarget::for_test(current.clone(), "app", Path::new("/repo")),
+            &receipt
+        )
+        .is_ok());
+        current.branch = "release".into();
+        assert!(matches!(
+            check_resumable(
+                &TrustedTarget::for_test(current, "app", Path::new("/repo")),
+                &receipt
+            ),
+            Err(AttachError::SettingsChanged)
+        ));
+    }
+
+    #[tokio::test]
     async fn attach_after_maintenance_on_never_reports_before_changes() {
         let fake = Arc::new(
             preflight()
@@ -3135,7 +3271,7 @@ mod tests {
         );
         let mut target = maintenance_target(false, &["composer install"]);
         target.steps = vec!["composer install".into()];
-        let preview = prepare_with_plan(target, RunPlan::Rerun, &*fake)
+        let preview = prepare_with_plan(&trusted(target), RunPlan::Rerun, &*fake)
             .await
             .unwrap();
         let dir = TempReceipts::new();
@@ -3151,7 +3287,12 @@ mod tests {
         drop(journal);
 
         let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
-        let (events, _handle) = attach(resumed.clone(), fake.clone()).unwrap();
+        let (events, _handle) = attach(
+            &trusted(resumed.snapshot().target),
+            resumed.clone(),
+            fake.clone(),
+        )
+        .unwrap();
         let events = collect(events).await;
         assert!(events.contains(&DeployEvent::AppLeftDown));
         assert!(
@@ -3340,7 +3481,7 @@ mod tests {
         );
         let mut target = target(false, &["composer install", "migrate"]);
         target.watch_log = true;
-        let preview = prepare(target, &*fake).await.unwrap();
+        let preview = prepare(&trusted(target), &*fake).await.unwrap();
         let dir = TempReceipts::new();
         let journal =
             Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
@@ -3386,7 +3527,7 @@ mod tests {
     #[tokio::test]
     async fn signature_history_sits_beside_the_receipts_root() {
         let fake = Arc::new(preflight());
-        let preview = prepare(target(false, &[]), &*fake).await.unwrap();
+        let preview = prepare(&trusted(target(false, &[])), &*fake).await.unwrap();
         let dir = TempReceipts::new();
         let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
         let tail = Path::new("app/staging/history.json");
@@ -3468,7 +3609,7 @@ mod tests {
         let fake = Arc::new(fake);
         let mut target = maintenance_target(false, steps);
         target.watch_log = true;
-        let p = prepare(target, &*fake).await.unwrap();
+        let p = prepare(&trusted(target), &*fake).await.unwrap();
         let c = Confirmation::from(&p, None).unwrap();
         let (rx, _h) = execute(p, c, fake).unwrap();
         collect(rx).await
@@ -3533,7 +3674,7 @@ mod tests {
         let fake = Arc::new(preflight());
         let mut target = target(false, &[]);
         target.watch_log = true;
-        let p = prepare(target, &*fake).await.unwrap();
+        let p = prepare(&trusted(target), &*fake).await.unwrap();
         let c = Confirmation::from(&p, None).unwrap();
         let (rx, h) = execute(p, c, fake).unwrap();
         h.detach();
@@ -3572,7 +3713,7 @@ mod tests {
         );
         let mut target = target(false, &["composer install", "migrate"]);
         target.watch_log = true;
-        let p = prepare(target, &*fake).await.unwrap();
+        let p = prepare(&trusted(target), &*fake).await.unwrap();
         let c = Confirmation::from(&p, None).unwrap();
         let (mut rx, h) = execute(p, c, fake.clone()).unwrap();
         while !matches!(
@@ -3598,7 +3739,7 @@ mod tests {
         let fake = Arc::new(preflight());
         let mut target = target(false, &[]);
         target.watch_log = true;
-        let preview = prepare(target, &*fake).await.unwrap();
+        let preview = prepare(&trusted(target), &*fake).await.unwrap();
         let dir = TempReceipts::new();
         let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
         journal.confirm().unwrap();
@@ -3614,7 +3755,7 @@ mod tests {
         drop(journal);
 
         let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
-        let (events, _handle) = attach(resumed, fake).unwrap();
+        let (events, _handle) = attach(&trusted(resumed.snapshot().target), resumed, fake).unwrap();
         let events = collect(events).await;
         assert_eq!(watch_started(&events), 0, "{events:#?}");
         assert!(events.iter().any(
@@ -3665,7 +3806,7 @@ mod tests {
                 .on_state_check(move || on_recheck.get().unwrap().stop_after_step())
                 .on("php artisan down", &[], 0),
         );
-        let preview = prepare(maintenance_target(false, &[]), &*fake)
+        let preview = prepare(&trusted(maintenance_target(false, &[])), &*fake)
             .await
             .unwrap();
         let confirmation = Confirmation::from(&preview, None).unwrap();
@@ -3778,7 +3919,9 @@ mod tests {
     #[tokio::test]
     async fn prepare_blocks_when_the_lock_is_held() {
         let fake = preflight().locked_by_other(false);
-        let err = prepare(target(false, &[]), &fake).await.unwrap_err();
+        let err = prepare(&trusted(target(false, &[])), &fake)
+            .await
+            .unwrap_err();
         let PrepareError::LockHeld(info) = err else {
             panic!("{err:?}");
         };
@@ -3789,7 +3932,9 @@ mod tests {
     #[tokio::test]
     async fn lost_acquire_response_releases_the_lock_it_just_created() {
         let fake = preflight().lose_acquire_response();
-        let error = prepare(target(false, &[]), &fake).await.unwrap_err();
+        let error = prepare(&trusted(target(false, &[])), &fake)
+            .await
+            .unwrap_err();
 
         assert!(matches!(
             error,
@@ -3802,7 +3947,9 @@ mod tests {
     #[tokio::test]
     async fn lost_acquire_response_does_not_release_another_runs_lock() {
         let fake = preflight().locked_by_other(false).lose_acquire_response();
-        let error = prepare(target(false, &[]), &fake).await.unwrap_err();
+        let error = prepare(&trusted(target(false, &[])), &fake)
+            .await
+            .unwrap_err();
 
         assert!(matches!(error, PrepareError::Lock(_)));
         assert_eq!(fake.lock_owner().as_deref(), Some("other"));
@@ -3935,7 +4082,7 @@ mod tests {
 
     #[tokio::test]
     async fn break_lock_needs_the_env_name_and_a_stale_lock() {
-        let t = target(false, &[]);
+        let t = trusted(target(false, &[]));
         let live = preflight().locked_by_other(false);
         assert_eq!(
             break_lock(&t, &live, "production").await,
@@ -4000,7 +4147,7 @@ mod tests {
         ];
         for (change, expected) in cases {
             let fake = preflight().server(change);
-            let err = prepare(target(false, &["echo 'x"]), &fake)
+            let err = prepare(&trusted(target(false, &["echo 'x"])), &fake)
                 .await
                 .unwrap_err();
             assert!(
@@ -4256,7 +4403,12 @@ mod tests {
         drop(journal);
 
         let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
-        let (events, _handle) = attach(resumed.clone(), fake.clone()).unwrap();
+        let (events, _handle) = attach(
+            &trusted(resumed.snapshot().target),
+            resumed.clone(),
+            fake.clone(),
+        )
+        .unwrap();
         gate.notify_one();
         assert_eq!(
             collect(events).await.last(),
@@ -4289,7 +4441,8 @@ mod tests {
         drop(journal);
 
         let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
-        let (events, _handle) = attach(resumed, fake.clone()).unwrap();
+        let (events, _handle) =
+            attach(&trusted(resumed.snapshot().target), resumed, fake.clone()).unwrap();
         assert_eq!(
             collect(events).await.last(),
             Some(&DeployEvent::Finished(DeployOutcome::StoppedAfterStep {
@@ -4312,7 +4465,12 @@ mod tests {
         drop(journal);
 
         let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
-        let (events, _handle) = attach(resumed.clone(), fake.clone()).unwrap();
+        let (events, _handle) = attach(
+            &trusted(resumed.snapshot().target),
+            resumed.clone(),
+            fake.clone(),
+        )
+        .unwrap();
         assert_eq!(
             collect(events).await.last(),
             Some(&DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
