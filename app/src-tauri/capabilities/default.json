@@ -1,11 +1,25 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Read-only release map: window queries, events, and copying a command to the clipboard.",
-  "windows": ["main"],
+  "description": "Release map and Rust-owned deployment sessions for the main window.",
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:window:default",
     "core:event:default",
-    "clipboard-manager:allow-write-text"
+    "clipboard-manager:allow-write-text",
+    "allow-load-map",
+    "allow-compare",
+    "allow-load-receipt",
+    "allow-prepare-deploy",
+    "allow-review-trust",
+    "allow-approve-trust",
+    "allow-confirm-deploy",
+    "allow-cancel-deploy",
+    "allow-review-up",
+    "allow-review-attach",
+    "allow-current-runs",
+    "allow-cancel-pending"
   ]
 }

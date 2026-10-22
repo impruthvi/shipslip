@@ -3,7 +3,7 @@
 //! the generation of the map it belongs to, so the UI can drop late ones.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
@@ -94,6 +94,12 @@ pub enum ReceiptResult {
     NotFound,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum SelectionError {
+    Stale,
+    NotFound,
+}
+
 /// Compares with `git`, or says it cannot when none was found.
 pub fn with_git(git: Option<&Git>) -> impl Fn(&Path, &str, &str) -> Comparison + '_ {
     move |root, a, b| match git {
@@ -103,6 +109,26 @@ pub fn with_git(git: Option<&Git>) -> impl Fn(&Path, &str, &str) -> Comparison +
 }
 
 impl AppState {
+    /// Resolves a UI position through the current map. Paths are never inputs
+    /// to deployment commands, and an env must belong to the selected row.
+    pub fn resolve_target(
+        &self,
+        generation: u64,
+        row: usize,
+        env: &str,
+    ) -> Result<PathBuf, SelectionError> {
+        let snapshot = self.current(generation).ok_or(SelectionError::Stale)?;
+        let repo = snapshot
+            .overview
+            .repos
+            .get(row)
+            .ok_or(SelectionError::NotFound)?;
+        if !repo.envs.iter().any(|cell| cell.env == env) {
+            return Err(SelectionError::NotFound);
+        }
+        Ok(PathBuf::from(&repo.repo_root))
+    }
+
     /// Reads the map unless a read is already running; then that read runs
     /// once more when it finishes and answers with the newer map.
     pub fn load_map(
@@ -265,6 +291,39 @@ mod tests {
 
     use super::*;
     use crate::fixture::{run, Fixture};
+
+    #[test]
+    fn deploy_selection_is_bound_to_the_shown_map_and_environment() {
+        let fx = Fixture::new();
+        fx.approve("/work/one", "production");
+        fx.approve("/work/two", "production");
+        let state = AppState::default();
+        let generation = match state.load_map(|| 0, || overview(&fx.receipts(), &fx.trust())) {
+            LoadResult::Loaded(map) => map.generation,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            state.resolve_target(generation, 0, "production").unwrap(),
+            Path::new("/work/one")
+        );
+        assert_eq!(
+            state.resolve_target(generation, 1, "production").unwrap(),
+            Path::new("/work/two")
+        );
+        assert_eq!(
+            state.resolve_target(generation, 0, "staging"),
+            Err(SelectionError::NotFound)
+        );
+        assert_eq!(
+            state.resolve_target(generation, 5, "production"),
+            Err(SelectionError::NotFound)
+        );
+        state.load_map(|| 0, || overview(&fx.receipts(), &fx.trust()));
+        assert_eq!(
+            state.resolve_target(generation, 0, "production"),
+            Err(SelectionError::Stale)
+        );
+    }
 
     const NOW: u128 = 1_000_000;
 

@@ -10,7 +10,12 @@ use shipslip::git::Git;
 use shipslip::receipt::{default_receipts_root, overview, ReceiptError};
 use tauri::async_runtime::spawn_blocking;
 
+use crate::deploy_session::{
+    CommandError, CurrentRuns, DeployReview, ErrorCode, OpenSsh, RecoveryReview, RunInfo, Sessions,
+    TrustReview,
+};
 use crate::git_path;
+use crate::state::SelectionError;
 use crate::state::{with_git, AppState, CompareResult, LoadResult, ReceiptResult};
 
 pub struct App {
@@ -18,6 +23,7 @@ pub struct App {
     /// The receipts root and trust file, or why they could not be found.
     paths: Result<(PathBuf, PathBuf), String>,
     git: Option<Git>,
+    sessions: Option<Arc<Sessions<OpenSsh>>>,
 }
 
 impl App {
@@ -33,10 +39,49 @@ impl App {
     }
 
     fn new(paths: Result<(PathBuf, PathBuf), String>, git: Option<Git>) -> Self {
+        let sessions = paths
+            .as_ref()
+            .ok()
+            .map(|(root, trust)| Sessions::new(root.clone(), trust.clone(), OpenSsh));
         Self {
+            sessions,
             state: AppState::default(),
             paths,
             git,
+        }
+    }
+
+    fn sessions(&self) -> Result<&Arc<Sessions<OpenSsh>>, CommandError> {
+        self.sessions.as_ref().ok_or_else(|| {
+            CommandError::new(
+                ErrorCode::Local,
+                self.paths
+                    .as_ref()
+                    .err()
+                    .map(String::as_str)
+                    .unwrap_or("App storage is unavailable."),
+            )
+        })
+    }
+
+    fn selection(&self, generation: u64, row: usize, env: &str) -> Result<PathBuf, CommandError> {
+        self.state
+            .resolve_target(generation, row, env)
+            .map_err(|error| match error {
+                SelectionError::Stale => CommandError::new(
+                    ErrorCode::Stale,
+                    "The map changed. Refresh it and select the environment again.",
+                ),
+                SelectionError::NotFound => CommandError::new(
+                    ErrorCode::NotFound,
+                    "This checkout or environment is no longer on the map.",
+                ),
+            })
+    }
+
+    pub fn invalidate_page(&self) {
+        if let Some(sessions) = &self.sessions {
+            sessions.invalidate_page();
         }
     }
 
@@ -240,4 +285,87 @@ mod tests {
             }
         }
     }
+}
+
+#[tauri::command]
+pub async fn prepare_deploy(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+    env: String,
+    plan: shipslip::RunPlan,
+) -> Result<DeployReview, CommandError> {
+    let checkout = app.selection(generation, row, &env)?;
+    app.sessions()?.prepare(checkout, env, plan).await
+}
+
+#[tauri::command]
+pub async fn review_trust(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+    env: String,
+) -> Result<TrustReview, CommandError> {
+    let checkout = app.selection(generation, row, &env)?;
+    app.sessions()?.review_trust(checkout, env).await
+}
+
+#[tauri::command]
+pub async fn approve_trust(
+    app: tauri::State<'_, Arc<App>>,
+    handle: String,
+    typed_env: String,
+) -> Result<(), CommandError> {
+    app.sessions()?.approve_trust(&handle, &typed_env).await
+}
+
+#[tauri::command]
+pub async fn confirm_deploy(
+    app: tauri::State<'_, Arc<App>>,
+    handle: String,
+    typed_env: Option<String>,
+) -> Result<RunInfo, CommandError> {
+    app.sessions()?.confirm(&handle, typed_env).await
+}
+
+#[tauri::command]
+pub async fn cancel_deploy(
+    app: tauri::State<'_, Arc<App>>,
+    handle: String,
+) -> Result<(), CommandError> {
+    app.sessions()?.cancel(&handle).await
+}
+
+#[tauri::command]
+pub async fn review_up(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+    env: String,
+) -> Result<RecoveryReview, CommandError> {
+    let checkout = app.selection(generation, row, &env)?;
+    app.sessions()?.review_up(checkout, env).await
+}
+
+#[tauri::command]
+pub async fn review_attach(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+    env: String,
+) -> Result<RecoveryReview, CommandError> {
+    let checkout = app.selection(generation, row, &env)?;
+    app.sessions()?.review_attach(checkout, env).await
+}
+
+#[tauri::command]
+pub async fn current_runs(app: tauri::State<'_, Arc<App>>) -> Result<CurrentRuns, CommandError> {
+    Ok(app.sessions()?.current_runs())
+}
+
+/// Back or closing an operation abandons all pending reviews for this page.
+/// Already-confirmed deployments keep their Rust owner.
+#[tauri::command]
+pub fn cancel_pending(app: tauri::State<'_, Arc<App>>) {
+    app.invalidate_page();
 }

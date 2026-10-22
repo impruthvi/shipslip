@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::Arc;
+use tauri::Manager;
 
 mod commands;
+mod deploy_session;
 #[cfg(test)]
 mod fixture;
 mod git_path;
@@ -16,10 +18,31 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Arc::new(commands::App::from_env()))
+        .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && payload.event() == tauri::webview::PageLoadEvent::Started
+            {
+                webview.state::<Arc<commands::App>>().invalidate_page();
+            }
+        })
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<Arc<commands::App>>().invalidate_page();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::load_map,
             commands::compare,
-            commands::load_receipt
+            commands::load_receipt,
+            commands::prepare_deploy,
+            commands::review_trust,
+            commands::approve_trust,
+            commands::confirm_deploy,
+            commands::cancel_deploy,
+            commands::review_up,
+            commands::review_attach,
+            commands::current_runs,
+            commands::cancel_pending
         ])
         .run(tauri::generate_context!())
         .expect("error while running Shipslip");
@@ -34,7 +57,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_grants_only_window_event_and_clipboard_write() {
+    fn capability_grants_only_app_commands_window_event_and_clipboard_write() {
         let cap = json(include_str!("../capabilities/default.json"));
         let mut perms: Vec<&str> = cap["permissions"]
             .as_array()
@@ -46,6 +69,18 @@ mod tests {
         assert_eq!(
             perms,
             [
+                "allow-approve-trust",
+                "allow-cancel-deploy",
+                "allow-cancel-pending",
+                "allow-compare",
+                "allow-confirm-deploy",
+                "allow-current-runs",
+                "allow-load-map",
+                "allow-load-receipt",
+                "allow-prepare-deploy",
+                "allow-review-attach",
+                "allow-review-trust",
+                "allow-review-up",
                 "clipboard-manager:allow-write-text",
                 "core:event:default",
                 "core:window:default",
