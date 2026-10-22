@@ -16,6 +16,9 @@ fn main() {
             "ack_run",
             "unsubscribe_run",
             "cancel_pending",
+            "quit_status",
+            "detach_and_quit",
+            "quit_now",
         ]),
     ))
     .expect("failed to build app permissions");

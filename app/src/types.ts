@@ -193,3 +193,17 @@ export type ReceiptResult =
   | { kind: "opened"; generation: number; id: number; slip: SlipView }
   | { kind: "stale" }
   | { kind: "notFound" };
+
+/** A live run that quitting now would cut short (`quit_status`). */
+export interface QuitRun {
+  handle: string;
+  project: string;
+  env: string;
+  checkout: string;
+  operation: "deploy" | "up" | "attach";
+  stage: string;
+  /** What "Detach and quit" does: Shipslip reaches a safe point first. */
+  detach: string;
+  /** What "Quit now" may leave behind. */
+  quitNow: string;
+}

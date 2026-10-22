@@ -1011,3 +1011,67 @@ button {
   line-height: 18px;
   font-weight: var(--font-weight-medium);
 }
+
+.quit-backdrop {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-24);
+  background: color-mix(in srgb, var(--color-text) 24%, transparent);
+}
+
+.quit-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  width: min(440px, 100%);
+  padding: var(--space-24);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  line-height: var(--leading-body);
+}
+
+.quit-title {
+  margin: 0;
+  font-size: var(--text-16);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-tight);
+}
+
+.quit-runs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quit-run-name {
+  font-weight: var(--font-weight-medium);
+}
+
+.quit-now-note {
+  font-size: var(--text-12);
+}
+
+.quit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-8);
+  margin-top: var(--space-4);
+}
+
+.quit-actions .toolbar-button:first-child {
+  margin-right: auto;
+  color: var(--color-status-bad);
+}
+
+.quit-actions .quit-primary {
+  border-color: var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-surface-raised);
+}

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::receipt_view::{watch_view, WatchView};
 use serde::Serialize;
+use shipslip::interrupt::{next_stage, Stage};
 use shipslip::logs::escape_field;
 use shipslip::receipt::ReceiptStepStatus;
 use shipslip::{DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, SmokeResult};
@@ -157,6 +158,49 @@ pub struct RunBatch {
     pub state: RunState,
 }
 
+/// What quitting now would mean for one live run.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuitRun {
+    pub handle: String,
+    pub project: String,
+    pub env: String,
+    pub checkout: String,
+    pub operation: &'static str,
+    pub stage: String,
+    /// "Detach and quit": Shipslip reaches a safe point first.
+    pub detach: String,
+    /// "Quit now": exit at once.
+    pub quit_now: String,
+}
+
+const ATTACH: &str = " Open Shipslip again and attach to check it.";
+
+impl QuitRun {
+    fn new(info: &RunInfo, stage: String, detach: String, quit_now: String) -> Self {
+        Self {
+            handle: info.handle.clone(),
+            project: info.project.clone(),
+            env: info.env.clone(),
+            checkout: info.checkout.clone(),
+            operation: info.operation,
+            stage,
+            detach,
+            quit_now,
+        }
+    }
+
+    pub fn connecting(info: &RunInfo) -> Self {
+        Self::new(
+            info,
+            "connecting".into(),
+            "Shipslip is still connecting. It stops the run before its first step, then quits."
+                .into(),
+            format!("The run may start without Shipslip watching it.{ATTACH}"),
+        )
+    }
+}
+
 struct Subscriber {
     id: String,
     wake: Sender<()>,
@@ -171,6 +215,7 @@ struct History {
     total_output: u64,
     output: VecDeque<Arc<OutputLine>>,
     state: RunState,
+    interrupt: Stage,
     subscriber: Option<Subscriber>,
     closed: bool,
 }
@@ -188,6 +233,7 @@ impl RunFeed {
                 total_output: 0,
                 output: VecDeque::new(),
                 state: RunState::default(),
+                interrupt: Stage::Running,
                 subscriber: None,
                 closed: false,
             }),
@@ -198,6 +244,7 @@ impl RunFeed {
     pub fn record(&self, event: DeployEvent) {
         let mut history = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         history.sequence += 1;
+        history.interrupt = next_stage(history.interrupt, &event);
         let text = match event {
             DeployEvent::Output { index, line } => Some((line, OutputSource::Step { index })),
             DeployEvent::MaintenanceOutput { phase, line } => {
@@ -499,6 +546,52 @@ impl RunFeed {
             output: history.output.iter().cloned().collect(),
             state: history.state.clone(),
         }
+    }
+
+    pub fn interrupt_stage(&self) -> Stage {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .interrupt
+    }
+
+    pub fn quit_run(&self) -> QuitRun {
+        let history = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let maintenance =
+            history.state.maintenance_down.is_some() && history.state.maintenance_up.is_none();
+        let (detach, quit_now) = match history.interrupt {
+            Stage::Running => (
+                format!(
+                    "The current step keeps running on the server. No new step will start.{}",
+                    if maintenance {
+                        " Maintenance mode stays on."
+                    } else {
+                        ""
+                    }
+                ),
+                format!(
+                    "A step may be left running or may not have started.{}{ATTACH}",
+                    if maintenance {
+                        " The app may stay in maintenance mode."
+                    } else {
+                        ""
+                    }
+                ),
+            ),
+            Stage::BringingUp => (
+                "Shipslip brings the app back up first and skips the log watch.".into(),
+                format!("The app may stay in maintenance mode.{ATTACH}"),
+            ),
+            Stage::Watching => (
+                "The log watch stops early. The deploy result does not change.".into(),
+                format!("The receipt may be left unfinished.{ATTACH}"),
+            ),
+            Stage::Finishing => (
+                "Only the lock release and receipt remain. Shipslip finishes them first.".into(),
+                format!("The deploy lock and receipt may be left unfinished.{ATTACH}"),
+            ),
+        };
+        QuitRun::new(&self.info, history.stage.clone(), detach, quit_now)
     }
 }
 
