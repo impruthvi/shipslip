@@ -42,6 +42,9 @@ fn main() {
             commands::review_up,
             commands::review_attach,
             commands::current_runs,
+            commands::subscribe_run,
+            commands::ack_run,
+            commands::unsubscribe_run,
             commands::cancel_pending
         ])
         .run(tauri::generate_context!())
@@ -69,6 +72,7 @@ mod tests {
         assert_eq!(
             perms,
             [
+                "allow-ack-run",
                 "allow-approve-trust",
                 "allow-cancel-deploy",
                 "allow-cancel-pending",
@@ -81,6 +85,8 @@ mod tests {
                 "allow-review-attach",
                 "allow-review-trust",
                 "allow-review-up",
+                "allow-subscribe-run",
+                "allow-unsubscribe-run",
                 "clipboard-manager:allow-write-text",
                 "core:event:default",
                 "core:window:default",

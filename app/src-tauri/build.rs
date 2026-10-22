@@ -12,6 +12,9 @@ fn main() {
             "review_up",
             "review_attach",
             "current_runs",
+            "subscribe_run",
+            "ack_run",
+            "unsubscribe_run",
             "cancel_pending",
         ]),
     ))

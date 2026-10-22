@@ -1,5 +1,6 @@
 use super::*;
 use crate::fixture::Fixture;
+use shipslip::DeployEvent;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]
@@ -167,6 +168,7 @@ struct Remote {
     released: AtomicUsize,
     fail_release: std::sync::atomic::AtomicBool,
     launches: AtomicUsize,
+    output_lines: AtomicUsize,
     observe_entered: AtomicUsize,
     observe_gate: tauri::async_runtime::Mutex<Option<tauri::async_runtime::Receiver<()>>>,
     preflight_entered: AtomicUsize,
@@ -212,7 +214,14 @@ impl Transport for Remote {
             if let Some(mut gate) = self.observe_gate.lock().await.take() {
                 gate.recv().await;
             }
-            vec!["shipslip-log-start".into(), "maintenance finished".into()]
+            let count = self.output_lines.load(Ordering::SeqCst);
+            let mut lines = vec!["shipslip-log-start".into()];
+            if count == 0 {
+                lines.push("maintenance finished".into());
+            } else {
+                lines.extend((0..count).map(|n| format!("line {n}")));
+            }
+            lines
         } else if script.contains("echo \"exited ") {
             vec!["exited 0".into()]
         } else if script.contains("@target") {
@@ -517,7 +526,7 @@ fn confirmed_run_is_single_use_survives_reload_and_finishes_its_receipt() {
         sessions.invalidate_page();
         let active = sessions.current_runs().runs;
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].handle, run.handle);
+        assert_eq!(active[0].info.handle, run.handle);
         assert!(remote.held.load(Ordering::SeqCst));
         let saved = receipt::find_open(&fx.receipts(), "example", "production", &root)
             .unwrap()
@@ -827,5 +836,370 @@ fn trust_write_failure_keeps_the_exact_review_available_for_retry() {
             .trusted_target("production", &trust_path)
             .is_ok());
         assert_eq!(sessions.connector.0.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn completed_run_replays_the_newest_two_thousand_output_lines() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        remote.output_lines.store(2_100, Ordering::SeqCst);
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        let review = sessions.review_up(root, "production".into()).await.unwrap();
+        let run = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        until(|| sessions.current_runs().runs.is_empty());
+        let recent = sessions.current_runs().recent;
+        let snapshot = &recent[0];
+        assert_eq!(snapshot.info.handle, run.handle);
+        assert_eq!(snapshot.output.len(), 2_000);
+        assert_eq!(snapshot.dropped_output, 100);
+        assert_eq!(snapshot.output[0].text, "line 100");
+        assert_eq!(snapshot.output[1_999].text, "line 2099");
+        assert!(snapshot.state.terminal.is_some());
+        assert!(!remote.held.load(Ordering::SeqCst));
+    });
+}
+
+#[test]
+fn replay_retains_maintenance_progress_and_output_source_after_completion() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote);
+        approve(&sessions, &root).await;
+        let review = sessions.review_up(root, "production".into()).await.unwrap();
+        sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        until(|| sessions.current_runs().runs.is_empty());
+        let recent = sessions.current_runs().recent;
+        let replay = serde_json::to_value(&recent[0]).unwrap();
+        assert_eq!(replay["state"]["maintenanceUp"]["status"], "Ok");
+        assert_eq!(replay["state"]["maintenanceUp"]["exitCode"], 0);
+        assert_eq!(replay["output"][0]["source"]["kind"], "maintenance");
+        assert_eq!(replay["output"][0]["source"]["phase"], "Up");
+        assert_eq!(replay["state"]["terminal"]["succeeded"], true);
+        assert_eq!(replay["state"]["terminal"]["unknown"], false);
+        assert_eq!(replay["info"]["stage"], "finished");
+    });
+}
+
+fn capture_channel() -> (
+    tauri::ipc::Channel<events::RunBatch>,
+    std::sync::mpsc::Receiver<serde_json::Value>,
+) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let channel = tauri::ipc::Channel::new(move |body| {
+        let tauri::ipc::InvokeResponseBody::Json(json) = body else {
+            panic!("expected a JSON batch");
+        };
+        tx.send(serde_json::from_str(&json).unwrap()).unwrap();
+        Ok(())
+    });
+    (channel, rx)
+}
+
+#[test]
+fn a_frozen_ui_receives_one_batch_while_the_run_finishes_and_can_catch_up() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        remote.output_lines.store(2_100, Ordering::SeqCst);
+        let (release, gate) = tauri::async_runtime::channel(1);
+        *remote.observe_gate.lock().await = Some(gate);
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        let review = sessions
+            .review_up(root.clone(), "production".into())
+            .await
+            .unwrap();
+        let run = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        until(|| remote.observe_entered.load(Ordering::SeqCst) == 1);
+        let saved = receipt::find_open(&fx.receipts(), "example", "production", &root)
+            .unwrap()
+            .unwrap();
+        let (channel, received) = capture_channel();
+        let subscription = sessions.subscribe_run(&run.handle, channel).unwrap();
+        let first = received
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(first["subscription"], subscription);
+        assert_eq!(first["replay"], true);
+        release.send(()).await.unwrap();
+        until(|| sessions.current_runs().runs.is_empty());
+        assert!(!remote.held.load(Ordering::SeqCst));
+        assert_eq!(receipt::read(&saved).unwrap().status, ReceiptStatus::Final);
+        assert!(received
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        sessions
+            .ack_run(
+                &run.handle,
+                &subscription,
+                first["through"].as_u64().unwrap(),
+            )
+            .unwrap();
+        let catchup = received
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(catchup["replay"], false);
+        assert_eq!(catchup["output"].as_array().unwrap().len(), 2_000);
+        assert_eq!(catchup["output"][0]["text"], "line 100");
+        assert_eq!(catchup["droppedOutput"], 100);
+        assert_eq!(catchup["state"]["terminal"]["succeeded"], true);
+        sessions
+            .ack_run(
+                &run.handle,
+                &subscription,
+                catchup["through"].as_u64().unwrap(),
+            )
+            .unwrap();
+    });
+}
+
+#[test]
+fn reload_replaces_the_view_subscription_and_replays_without_remote_attach() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        remote.output_lines.store(2_100, Ordering::SeqCst);
+        let (release, gate) = tauri::async_runtime::channel(1);
+        *remote.observe_gate.lock().await = Some(gate);
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        let review = sessions.review_up(root, "production".into()).await.unwrap();
+        let run = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        until(|| remote.observe_entered.load(Ordering::SeqCst) == 1);
+        let (old_channel, old_packets) = capture_channel();
+        let old = sessions.subscribe_run(&run.handle, old_channel).unwrap();
+        let initial = old_packets
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        sessions.invalidate_page();
+        assert_eq!(
+            sessions
+                .ack_run(&run.handle, &old, initial["through"].as_u64().unwrap())
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidHandle
+        );
+        assert_eq!(sessions.current_runs().runs[0].info.handle, run.handle);
+        release.send(()).await.unwrap();
+        until(|| sessions.current_runs().runs.is_empty());
+        let (channel, packets) = capture_channel();
+        let subscription = sessions.subscribe_run(&run.handle, channel).unwrap();
+        let replay = packets
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_ne!(old, subscription);
+        assert_eq!(replay["replay"], true);
+        assert_eq!(replay["output"][0]["text"], "line 100");
+        assert_eq!(replay["state"]["terminal"]["succeeded"], true);
+        assert_eq!(remote.launches.load(Ordering::SeqCst), 1);
+        assert_eq!(remote.observe_entered.load(Ordering::SeqCst), 1);
+        sessions
+            .unsubscribe_run(&run.handle, &subscription)
+            .unwrap();
+        assert_eq!(
+            sessions
+                .ack_run(
+                    &run.handle,
+                    &subscription,
+                    replay["through"].as_u64().unwrap()
+                )
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidHandle
+        );
+    });
+}
+
+fn display_feed() -> Arc<RunFeed> {
+    RunFeed::new(RunInfo {
+        handle: "display-run".into(),
+        checkout: "/work/app".into(),
+        env: "production".into(),
+        run_id: Some("recorded-run".into()),
+        target_sha: Some(crate::fixture::NEW.into()),
+        operation: "deploy",
+        stage: "starting".into(),
+    })
+}
+
+#[test]
+fn event_replay_preserves_step_results_and_untrusted_text_as_display_data() {
+    let feed = display_feed();
+    feed.record(DeployEvent::StepStarted {
+        index: 2,
+        name: "migrate\x1b[2J".into(),
+    });
+    feed.record(DeployEvent::Output {
+        index: 2,
+        line: "<b>error</b>\r\x1b[2J".into(),
+    });
+    feed.record(DeployEvent::StepFinished {
+        index: 2,
+        status: shipslip::StepStatus::Failed,
+        exit_code: Some(9),
+    });
+    feed.record(DeployEvent::RunError {
+        reason: "journal\nfailed".into(),
+    });
+    feed.close();
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert_eq!(view["state"]["steps"]["2"]["name"], "migrate\\x1b[2J");
+    assert_eq!(view["state"]["steps"]["2"]["status"], "Failed");
+    assert_eq!(view["state"]["steps"]["2"]["exitCode"], 9);
+    assert_eq!(view["output"][0]["text"], "<b>error</b>\\x0d\\x1b[2J");
+    assert_eq!(view["state"]["terminal"]["kind"], "error");
+    assert_eq!(view["state"]["terminal"]["reason"], "journal\\x0afailed");
+    assert_eq!(view["info"]["stage"], "needs attention");
+}
+
+#[test]
+fn replay_keeps_log_watch_smoke_and_unknown_result_details_safely() {
+    let feed = display_feed();
+    feed.record(DeployEvent::Warning {
+        reason: "warning\x1b[2J".into(),
+    });
+    feed.record(DeployEvent::AppLeftDown);
+    feed.record(DeployEvent::ServerState {
+        head: Some(crate::fixture::NEW.into()),
+        tree_dirty: Some(true),
+    });
+    feed.record(DeployEvent::NewLogError {
+        phase: shipslip::LogPhase::After,
+        message: "boom\x1b[2J".into(),
+        file_line: Some("app.php:3\r".into()),
+    });
+    feed.record(DeployEvent::WatchStarted {
+        window: std::time::Duration::from_secs(120),
+    });
+    let mut watch = shipslip::WatchResult::not_run();
+    watch.status = shipslip::WatchStatus::Partial;
+    watch.log_path = Some("storage/logs/app\n.log".into());
+    watch.warnings.push("read\nfailed".into());
+    watch.new_errors.push(shipslip::ErrorGroup {
+        exception: "Exception\x1b[2J".into(),
+        file: None,
+        count: 1,
+        overflow_variants: 0,
+        variants: vec![shipslip::ErrorVariant {
+            signature: "sig".into(),
+            level: "ERROR".into(),
+            message: "boom\x1b[2J".into(),
+            display_file_line: None,
+            count: 1,
+            phase: shipslip::LogPhase::After,
+        }],
+    });
+    feed.record(DeployEvent::WatchFinished(watch));
+    feed.record(DeployEvent::SmokeFinished(shipslip::SmokeResult::Failed {
+        status: Some(503),
+        reason: "unavailable\nnow".into(),
+    }));
+    feed.record(DeployEvent::Finished(shipslip::DeployOutcome::Unknown {
+        step: 2,
+        reason: "lost\nconnection".into(),
+    }));
+    feed.close();
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert_eq!(view["state"]["warnings"][0], "warning\\x1b[2J");
+    assert_eq!(view["state"]["appLeftDown"], true);
+    assert_eq!(view["state"]["treeDirty"], true);
+    assert_eq!(view["output"][0]["source"]["kind"], "log");
+    assert_eq!(view["output"][0]["source"]["fileLine"], "app.php:3\\x0d");
+    assert_eq!(view["state"]["watchWindowMs"], 120_000);
+    assert_eq!(
+        view["state"]["watch"]["groups"][0]["exception"],
+        "Exception\\x1b[2J"
+    );
+    assert_eq!(view["state"]["watch"]["warnings"][0], "read\\x0afailed");
+    assert_eq!(view["state"]["smoke"]["httpStatus"], 503);
+    assert_eq!(view["state"]["smoke"]["reason"], "unavailable\\x0anow");
+    assert_eq!(view["state"]["terminal"]["unknown"], true);
+    assert_eq!(view["state"]["terminal"]["succeeded"], false);
+}
+
+struct DelayedRefusal {
+    entered: Arc<AtomicUsize>,
+    release: tauri::async_runtime::Mutex<tauri::async_runtime::Receiver<()>>,
+}
+impl Connector for DelayedRefusal {
+    type Remote = Never;
+    async fn connect(&self, _: &str) -> Result<Arc<Never>, TransportError> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.release.lock().await.recv().await;
+        Err(TransportError::Connect("refused after reload".into()))
+    }
+}
+
+#[test]
+fn a_startup_failure_after_reload_remains_available_to_the_new_view() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let entered = Arc::new(AtomicUsize::new(0));
+        let (release, gate) = tauri::async_runtime::channel(1);
+        let sessions = Sessions::new(
+            fx.receipts(),
+            fx.trust(),
+            DelayedRefusal {
+                entered: entered.clone(),
+                release: tauri::async_runtime::Mutex::new(gate),
+            },
+        );
+        approve(&sessions, &root).await;
+        let review = sessions.review_up(root, "production".into()).await.unwrap();
+        let handle = review.handle.clone();
+        let owner = sessions.clone();
+        let request = tauri::async_runtime::spawn(async move {
+            owner
+                .confirm(&review.handle, Some("production".into()))
+                .await
+        });
+        until(|| entered.load(Ordering::SeqCst) == 1);
+        let (channel, received) = capture_channel();
+        sessions.subscribe_run(&handle, channel).unwrap();
+        assert_eq!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap()["state"]["terminal"],
+            serde_json::Value::Null
+        );
+        sessions.invalidate_page();
+        release.send(()).await.unwrap();
+        assert_eq!(
+            request.await.unwrap().unwrap_err().code,
+            ErrorCode::Connection
+        );
+        assert!(sessions.current_runs().runs.is_empty());
+        let (channel, received) = capture_channel();
+        let subscription = sessions.subscribe_run(&handle, channel).unwrap();
+        let batch = received
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(batch["state"]["terminal"]["kind"], "error");
+        assert!(batch["state"]["terminal"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("refused after reload"));
+        sessions.unsubscribe_run(&handle, &subscription).unwrap();
     });
 }

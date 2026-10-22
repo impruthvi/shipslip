@@ -1,7 +1,7 @@
 //! Desktop-owned deployment sessions. Only Rust owns previews, SSH transports
 //! and approval snapshots. UI requests carry map positions or opaque tickets.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -13,9 +13,15 @@ use shipslip::logs::escape_field;
 use shipslip::receipt::{self, ReceiptJournal, ReceiptStatus, ReceiptStepStatus};
 use shipslip::transport::ConnectFailure;
 use shipslip::transport::{SshTransport, Transport, TransportError};
-use shipslip::{
-    Confirmation, DeployEvent, ExecutionHandle, PrepareError, Preview, RunEvents, RunPlan,
-};
+use shipslip::{Confirmation, ExecutionHandle, PrepareError, Preview, RunEvents, RunPlan};
+
+mod events;
+use events::RunFeed;
+pub use events::{RunBatch, RunSnapshot};
+
+// Keep terminal delivery available across the completion/reload race, with
+// bounded history. Active runs are never evicted.
+const RECENT_RUNS: usize = 8;
 
 pub trait Connector: Send + Sync + 'static {
     type Remote: Transport;
@@ -271,7 +277,8 @@ pub struct RunInfo {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CurrentRuns {
-    pub runs: Vec<RunInfo>,
+    pub runs: Vec<RunSnapshot>,
+    pub recent: Vec<RunSnapshot>,
     pub warnings: Vec<CommandError>,
 }
 
@@ -281,6 +288,8 @@ struct Registry<T: Transport> {
     tickets: HashMap<String, TrustTicket>,
     slots: HashMap<Key, Slot<T>>,
     warnings: Vec<CommandError>,
+    feeds: HashMap<String, Arc<RunFeed>>,
+    recent: VecDeque<String>,
 }
 
 pub struct Sessions<C: Connector> {
@@ -312,6 +321,8 @@ impl<C: Connector> Sessions<C> {
                 tickets: HashMap::new(),
                 slots: HashMap::new(),
                 warnings: Vec::new(),
+                feeds: HashMap::new(),
+                recent: VecDeque::new(),
             }),
         })
     }
@@ -376,6 +387,9 @@ impl<C: Connector> Sessions<C> {
             let mut state = self.registry();
             state.page += 1;
             state.tickets.clear();
+            for feed in state.feeds.values() {
+                feed.disconnect();
+            }
             state
                 .slots
                 .retain(|_, slot| !matches!(slot.phase, Phase::Recovery(_)));
@@ -471,20 +485,86 @@ impl<C: Connector> Sessions<C> {
         }
     }
 
-    pub fn current_runs(&self) -> CurrentRuns {
+    pub fn subscribe_run(
+        &self,
+        handle: &str,
+        channel: tauri::ipc::Channel<RunBatch>,
+    ) -> Result<String, CommandError> {
+        let mut state = self.registry();
+        let feed = state.feeds.get(handle).cloned().ok_or_else(run_not_found)?;
+        let id = self.next_handle(&mut state);
+        feed.subscribe(id.clone(), channel);
+        Ok(id)
+    }
+
+    pub fn ack_run(
+        &self,
+        handle: &str,
+        subscription: &str,
+        through: u64,
+    ) -> Result<(), CommandError> {
         let state = self.registry();
-        let mut runs: Vec<_> = state
-            .slots
-            .values()
-            .filter_map(|slot| match &slot.phase {
-                Phase::Running { info, .. } | Phase::Starting(info) => Some(info.clone()),
-                _ => None,
+        state
+            .feeds
+            .get(handle)
+            .ok_or_else(run_not_found)?
+            .ack(subscription, through)
+    }
+
+    pub fn unsubscribe_run(&self, handle: &str, subscription: &str) -> Result<(), CommandError> {
+        let state = self.registry();
+        state
+            .feeds
+            .get(handle)
+            .ok_or_else(run_not_found)?
+            .unsubscribe(subscription)
+    }
+
+    pub fn current_runs(&self) -> CurrentRuns {
+        let (active, recent, warnings) = {
+            let state = self.registry();
+            let active: Vec<_> = state
+                .slots
+                .values()
+                .filter_map(|slot| match &slot.phase {
+                    Phase::Running { info, .. } | Phase::Starting(info) => {
+                        Some((info.clone(), state.feeds.get(&slot.id).cloned()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            let recent: Vec<_> = state
+                .recent
+                .iter()
+                .filter_map(|id| state.feeds.get(id).cloned())
+                .collect();
+            (active, recent, state.warnings.clone())
+        };
+        let mut runs: Vec<_> = active
+            .into_iter()
+            .map(|(info, feed)| match feed {
+                Some(feed) => feed.snapshot(),
+                None => RunSnapshot::starting(info),
             })
             .collect();
-        runs.sort_by(|a, b| a.handle.cmp(&b.handle));
+        runs.sort_by(|a, b| a.info.handle.cmp(&b.info.handle));
         CurrentRuns {
             runs,
-            warnings: state.warnings.clone(),
+            recent: recent.iter().map(|feed| feed.snapshot()).collect(),
+            warnings,
+        }
+    }
+
+    fn archive(&self, key: &Key, handle: &str) {
+        let mut state = self.registry();
+        if state.slots.get(key).is_some_and(|slot| slot.id == handle) {
+            state.slots.remove(key);
+        }
+        state.recent.push_back(handle.into());
+        while state.recent.len() > RECENT_RUNS {
+            if let Some(old) = state.recent.pop_front() {
+                state.feeds.remove(&old);
+            }
         }
     }
 
@@ -673,6 +753,9 @@ impl<C: Connector> Sessions<C> {
                 }
                 state.slots.get_mut(&key).ok_or_else(invalid_handle)?.phase =
                     Phase::Starting(info.clone());
+                state
+                    .feeds
+                    .insert(handle.into(), RunFeed::new(info.clone()));
             }
             let remote = self
                 .connector
@@ -699,10 +782,22 @@ impl<C: Connector> Sessions<C> {
             Ok(info)
         }
         .await;
-        if result.is_err() {
-            self.remove(&key, handle);
+        if let Err(error) = &result {
+            self.abandon(&key, handle, error);
         }
         result
+    }
+
+    // A run that failed after Starting stays replayable for a reloaded view.
+    fn abandon(&self, key: &Key, handle: &str, error: &CommandError) {
+        let feed = self.registry().feeds.get(handle).cloned();
+        match feed {
+            Some(feed) => {
+                feed.fail(error.message.clone());
+                self.archive(key, handle);
+            }
+            None => self.remove(key, handle),
+        }
     }
 
     pub async fn confirm(
@@ -869,32 +964,30 @@ impl<C: Connector> Sessions<C> {
     }
 
     fn drain(self: &Arc<Self>, key: Key, handle: String, mut events: RunEvents) {
+        let feed = {
+            let mut state = self.registry();
+            let Some(Slot {
+                phase: Phase::Running { info, .. },
+                ..
+            }) = state.slots.get(&key)
+            else {
+                return;
+            };
+            let info = info.clone();
+            state
+                .feeds
+                .entry(handle.clone())
+                .or_insert_with(|| RunFeed::new(info))
+                .clone()
+        };
         let owner = self.clone();
         // Always drain without a webview so output backpressure cannot stall the runner.
         tauri::async_runtime::spawn(async move {
             while let Some(event) = events.recv().await {
-                let stage = match event {
-                    DeployEvent::StepStarted { index, .. } => Some(format!("step {index}")),
-                    DeployEvent::MaintenanceStarted { .. } => Some("maintenance".into()),
-                    DeployEvent::Finished { .. } => Some("finished".into()),
-                    DeployEvent::RunError { .. } | DeployEvent::Interrupted { .. } => {
-                        Some("needs attention".into())
-                    }
-                    DeployEvent::Detached { .. } => Some("detached".into()),
-                    _ => None,
-                };
-                if let Some(stage) = stage {
-                    let mut state = owner.registry();
-                    if let Some(Slot {
-                        phase: Phase::Running { info, .. },
-                        ..
-                    }) = state.slots.get_mut(&key)
-                    {
-                        info.stage = stage;
-                    }
-                }
+                feed.record(event);
             }
-            owner.remove(&key, &handle);
+            feed.close();
+            owner.archive(&key, &handle);
         });
     }
 
@@ -1044,6 +1137,12 @@ impl<C: Connector> Sessions<C> {
     }
 }
 
+fn run_not_found() -> CommandError {
+    CommandError::new(
+        ErrorCode::NotFound,
+        "This run is no longer retained. Open its saved receipt.",
+    )
+}
 fn changed_receipt() -> CommandError {
     CommandError::new(
         ErrorCode::Changed,
