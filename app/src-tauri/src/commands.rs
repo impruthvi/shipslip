@@ -11,8 +11,8 @@ use shipslip::receipt::{default_receipts_root, overview, ReceiptError};
 use tauri::async_runtime::spawn_blocking;
 
 use crate::deploy_session::{
-    CommandError, CurrentRuns, DeployReview, ErrorCode, OpenSsh, RecoveryReview, RunInfo, Sessions,
-    TrustReview,
+    CommandError, CurrentRuns, DeployReview, ErrorCode, OpenSsh, RecoveryReview, RunBatch, RunInfo,
+    Sessions, TrustReview,
 };
 use crate::git_path;
 use crate::state::SelectionError;
@@ -361,6 +361,36 @@ pub async fn review_attach(
 #[tauri::command]
 pub async fn current_runs(app: tauri::State<'_, Arc<App>>) -> Result<CurrentRuns, CommandError> {
     Ok(app.sessions()?.current_runs())
+}
+
+/// Streams one run to this view. The view acknowledges each batch with `ack_run`
+/// before the next is sent; the returned id names the subscription.
+#[tauri::command]
+pub fn subscribe_run(
+    app: tauri::State<'_, Arc<App>>,
+    handle: String,
+    channel: tauri::ipc::Channel<RunBatch>,
+) -> Result<String, CommandError> {
+    app.sessions()?.subscribe_run(&handle, channel)
+}
+
+#[tauri::command]
+pub fn ack_run(
+    app: tauri::State<'_, Arc<App>>,
+    handle: String,
+    subscription: String,
+    through: u64,
+) -> Result<(), CommandError> {
+    app.sessions()?.ack_run(&handle, &subscription, through)
+}
+
+#[tauri::command]
+pub fn unsubscribe_run(
+    app: tauri::State<'_, Arc<App>>,
+    handle: String,
+    subscription: String,
+) -> Result<(), CommandError> {
+    app.sessions()?.unsubscribe_run(&handle, &subscription)
 }
 
 /// Back or closing an operation abandons all pending reviews for this page.

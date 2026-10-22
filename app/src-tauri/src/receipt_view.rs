@@ -97,7 +97,7 @@ pub enum StepStatusView {
     Skipped,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WatchView {
     /// e.g. "complete".
@@ -113,7 +113,7 @@ pub struct WatchView {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupView {
     pub count: u64,
@@ -123,7 +123,7 @@ pub struct GroupView {
     pub more_variants: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VariantView {
     pub count: u64,
@@ -251,7 +251,7 @@ fn step(
     }
 }
 
-fn watch_view(watch: &WatchResult, default_log: &str) -> WatchView {
+pub(crate) fn watch_view(watch: &WatchResult, default_log: &str) -> WatchView {
     let mut groups: Vec<&ErrorGroup> = watch.new_errors.iter().collect();
     groups.sort_by_key(|group| std::cmp::Reverse(group.count));
     let hidden = groups.len().saturating_sub(TOP_GROUPS) as u64;
