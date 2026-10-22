@@ -1,8 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::Arc;
-use tauri::Manager;
+use tauri::menu::{Menu, MenuItem, MenuItemKind};
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
+mod awake;
 mod commands;
 mod deploy_session;
 #[cfg(test)]
@@ -14,10 +16,26 @@ mod state;
 mod ui_fixtures;
 mod view;
 
+const QUIT: &str = "quit";
+
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(Arc::new(commands::App::from_env()))
+        .menu(menu)
+        .on_menu_event(|app, event| {
+            if event.id() == QUIT {
+                request_quit(app);
+            }
+        })
+        .setup(|app| {
+            let handle = app.handle().clone();
+            app.state::<Arc<commands::App>>()
+                .on_live_change(move |live| {
+                    let _ = handle.run_on_main_thread(move || awake::set(live));
+                });
+            Ok(())
+        })
         .on_page_load(|webview, payload| {
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Started
@@ -26,8 +44,19 @@ fn main() {
             }
         })
         .on_window_event(|window, event| {
-            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
-                window.state::<Arc<commands::App>>().invalidate_page();
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                // While a run is live, closing hides the window; the run keeps going.
+                WindowEvent::CloseRequested { api, .. } if live(window.app_handle()) => {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                WindowEvent::Destroyed => {
+                    window.state::<Arc<commands::App>>().invalidate_page();
+                }
+                _ => {}
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -45,10 +74,68 @@ fn main() {
             commands::subscribe_run,
             commands::ack_run,
             commands::unsubscribe_run,
-            commands::cancel_pending
+            commands::cancel_pending,
+            commands::quit_status,
+            commands::detach_and_quit,
+            commands::quit_now
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Shipslip");
+        .build(tauri::generate_context!())
+        .expect("error while building Shipslip");
+    app.run(|app, event| match event {
+        // Dock Quit and other system requests; our own exits carry a code.
+        RunEvent::ExitRequested {
+            code: None, api, ..
+        } if live(app) => {
+            api.prevent_exit();
+            request_quit(app);
+        }
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => show_main(app),
+        _ => {}
+    });
+}
+
+fn live(app: &AppHandle) -> bool {
+    !app.state::<Arc<commands::App>>().quit_runs().is_empty()
+}
+
+fn show_main(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// The quit dialog lives in the window, so a hidden window is shown first.
+fn request_quit(app: &AppHandle) {
+    if !live(app) {
+        app.exit(0);
+        return;
+    }
+    show_main(app);
+    let _ = app.emit("quit-requested", ());
+}
+
+/// The default menu, except Quit asks first while a run is live. The built-in
+/// Quit item exits without giving the app a chance to ask.
+fn menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::default(app)?;
+    #[cfg(target_os = "macos")]
+    if let Some(MenuItemKind::Submenu(app_menu)) = menu.items()?.first() {
+        let items = app_menu.items()?;
+        if let Some(MenuItemKind::Predefined(_)) = items.last() {
+            app_menu.remove_at(items.len() - 1)?;
+        }
+        app_menu.append(&MenuItem::with_id(
+            app,
+            QUIT,
+            "Quit Shipslip",
+            true,
+            Some("CmdOrCtrl+Q"),
+        )?)?;
+    }
+    Ok(menu)
 }
 
 #[cfg(test)]
@@ -79,9 +166,12 @@ mod tests {
                 "allow-compare",
                 "allow-confirm-deploy",
                 "allow-current-runs",
+                "allow-detach-and-quit",
                 "allow-load-map",
                 "allow-load-receipt",
                 "allow-prepare-deploy",
+                "allow-quit-now",
+                "allow-quit-status",
                 "allow-review-attach",
                 "allow-review-trust",
                 "allow-review-up",

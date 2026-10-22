@@ -11,8 +11,8 @@ use shipslip::receipt::{default_receipts_root, overview, ReceiptError};
 use tauri::async_runtime::spawn_blocking;
 
 use crate::deploy_session::{
-    CommandError, CurrentRuns, DeployReview, ErrorCode, OpenSsh, RecoveryReview, RunBatch, RunInfo,
-    Sessions, TrustReview,
+    CommandError, CurrentRuns, DeployReview, ErrorCode, OpenSsh, QuitRun, RecoveryReview, RunBatch,
+    RunInfo, Sessions, TrustReview,
 };
 use crate::git_path;
 use crate::state::SelectionError;
@@ -77,6 +77,20 @@ impl App {
                     "This checkout or environment is no longer on the map.",
                 ),
             })
+    }
+
+    /// Runs that would be cut short by quitting now.
+    pub fn quit_runs(&self) -> Vec<QuitRun> {
+        self.sessions
+            .as_ref()
+            .map(|sessions| sessions.quit_runs())
+            .unwrap_or_default()
+    }
+
+    pub fn on_live_change(&self, observer: impl Fn(bool) + Send + Sync + 'static) {
+        if let Some(sessions) = &self.sessions {
+            sessions.set_live_observer(observer);
+        }
     }
 
     pub fn invalidate_page(&self) {
@@ -391,6 +405,30 @@ pub fn unsubscribe_run(
     subscription: String,
 ) -> Result<(), CommandError> {
     app.sessions()?.unsubscribe_run(&handle, &subscription)
+}
+
+#[tauri::command]
+pub fn quit_status(app: tauri::State<'_, Arc<App>>) -> Vec<QuitRun> {
+    app.quit_runs()
+}
+
+/// Brings every live run to a safe point, waits for it, then exits.
+#[tauri::command]
+pub async fn detach_and_quit(
+    app: tauri::State<'_, Arc<App>>,
+    handle: tauri::AppHandle,
+) -> Result<(), CommandError> {
+    if let Some(sessions) = &app.sessions {
+        sessions.begin_quit();
+        sessions.wait_idle().await;
+    }
+    handle.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn quit_now(handle: tauri::AppHandle) {
+    handle.exit(0);
 }
 
 /// Back or closing an operation abandons all pending reviews for this page.

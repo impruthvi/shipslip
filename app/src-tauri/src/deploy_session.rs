@@ -4,11 +4,12 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use shipslip::config::{self, LoadedConfig, TrustSnapshot, TrustStatus, TrustedTarget};
+use shipslip::interrupt::{on_interrupt, Interrupt, Stage};
 use shipslip::logs::escape_field;
 use shipslip::receipt::{self, ReceiptJournal, ReceiptStatus, ReceiptStepStatus};
 use shipslip::transport::ConnectFailure;
@@ -17,7 +18,7 @@ use shipslip::{Confirmation, ExecutionHandle, PrepareError, Preview, RunEvents, 
 
 mod events;
 use events::RunFeed;
-pub use events::{RunBatch, RunSnapshot};
+pub use events::{QuitRun, RunBatch, RunSnapshot};
 
 // Keep terminal delivery available across the completion/reload race, with
 // bounded history. Active runs are never evicted.
@@ -184,7 +185,7 @@ enum Phase<T: Transport> {
     Starting(RunInfo),
     Running {
         info: RunInfo,
-        _control: ExecutionHandle,
+        control: ExecutionHandle,
     },
 }
 struct Ready<T: Transport> {
@@ -266,6 +267,7 @@ impl DeployReview {
 #[serde(rename_all = "camelCase")]
 pub struct RunInfo {
     pub handle: String,
+    pub project: String,
     pub checkout: String,
     pub env: String,
     pub run_id: Option<String>,
@@ -290,6 +292,10 @@ struct Registry<T: Transport> {
     warnings: Vec<CommandError>,
     feeds: HashMap<String, Arc<RunFeed>>,
     recent: VecDeque<String>,
+    /// Whether any run is starting or running, as last told to the observer.
+    live: bool,
+    quitting: bool,
+    idle: Vec<tauri::async_runtime::Sender<()>>,
 }
 
 pub struct Sessions<C: Connector> {
@@ -298,6 +304,7 @@ pub struct Sessions<C: Connector> {
     trust_path: PathBuf,
     nonce: String,
     inner: Mutex<Registry<C::Remote>>,
+    live_observer: OnceLock<Box<dyn Fn(bool) + Send + Sync>>,
 }
 
 impl<C: Connector> Sessions<C> {
@@ -323,7 +330,11 @@ impl<C: Connector> Sessions<C> {
                 warnings: Vec::new(),
                 feeds: HashMap::new(),
                 recent: VecDeque::new(),
+                live: false,
+                quitting: false,
+                idle: Vec::new(),
             }),
+            live_observer: OnceLock::new(),
         })
     }
 
@@ -483,6 +494,79 @@ impl<C: Connector> Sessions<C> {
         if state.slots.get(key).is_some_and(|slot| slot.id == id) {
             state.slots.remove(key);
         }
+        self.settle(&mut state);
+    }
+
+    /// Called with `true` when the first run starts and `false` when the last
+    /// one ends, in order, while the registry is locked. Keep it cheap.
+    pub fn set_live_observer(&self, observer: impl Fn(bool) + Send + Sync + 'static) {
+        let _ = self.live_observer.set(Box::new(observer));
+    }
+
+    fn settle(&self, state: &mut Registry<C::Remote>) {
+        let live = state
+            .slots
+            .values()
+            .any(|slot| matches!(slot.phase, Phase::Starting(_) | Phase::Running { .. }));
+        if live != state.live {
+            state.live = live;
+            if let Some(observer) = self.live_observer.get() {
+                observer(live);
+            }
+        }
+        if !live {
+            for waiter in state.idle.drain(..) {
+                let _ = waiter.try_send(());
+            }
+        }
+    }
+
+    pub fn quit_runs(&self) -> Vec<QuitRun> {
+        let state = self.registry();
+        let mut runs: Vec<_> = state
+            .slots
+            .values()
+            .filter_map(|slot| match &slot.phase {
+                Phase::Starting(info) => Some(QuitRun::connecting(info)),
+                Phase::Running { info, .. } => Some(match state.feeds.get(&slot.id) {
+                    Some(feed) => feed.quit_run(),
+                    None => QuitRun::connecting(info),
+                }),
+                _ => None,
+            })
+            .collect();
+        runs.sort_by(|a, b| a.handle.cmp(&b.handle));
+        runs
+    }
+
+    /// Bring every live run to a safe point the way an interrupt would, and
+    /// refuse new runs. Irreversible: the app is about to exit.
+    pub fn begin_quit(&self) {
+        let mut state = self.registry();
+        state.quitting = true;
+        for slot in state.slots.values() {
+            if let Phase::Running { control, .. } = &slot.phase {
+                let stage = state
+                    .feeds
+                    .get(&slot.id)
+                    .map_or(Stage::Running, |feed| feed.interrupt_stage());
+                interrupt(control, stage);
+            }
+        }
+    }
+
+    /// Resolves once no run is starting or running.
+    pub async fn wait_idle(&self) {
+        let mut idle = {
+            let mut state = self.registry();
+            if !state.live {
+                return;
+            }
+            let (sender, receiver) = tauri::async_runtime::channel(1);
+            state.idle.push(sender);
+            receiver
+        };
+        idle.recv().await;
     }
 
     pub fn subscribe_run(
@@ -566,6 +650,7 @@ impl<C: Connector> Sessions<C> {
                 state.feeds.remove(&old);
             }
         }
+        self.settle(&mut state);
     }
 
     pub async fn review_up(
@@ -703,6 +788,7 @@ impl<C: Connector> Sessions<C> {
         recovery: Recovery,
     ) -> Result<RunInfo, CommandError> {
         let key = recovery.stamp.key.clone();
+        let project = escape_field(&recovery.stamp.project);
         let result = async {
             let config = unchanged(&recovery.stamp).await?;
             let trusted = self
@@ -739,6 +825,7 @@ impl<C: Connector> Sessions<C> {
             let saved = attach_journal.as_ref().map(|j| j.snapshot());
             let info = RunInfo {
                 handle: handle.into(),
+                project,
                 checkout: escape_field(&key.checkout.to_string_lossy()),
                 env: escape_field(&key.env),
                 run_id: saved.as_ref().map(|r| escape_field(&r.run_id)),
@@ -751,11 +838,15 @@ impl<C: Connector> Sessions<C> {
                 if state.page != page {
                     return Err(cancelled());
                 }
+                if state.quitting {
+                    return Err(quitting());
+                }
                 state.slots.get_mut(&key).ok_or_else(invalid_handle)?.phase =
                     Phase::Starting(info.clone());
                 state
                     .feeds
                     .insert(handle.into(), RunFeed::new(info.clone()));
+                self.settle(&mut state);
             }
             let remote = self
                 .connector
@@ -770,14 +861,17 @@ impl<C: Connector> Sessions<C> {
                     .await
                     .map_err(|e| CommandError::new(ErrorCode::Blocked, e.to_string()))?
             };
-            self.registry()
-                .slots
-                .get_mut(&key)
-                .ok_or_else(invalid_handle)?
-                .phase = Phase::Running {
-                info: info.clone(),
-                _control: control,
-            };
+            {
+                let mut state = self.registry();
+                // Quit was requested while connecting: stop before the first step.
+                if state.quitting {
+                    interrupt(&control, Stage::Running);
+                }
+                state.slots.get_mut(&key).ok_or_else(invalid_handle)?.phase = Phase::Running {
+                    info: info.clone(),
+                    control,
+                };
+            }
             self.drain(key.clone(), handle.into(), events);
             Ok(info)
         }
@@ -906,6 +1000,7 @@ impl<C: Connector> Sessions<C> {
         };
         let info = RunInfo {
             handle: handle.clone(),
+            project: escape_field(&ready.stamp.project),
             checkout: escape_field(&key.checkout.to_string_lossy()),
             env: escape_field(&key.env),
             run_id: Some(escape_field(ready.preview.run_id())),
@@ -917,6 +1012,8 @@ impl<C: Connector> Sessions<C> {
             let mut state = self.registry();
             if state.page != page {
                 Err((ready, cancelled()))
+            } else if state.quitting {
+                Err((ready, quitting()))
             } else {
                 match shipslip::execute_recorded(
                     ready.preview,
@@ -928,8 +1025,9 @@ impl<C: Connector> Sessions<C> {
                         state.slots.get_mut(&key).ok_or_else(invalid_handle)?.phase =
                             Phase::Running {
                                 info: info.clone(),
-                                _control: control,
+                                control,
                             };
+                        self.settle(&mut state);
                         Ok(events)
                     }
                     Err(rejected) => Err((
@@ -1137,6 +1235,23 @@ impl<C: Connector> Sessions<C> {
     }
 }
 
+fn interrupt(control: &ExecutionHandle, stage: Stage) {
+    match on_interrupt(stage, false) {
+        Interrupt::Detach => {
+            control.detach();
+            control.cancel_watch();
+        }
+        Interrupt::SkipWatch | Interrupt::StopWatch => control.cancel_watch(),
+        Interrupt::Wait | Interrupt::Quit => {}
+    }
+}
+
+fn quitting() -> CommandError {
+    CommandError::new(
+        ErrorCode::Cancelled,
+        "Shipslip is quitting, so no new run was started.",
+    )
+}
 fn run_not_found() -> CommandError {
     CommandError::new(
         ErrorCode::NotFound,
@@ -1185,6 +1300,37 @@ fn cancelled() -> CommandError {
         ErrorCode::Cancelled,
         "The workspace was closed before preparation finished.",
     )
+}
+
+/// Quit dialog states for the UI fixtures: a step running with maintenance on,
+/// and a run still connecting.
+#[cfg(test)]
+pub(crate) fn sample_quit_runs() -> Vec<QuitRun> {
+    use shipslip::{DeployEvent, MaintenancePhase, StepStatus};
+    let info = |handle: &str, operation| RunInfo {
+        handle: handle.into(),
+        project: "shop".into(),
+        checkout: "/Users/you/code/shop".into(),
+        env: "production".into(),
+        run_id: None,
+        target_sha: None,
+        operation,
+        stage: "starting".into(),
+    };
+    let feed = RunFeed::new(info("run-1", "deploy"));
+    feed.record(DeployEvent::MaintenanceStarted {
+        phase: MaintenancePhase::Down,
+    });
+    feed.record(DeployEvent::MaintenanceFinished {
+        phase: MaintenancePhase::Down,
+        status: StepStatus::Ok,
+        exit_code: Some(0),
+    });
+    feed.record(DeployEvent::StepStarted {
+        index: 2,
+        name: "php artisan migrate --force".into(),
+    });
+    vec![feed.quit_run(), QuitRun::connecting(&info("run-2", "up"))]
 }
 
 #[cfg(test)]

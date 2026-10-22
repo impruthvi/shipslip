@@ -23,6 +23,9 @@
     "allow-subscribe-run",
     "allow-ack-run",
     "allow-unsubscribe-run",
-    "allow-cancel-pending"
+    "allow-cancel-pending",
+    "allow-quit-status",
+    "allow-detach-and-quit",
+    "allow-quit-now"
   ]
 }

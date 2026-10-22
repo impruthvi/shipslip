@@ -1033,6 +1033,7 @@ fn reload_replaces_the_view_subscription_and_replays_without_remote_attach() {
 fn display_feed() -> Arc<RunFeed> {
     RunFeed::new(RunInfo {
         handle: "display-run".into(),
+        project: "example".into(),
         checkout: "/work/app".into(),
         env: "production".into(),
         run_id: Some("recorded-run".into()),
@@ -1202,4 +1203,183 @@ fn a_startup_failure_after_reload_remains_available_to_the_new_view() {
             .contains("refused after reload"));
         sessions.unsubscribe_run(&handle, &subscription).unwrap();
     });
+}
+
+struct Gated {
+    remote: Arc<Remote>,
+    entered: AtomicUsize,
+    release: tauri::async_runtime::Mutex<tauri::async_runtime::Receiver<()>>,
+}
+impl Connector for Gated {
+    type Remote = Remote;
+    async fn connect(&self, _: &str) -> Result<Arc<Remote>, TransportError> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.release.lock().await.recv().await;
+        Ok(self.remote.clone())
+    }
+}
+
+fn record_live<C: Connector>(sessions: &Sessions<C>) -> Arc<std::sync::Mutex<Vec<bool>>> {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = seen.clone();
+    sessions.set_live_observer(move |live| sink.lock().unwrap().push(live));
+    seen
+}
+
+#[test]
+fn quitting_while_bringing_the_app_up_waits_for_it_and_ends_keep_awake() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let (release, gate) = tauri::async_runtime::channel(1);
+        *remote.observe_gate.lock().await = Some(gate);
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        let live = record_live(&sessions);
+        approve(&sessions, &root).await;
+        let review = sessions.review_up(root, "production".into()).await.unwrap();
+        sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        until(|| remote.observe_entered.load(Ordering::SeqCst) == 1);
+        until(|| {
+            sessions
+                .quit_runs()
+                .first()
+                .is_some_and(|run| run.stage == "bringing up")
+        });
+        let run = &sessions.quit_runs()[0];
+        assert!(run.detach.contains("brings the app back up first"));
+        assert!(run.quit_now.contains("may stay in maintenance mode"));
+        sessions.begin_quit();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (owner, flag) = (sessions.clone(), done.clone());
+        let idle = tauri::async_runtime::spawn(async move {
+            owner.wait_idle().await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "quit must wait for maintenance up"
+        );
+        release.send(()).await.unwrap();
+        idle.await.unwrap();
+        assert_eq!(*live.lock().unwrap(), [true, false]);
+        assert!(sessions.quit_runs().is_empty());
+        assert!(!remote.held.load(Ordering::SeqCst));
+    });
+}
+
+#[test]
+fn quitting_while_connecting_stops_the_run_before_it_launches_anything() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let (_hold, gate) = tauri::async_runtime::channel(1);
+        *remote.observe_gate.lock().await = Some(gate);
+        let (release, connect_gate) = tauri::async_runtime::channel(1);
+        let sessions = Sessions::new(
+            fx.receipts(),
+            fx.trust(),
+            Gated {
+                remote: remote.clone(),
+                entered: AtomicUsize::new(0),
+                release: tauri::async_runtime::Mutex::new(connect_gate),
+            },
+        );
+        approve(&sessions, &root).await;
+        let review = sessions
+            .review_up(root.clone(), "production".into())
+            .await
+            .unwrap();
+        let (owner, handle) = (sessions.clone(), review.handle.clone());
+        let request = tauri::async_runtime::spawn(async move {
+            owner.confirm(&handle, Some("production".into())).await
+        });
+        until(|| sessions.connector.entered.load(Ordering::SeqCst) == 1);
+        let runs = sessions.quit_runs();
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].detach.contains("still connecting"));
+        sessions.begin_quit();
+        release.send(()).await.unwrap();
+        request.await.unwrap().unwrap();
+        sessions.wait_idle().await;
+        let recent = sessions.current_runs().recent;
+        let terminal = serde_json::to_value(&recent[0].state.terminal).unwrap();
+        assert_eq!(terminal["kind"], "finished");
+        assert!(terminal["label"].as_str().unwrap().contains("no steps ran"));
+        assert_eq!(remote.launches.load(Ordering::SeqCst), 0);
+        assert!(
+            receipt::find_open(&fx.receipts(), "example", "production", &root)
+                .unwrap()
+                .is_none()
+        );
+    });
+}
+
+#[test]
+fn no_run_starts_once_quitting_and_an_idle_app_quits_at_once() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        let live = record_live(&sessions);
+        approve(&sessions, &root).await;
+        sessions.wait_idle().await;
+        assert!(sessions.quit_runs().is_empty());
+        let up = sessions
+            .review_up(root.clone(), "production".into())
+            .await
+            .unwrap();
+        sessions.begin_quit();
+        let error = sessions
+            .confirm(&up.handle, Some("production".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert_eq!(remote.launches.load(Ordering::SeqCst), 0);
+        let deploy = sessions
+            .prepare(root, "production".into(), RunPlan::Deploy)
+            .await
+            .unwrap();
+        let error = sessions
+            .confirm(&deploy.handle, Some("production".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert!(!remote.held.load(Ordering::SeqCst));
+        assert!(live.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn quit_text_for_a_running_step_says_maintenance_stays_on() {
+    let feed = display_feed();
+    let run = feed.quit_run();
+    assert!(run.detach.contains("No new step will start"));
+    assert!(!run.detach.contains("Maintenance"));
+    feed.record(DeployEvent::MaintenanceStarted {
+        phase: shipslip::MaintenancePhase::Down,
+    });
+    feed.record(DeployEvent::MaintenanceFinished {
+        phase: shipslip::MaintenancePhase::Down,
+        status: shipslip::StepStatus::Ok,
+        exit_code: Some(0),
+    });
+    feed.record(DeployEvent::StepStarted {
+        index: 1,
+        name: "migrate".into(),
+    });
+    let run = feed.quit_run();
+    assert_eq!(run.stage, "step 1");
+    assert!(run.detach.contains("Maintenance mode stays on."));
+    assert!(run.quit_now.contains("may stay in maintenance mode"));
+    feed.record(DeployEvent::WatchStarted {
+        window: std::time::Duration::from_secs(60),
+    });
+    assert!(feed.quit_run().detach.contains("log watch stops early"));
 }
