@@ -1505,6 +1505,114 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
     assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("matches several groups"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn cli_declined_deploy_exits_non_zero_after_reporting_prepare_phases() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let server = Server::start().await;
+    let path = server.app("cli-declined");
+    let head = server.exec(&format!("git -C {path} rev-parse HEAD"), "");
+    let repo = server.dir.join("cli-repo");
+    // A short HOME: ssh's control socket lives under it and macOS caps socket paths.
+    struct Home(PathBuf);
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let home = Home(PathBuf::from(format!("/tmp/slip-{}", std::process::id())));
+    let _ = std::fs::remove_dir_all(&home.0);
+    let home = &home.0;
+    let bin = server.dir.join("cli-bin");
+    for dir in [home, &bin] {
+        std::fs::create_dir(dir).unwrap();
+    }
+    assert!(Command::new("git")
+        .args(["init", "-q"])
+        .arg(&repo)
+        .status()
+        .unwrap()
+        .success());
+    std::fs::write(
+        repo.join(".shipslip.toml"),
+        format!(
+            "[project]\nname = 'fixture'\nstack = 'laravel'\n\
+             [env.staging]\nssh = 'server'\npath = '{path}'\nbranch = 'main'\nproduction = false\n\
+             [env.production]\nssh = 'server'\npath = '{path}'\nbranch = 'main'\nproduction = true\n\
+             [recipe.deploy]\nsteps = ['true']\n"
+        ),
+    )
+    .unwrap();
+    let wrapper = bin.join("ssh");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec /usr/bin/ssh -F {} \"$@\"\n",
+            quote(server.config().to_str().unwrap())
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let run_cli = |args: &[&str], input: &str| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_slip"))
+            .current_dir(&repo)
+            .env("HOME", home)
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env_remove("SHIPSLIP_CONFIG")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        (output.status.code(), stdout, stderr)
+    };
+    for env in ["staging", "production"] {
+        let (code, _, stderr) = run_cli(&["trust", env], &format!("{env}\n"));
+        assert_eq!(code, Some(0), "{stderr}");
+    }
+
+    let (code, stdout, stderr) = run_cli(&["deploy", "staging"], "n\n");
+    assert_eq!(code, Some(1), "{stdout}{stderr}");
+    let mut from = 0;
+    for line in [
+        "Connecting to server…",
+        "Fetching main…",
+        "Checking the server…",
+        "Taking the deploy lock…",
+        "Current SHA:",
+        "Cancelled; no deploy steps were run.",
+    ] {
+        let at = stdout[from..]
+            .find(line)
+            .unwrap_or_else(|| panic!("{line:?} missing or out of order:\n{stdout}\n{stderr}"));
+        from += at + line.len();
+    }
+    assert!(!server.lock_exists(&path));
+
+    let (code, stdout, stderr) = run_cli(&["deploy", "production"], "staging\n");
+    assert_eq!(code, Some(1), "{stdout}{stderr}");
+    assert!(stdout.contains("Environment name did not match; no deploy steps were run."));
+    assert!(!server.lock_exists(&path));
+    assert_eq!(
+        server.exec(&format!("git -C {path} rev-parse HEAD"), ""),
+        head
+    );
+}
+
 async fn run(transport: &SshTransport, script: &str) -> (Result<i32, TransportError>, Vec<String>) {
     let (tx, mut rx) = mpsc::channel(LINE_QUEUE);
     let collect = async {

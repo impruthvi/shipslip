@@ -223,8 +223,10 @@ async fn cli_github_token_sources_show_the_actual_account_and_cancel_before_fetc
     let mut child = command.spawn().unwrap();
     child.stdin.take().unwrap().write_all(b"n\n").unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
+    // Declining the preview runs nothing and exits non-zero.
+    assert_eq!(
+        output.status.code(),
+        Some(1),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -238,8 +240,9 @@ async fn cli_github_token_sources_show_the_actual_account_and_cancel_before_fetc
     );
 
     let output = fixture.run(&["deploy", "staging", "--github-token-source", "gh"], "n\n");
-    assert!(
-        output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(1),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -265,8 +268,9 @@ async fn cli_github_token_sources_show_the_actual_account_and_cancel_before_fetc
         .unwrap();
     child.stdin.take().unwrap().write_all(b"y\nn\n").unwrap();
     let output = child.wait_with_output().unwrap();
-    assert!(
-        output.status.success(),
+    assert_eq!(
+        output.status.code(),
+        Some(1),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -413,7 +417,7 @@ async fn cli_github_token_can_replace_accounts_and_restores_terminal_on_ctrl_c()
     await_text(&mut stdout, &mut output, "Proceed with this run?").await;
     master.write_all(b"n\n").unwrap();
     let status = terminal_exit(&mut child, &mut master).await;
-    assert!(status.success());
+    assert_eq!(status.code(), Some(1));
     stdout.read_to_string(&mut output).await.unwrap();
     assert!(!output.contains("ghp_TEST_ONLY"));
     assert!(!server.lock_exists(&path));

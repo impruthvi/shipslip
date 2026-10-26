@@ -150,11 +150,14 @@ fn render_list(project: &str, env: Option<&str>, listing: &receipt::Listing) -> 
                     id.clone(),
                     local_time(receipt.started_at_ms, false),
                     escape_field(&receipt.target.env),
-                    format!(
-                        "{} → {}",
-                        short(&receipt.from_sha),
-                        short(&receipt.target_sha)
-                    ),
+                    match receipt.kind {
+                        ReceiptKind::Up => format!("brought up at {}", short(&receipt.target_sha)),
+                        ReceiptKind::Deploy => format!(
+                            "{} → {}",
+                            short(&receipt.from_sha),
+                            short(&receipt.target_sha)
+                        ),
+                    },
                     escape_field(&outcome),
                 ]
             }

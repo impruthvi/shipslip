@@ -454,7 +454,8 @@ and names who started the run without their email address.
 it. Server text is escaped in both the terminal and Markdown.
 
 Ctrl-C at the confirmation prompt cancels the run and releases the deploy
-lock. During the steps, Ctrl-C starts no new step and stops following the
+lock. Answering no, or mistyping a production environment name, releases the
+lock too and exits 1: a command exits 0 only when it did what it was asked. During the steps, Ctrl-C starts no new step and stops following the
 running command. During the post-deploy log watch, it ends the watch early and
 still finishes the run. While maintenance mode is being turned off, Shipslip
 finishes that first. Press Ctrl-C again to quit at once.

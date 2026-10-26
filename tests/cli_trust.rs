@@ -1,4 +1,5 @@
-//! The CLI refuses untrusted configs and changed attach settings before SSH.
+//! The CLI refuses untrusted configs and changed attach settings before SSH,
+//! and a declined confirmation exits non-zero without starting SSH.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -206,4 +207,19 @@ fn attach_with_newly_trusted_different_settings_is_refused_before_ssh() {
     );
     assert!(!fixture.ssh_called(), "ssh was started: {stderr}");
     assert_eq!(fs::read(receipt_path).unwrap(), saved);
+}
+
+#[test]
+fn declined_up_exits_non_zero_before_ssh() {
+    let fixture = Fixture::new("up-declined");
+    fixture.trust();
+    // stdin is empty, so the confirmation reads no `y`.
+    let output = fixture.slip(&["up", "staging"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(
+        stdout.contains("Maintenance mode was not changed."),
+        "{stdout}"
+    );
+    assert!(!fixture.ssh_called());
 }
