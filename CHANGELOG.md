@@ -6,6 +6,8 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-10-26
+
 ### Changed
 
 - `deploy`, `rerun` and `from-step` say what they are waiting on before the
@@ -488,6 +490,8 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.9.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.9.1
+[0.9.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.9.0
 [0.8.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.8.0
 [0.7.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.7.1
 [0.7.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.7.0
