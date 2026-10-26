@@ -6,6 +6,20 @@ change the library API.
 
 ## [Unreleased]
 
+### Changed
+
+- `deploy`, `rerun` and `from-step` say what they are waiting on before the
+  preview: "Connecting to <alias>…", "Fetching <branch>…", "Checking the
+  server…" and "Taking the deploy lock…". Runs that fetch with a temporary
+  GitHub token show only the connecting line.
+- Declining a confirmation, or mistyping a production environment name, now
+  exits 1 instead of 0 for `deploy`, `rerun`, `from-step`, `attach`, `up` and
+  `break-lock` (and when a GitHub token account is not approved). Nothing is
+  changed on the server in those cases; scripts can now tell that apart from
+  a completed run.
+- `slip receipts` lists an Up run as "brought up at <commit>" instead of a
+  same-commit `FROM → TARGET`.
+
 ## [0.9.0] - 2026-10-21
 
 ### Changed

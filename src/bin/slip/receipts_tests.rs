@@ -110,6 +110,33 @@ fn show_counts_commits_past_the_preview_list() {
 }
 
 #[test]
+fn up_runs_are_labelled_in_the_list() {
+    let listing = receipt::Listing {
+        rows: vec![
+            Listed::Receipt {
+                id: "aaaa0002".into(),
+                path: PathBuf::from("/r/b.json"),
+                receipt: Box::new(receipt(|value| {
+                    value["kind"] = json!("up");
+                    value["from_sha"] = json!("2222222");
+                })),
+            },
+            Listed::Receipt {
+                id: "aaaa0001".into(),
+                path: PathBuf::from("/r/a.json"),
+                receipt: Box::new(receipt(|_| {})),
+            },
+        ],
+        older: 0,
+    };
+    let text = render_list("app", None, &listing);
+    let row = |id| text.lines().find(|line| line.starts_with(id)).unwrap();
+    assert!(row("aaaa0002").contains("brought up at 2222222"), "{text}");
+    assert!(!row("aaaa0002").contains('→'), "{text}");
+    assert!(row("aaaa0001").contains("1111111 → 2222222"), "{text}");
+}
+
+#[test]
 fn list_rows_stay_on_one_line() {
     let listing = receipt::Listing {
         rows: vec![

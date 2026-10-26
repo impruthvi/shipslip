@@ -20,16 +20,19 @@ use shipslip::receipt::{
 use shipslip::transport::SshTransport;
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, check_resumable, execute_recorded, lock_status,
-    prepare_with_github_token, prepare_with_plan, BlockReason, BreakLockError, BringUpError,
+    prepare_with_github_token, prepare_with_progress, BlockReason, BreakLockError, BringUpError,
     Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecuteRejected, ExecutionHandle,
-    MaintenancePhase, PrepareError, RunEvents, RunPlan, SmokeResult, StepStatus, WatchResult,
-    WatchStatus, POST_DEPLOY_WATCH,
+    MaintenancePhase, PrepareError, PreparePhase, RunEvents, RunPlan, SmokeResult, StepStatus,
+    WatchResult, WatchStatus, POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
 /// Exit status after Ctrl-C, as shells report it.
 const INTERRUPTED: u8 = 130;
+/// A confirmation was declined: nothing was changed, so the command did not do
+/// what it was asked to.
+const DECLINED: ExitCode = ExitCode::FAILURE;
 const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 
 #[path = "slip/github_token.rs"]
@@ -171,6 +174,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
     let trusted = trusted_target(&config, &trust_path, &environment)?;
     let target = trusted.target();
 
+    println!("Connecting to {}…", logs::escape(&target.ssh_alias));
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
     let mut interrupts = Interrupts::listen();
     let auth = if let Some(source) = token_source {
@@ -198,7 +202,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
             if interrupts.pending {
                 exit_interrupted();
             }
-            return Ok(ExitCode::SUCCESS);
+            return Ok(DECLINED);
         };
         Some((repository, token))
     } else {
@@ -211,7 +215,12 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
                 prepare_with_github_token(&trusted, plan, transport.as_ref(), repository, token)
                     .await
             }
-            None => prepare_with_plan(&trusted, plan, transport.as_ref()).await,
+            None => {
+                prepare_with_progress(&trusted, plan, transport.as_ref(), |phase| {
+                    show_phase(phase, &target.branch)
+                })
+                .await
+            }
         }
     };
     let preview = interrupts
@@ -268,7 +277,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
     )
     .await?
     else {
-        return Ok(ExitCode::SUCCESS);
+        return Ok(DECLINED);
     };
     let (events, handle) =
         match execute_recorded(preview, confirmation, transport.clone(), journal.clone()) {
@@ -1389,7 +1398,7 @@ async fn attach_command(
     };
     if !approved {
         println!("Run remains unfinished.");
-        return Ok(ExitCode::SUCCESS);
+        return Ok(DECLINED);
     }
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
     let kind = receipt.kind;
@@ -1446,7 +1455,7 @@ async fn break_lock_command(
     io::stdout().flush()?;
     if read_answer()? != environment {
         println!("Lock was not changed.");
-        return Ok(ExitCode::SUCCESS);
+        return Ok(DECLINED);
     }
     break_lock(&trusted, &transport, environment).await?;
     println!("Stale deploy lock cleared for `{environment}`.");
@@ -1478,7 +1487,7 @@ async fn up_command(
     };
     if !approved {
         println!("Maintenance mode was not changed.");
-        return Ok(ExitCode::SUCCESS);
+        return Ok(DECLINED);
     }
     let transport = Arc::new(SshTransport::connect(&target.ssh_alias).await?);
     let (events, _handle) = bring_app_up(&trusted, transport, receipts_root)
@@ -1530,6 +1539,14 @@ async fn follow_up(mut events: RunEvents, environment: &str) -> Result<ExitCode,
         }
     }
     Err("the run ended without a result".into())
+}
+
+fn show_phase(phase: PreparePhase, branch: &str) {
+    match phase {
+        PreparePhase::Fetching => println!("Fetching {}…", logs::escape(branch)),
+        PreparePhase::Checking => println!("Checking the server…"),
+        PreparePhase::Locking => println!("Taking the deploy lock…"),
+    }
 }
 
 fn show_trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) {
