@@ -13,6 +13,7 @@ use shipslip::receipt::{
     target_moved_text, AttemptSummary, Badge, EnvCell, EnvComparison, Flag, Mark, Overview,
     ProblemKind, ReceiptError, RepoRow, StaleHint,
 };
+use shipslip::transport::ConnectFailure;
 use shipslip::DeployOutcome;
 
 /// The app shows 7 characters of a commit; the CLI shows 12.
@@ -370,7 +371,7 @@ fn millis(ms: u128) -> u64 {
 }
 
 /// One part of a next-step line.
-#[derive(Debug, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -449,6 +450,38 @@ fn is_slip_command(text: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b == b'-')
         && words.all(is_plain_word)
+}
+
+/// The command a refusal screen offers for an ssh connect failure, built from
+/// the refusal kind and the configured alias, never from ssh's message. A
+/// changed host key never gets one. An alias ssh could read as an option or
+/// a shell could split is shown as text with nothing to copy.
+pub fn refusal_command(kind: ConnectFailure, alias: &str) -> Option<Span> {
+    let command = match kind {
+        ConnectFailure::HostKeyUnknown => format!("ssh {alias}"),
+        ConnectFailure::KeyNotLoaded => "ssh-add --apple-use-keychain".into(),
+        ConnectFailure::HostKeyChanged | ConnectFailure::Other => return None,
+    };
+    if kind == ConnectFailure::HostKeyUnknown && (!is_plain_word(alias) || alias.starts_with('-')) {
+        return Some(Span::Text {
+            text: escape_field(&command),
+        });
+    }
+    Some(Span::Command {
+        prefix: String::new(),
+        copy_text: command.clone(),
+        command,
+    })
+}
+
+/// `slip break-lock <env>` run in the checkout, when [`guidance`] would offer
+/// it for copying.
+pub fn break_lock_command(repo_root: &str, env: &str) -> Option<Span> {
+    guidance(&[format!("`slip break-lock {env}`")], repo_root, env)
+        .lines
+        .into_iter()
+        .flatten()
+        .find(|span| matches!(span, Span::Command { .. }))
 }
 
 fn is_plain_word(text: &str) -> bool {
@@ -878,6 +911,83 @@ mod span_tests {
     fn lines_without_commands_withhold_nothing() {
         let lines = vec!["The fast-forward failed. Check the server checkout.".to_string()];
         assert!(!guidance(&lines, "/work/app", "prod;rm").copy_withheld);
+    }
+
+    #[test]
+    fn unknown_host_key_offers_ssh_to_the_alias() {
+        assert_eq!(
+            refusal_command(ConnectFailure::HostKeyUnknown, "shop-prod"),
+            Some(Span::Command {
+                prefix: String::new(),
+                command: "ssh shop-prod".into(),
+                copy_text: "ssh shop-prod".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn key_not_loaded_offers_the_constant_ssh_add() {
+        for alias in ["shop-prod", "-oProxyCommand=x", "a;b"] {
+            assert_eq!(
+                refusal_command(ConnectFailure::KeyNotLoaded, alias),
+                Some(Span::Command {
+                    prefix: String::new(),
+                    command: "ssh-add --apple-use-keychain".into(),
+                    copy_text: "ssh-add --apple-use-keychain".into(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn changed_host_key_and_other_failures_offer_nothing() {
+        for kind in [ConnectFailure::HostKeyChanged, ConnectFailure::Other] {
+            assert_eq!(refusal_command(kind, "shop-prod"), None);
+        }
+    }
+
+    #[test]
+    fn unsafe_aliases_render_as_text() {
+        for alias in [
+            "",
+            "-oProxyCommand=open",
+            "-x",
+            "shop prod",
+            "shop;rm",
+            "$(id)",
+            "`id`",
+            "user@host",
+            "a\u{1b}]0;x\u{7}",
+        ] {
+            match refusal_command(ConnectFailure::HostKeyUnknown, alias) {
+                Some(Span::Text { text }) => assert!(!text.contains('\u{1b}'), "{alias:?}"),
+                other => panic!("{alias:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn break_lock_runs_in_the_checkout_and_needs_a_plain_env() {
+        assert_eq!(
+            break_lock_command("/work/my app", "production"),
+            Some(Span::Command {
+                prefix: "cd '/work/my app' && ".into(),
+                command: "slip break-lock production".into(),
+                copy_text: "cd '/work/my app' && slip break-lock production".into(),
+            })
+        );
+        assert_eq!(break_lock_command("/work/app", "prod;rm"), None);
+        assert_eq!(break_lock_command("/work/`x`", "production"), None);
+    }
+
+    #[test]
+    fn receipt_text_naming_ssh_stays_text() {
+        let lines = vec![
+            "Run `ssh shop-prod` and compare the fingerprint.".to_string(),
+            "Then `ssh-add --apple-use-keychain`.".to_string(),
+        ];
+        let guidance = guidance(&lines, "/work/app", "production");
+        assert!(commands(&guidance).is_empty(), "{guidance:?}");
     }
 
     #[test]

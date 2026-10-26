@@ -16,6 +16,8 @@ use shipslip::transport::ConnectFailure;
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{Confirmation, ExecutionHandle, PrepareError, Preview, RunEvents, RunPlan};
 
+use crate::view::{break_lock_command, refusal_command, Span};
+
 mod events;
 use events::RunFeed;
 pub use events::{QuitRun, RunBatch, RunSnapshot};
@@ -64,6 +66,9 @@ pub struct CommandError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_kind: Option<&'static str>,
+    /// A command the refusal screen offers to copy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_step: Option<Span>,
 }
 
 impl CommandError {
@@ -72,6 +77,7 @@ impl CommandError {
             code,
             message: escape_field(message.as_ref()),
             connection_kind: None,
+            next_step: None,
         }
     }
 }
@@ -447,7 +453,7 @@ impl<C: Connector> Sessions<C> {
                 state
                     .warnings
                     .push(CommandError::new(ErrorCode::Connection, message));
-                Err(connection(error))
+                Err(lock_not_released(key))
             }
         }
     }
@@ -852,7 +858,7 @@ impl<C: Connector> Sessions<C> {
                 .connector
                 .connect(&trusted.target().ssh_alias)
                 .await
-                .map_err(connection)?;
+                .map_err(|e| connection(e, &trusted.target().ssh_alias))?;
             let (events, control) = if let Some(journal) = attach_journal {
                 shipslip::attach(&trusted, journal, remote)
                     .map_err(|e| CommandError::new(ErrorCode::Blocked, e.to_string()))?
@@ -1154,10 +1160,10 @@ impl<C: Connector> Sessions<C> {
                 .connector
                 .connect(&trusted.target().ssh_alias)
                 .await
-                .map_err(connection)?;
+                .map_err(|e| connection(e, &trusted.target().ssh_alias))?;
             let preview = shipslip::prepare_with_plan(&trusted, plan, &*remote)
                 .await
-                .map_err(|e| prepare_error(e, &key.env))?;
+                .map_err(|e| prepare_error(e, &key.env, &trusted.target().ssh_alias))?;
             let review = DeployReview::from_preview(id.clone(), &preview, &key.checkout);
             let ready = Ready {
                 stamp: loaded.stamp,
@@ -1270,20 +1276,34 @@ fn busy() -> CommandError {
         "This checkout and environment already have a deployment session.",
     )
 }
-fn connection(error: TransportError) -> CommandError {
-    let kind = match error.connect_failure() {
-        Some(ConnectFailure::HostKeyUnknown) => "hostKeyUnknown",
-        Some(ConnectFailure::HostKeyChanged) => "hostKeyChanged",
-        Some(ConnectFailure::KeyNotLoaded) => "keyNotLoaded",
-        _ => "other",
+fn connection(error: TransportError, alias: &str) -> CommandError {
+    let failure = error.connect_failure().unwrap_or(ConnectFailure::Other);
+    let kind = match failure {
+        ConnectFailure::HostKeyUnknown => "hostKeyUnknown",
+        ConnectFailure::HostKeyChanged => "hostKeyChanged",
+        ConnectFailure::KeyNotLoaded => "keyNotLoaded",
+        ConnectFailure::Other => "other",
     };
     let mut result = CommandError::new(ErrorCode::Connection, error.to_string());
     result.connection_kind = Some(kind);
+    result.next_step = refusal_command(failure, alias);
     result
 }
-fn prepare_error(error: PrepareError, env: &str) -> CommandError {
+fn lock_not_released(key: &Key) -> CommandError {
+    let minutes = shipslip::STALE_AFTER.as_secs() / 60;
+    let mut result = CommandError::new(
+        ErrorCode::Connection,
+        format!(
+            "Couldn't release the server lock. After {minutes} minutes, slip break-lock {} can clear it.",
+            key.env
+        ),
+    );
+    result.next_step = break_lock_command(&key.checkout.to_string_lossy(), &key.env);
+    result
+}
+fn prepare_error(error: PrepareError, env: &str, alias: &str) -> CommandError {
     match error {
-        PrepareError::Transport(e) => connection(e),
+        PrepareError::Transport(e) => connection(e, alias),
         PrepareError::LockHeld(info) => CommandError::new(ErrorCode::Blocked, format!("Deploy lock {info}. Check the old run on the server; use slip break-lock {env} only after reviewing the holder.")),
         PrepareError::Blocked(shipslip::BlockReason::FetchFailed(output)) => CommandError::new(ErrorCode::Blocked, format!("The server could not fetch origin: {output}. Environments that require a local GitHub token must deploy through the CLI; token authentication is not available in the app.")),
         other => CommandError::new(ErrorCode::Blocked, other.to_string()),

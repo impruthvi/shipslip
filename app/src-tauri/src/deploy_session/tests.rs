@@ -158,6 +158,7 @@ fn prepare_requires_trust_before_ssh_and_preserves_connection_diagnostics() {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Connection);
         assert_eq!(error.connection_kind, Some("other"));
+        assert_eq!(error.next_step, None);
         assert!(error.message.contains("refused"));
     });
 }
@@ -731,6 +732,53 @@ fn reload_cleanup_failure_remains_visible_alongside_active_runs() {
 }
 
 #[test]
+fn failed_preview_cancel_explains_the_lock_and_frees_the_workspace() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        let preview = sessions
+            .prepare(root.clone(), "production".into(), RunPlan::Deploy)
+            .await
+            .unwrap();
+        remote.fail_release.store(true, Ordering::SeqCst);
+        let error = sessions.cancel(&preview.handle).await.unwrap_err();
+        assert_eq!(error.code, ErrorCode::Connection);
+        assert_eq!(
+            error.message,
+            "Couldn't release the server lock. After 2 minutes, slip break-lock production can clear it."
+        );
+        let prefix = format!("cd '{}' && ", root.display());
+        assert_eq!(
+            error.next_step,
+            Some(Span::Command {
+                copy_text: format!("{prefix}slip break-lock production"),
+                prefix,
+                command: "slip break-lock production".into(),
+            })
+        );
+        assert!(remote.held.load(Ordering::SeqCst));
+        assert!(sessions.current_runs().warnings[0]
+            .message
+            .contains("cleanup refused"));
+        assert_eq!(
+            sessions.cancel(&preview.handle).await.unwrap_err().code,
+            ErrorCode::InvalidHandle
+        );
+        // The workspace is closed: once the lock is cleared, a new review can start.
+        remote.held.store(false, Ordering::SeqCst);
+        remote.fail_release.store(false, Ordering::SeqCst);
+        let retry = sessions
+            .prepare(root, "production".into(), RunPlan::Deploy)
+            .await
+            .unwrap();
+        sessions.cancel(&retry.handle).await.unwrap();
+    });
+}
+
+#[test]
 fn abandoned_prepare_cleanup_failure_survives_a_dropped_request() {
     tauri::async_runtime::block_on(async {
         let fx = Fixture::new();
@@ -771,10 +819,29 @@ fn ssh_refusals_are_classified_and_failed_starts_release_the_reservation() {
     tauri::async_runtime::block_on(async {
         let fx = Fixture::new();
         let root = checkout(&fx, "one");
-        for (message, kind) in [
-            ("Host key verification failed.", "hostKeyUnknown"),
-            ("REMOTE HOST IDENTIFICATION HAS CHANGED!", "hostKeyChanged"),
-            ("Permission denied (publickey).", "keyNotLoaded"),
+        let copy = |command: &str| {
+            Some(Span::Command {
+                prefix: String::new(),
+                command: command.into(),
+                copy_text: command.into(),
+            })
+        };
+        for (message, kind, next_step) in [
+            (
+                "Host key verification failed.",
+                "hostKeyUnknown",
+                copy("ssh web1"),
+            ),
+            (
+                "REMOTE HOST IDENTIFICATION HAS CHANGED!",
+                "hostKeyChanged",
+                None,
+            ),
+            (
+                "Permission denied (publickey).",
+                "keyNotLoaded",
+                copy("ssh-add --apple-use-keychain"),
+            ),
         ] {
             let sessions = Sessions::new(fx.receipts(), fx.trust(), Diagnostic(message));
             approve(&sessions, &root).await;
@@ -783,6 +850,7 @@ fn ssh_refusals_are_classified_and_failed_starts_release_the_reservation() {
                 .await
                 .unwrap_err();
             assert_eq!(error.connection_kind, Some(kind));
+            assert_eq!(error.next_step, next_step);
             let review = sessions
                 .review_up(root.clone(), "production".into())
                 .await
@@ -792,6 +860,7 @@ fn ssh_refusals_are_classified_and_failed_starts_release_the_reservation() {
                 .await
                 .unwrap_err();
             assert_eq!(error.connection_kind, Some(kind));
+            assert_eq!(error.next_step, next_step);
             assert!(sessions.current_runs().runs.is_empty());
             let retry = sessions
                 .review_up(root.clone(), "production".into())
