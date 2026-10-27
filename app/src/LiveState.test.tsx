@@ -22,6 +22,7 @@ vi.mock("./api", () => ({
     loadReceipt: async (_generation: number, id: number) => fixtures.receipts[String(id)],
     copyText: async () => {},
     onFocus: async () => () => {},
+    receiptSeen: async () => {},
   },
 }));
 const loadMap = vi.fn<() => Promise<LoadResult>>();

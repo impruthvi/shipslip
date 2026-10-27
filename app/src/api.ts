@@ -13,6 +13,9 @@ export interface Backend {
   copyText(text: string): Promise<void>;
   /** Calls `handler` each time the window gains focus; resolves to an unsubscribe. */
   onFocus(handler: () => void): Promise<() => void>;
+  /** The pane shows this run's receipt. Rust counts it as seen only while
+   * the window is focused, which clears the run's Dock badge. */
+  receiptSeen(runId: string): Promise<void>;
 }
 
 const tauri: Backend = {
@@ -24,6 +27,7 @@ const tauri: Backend = {
     getCurrentWindow().onFocusChanged(({ payload: focused }) => {
       if (focused) handler();
     }),
+  receiptSeen: (runId) => invoke("receipt_seen", { runId }),
 };
 
 let backend: Promise<Backend> | undefined;
@@ -45,6 +49,7 @@ export const api: Backend = {
   loadReceipt: async (...args) => (await getBackend()).loadReceipt(...args),
   copyText: async (text) => (await getBackend()).copyText(text),
   onFocus: async (handler) => (await getBackend()).onFocus(handler),
+  receiptSeen: async (runId) => (await getBackend()).receiptSeen(runId),
 };
 
 /** Quitting while a run is live. Separate from `Backend` so screens need not mock it. */

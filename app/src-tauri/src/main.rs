@@ -7,6 +7,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 mod awake;
 mod commands;
 mod deploy_session;
+mod finish;
 #[cfg(test)]
 mod fixture;
 mod git_path;
@@ -30,10 +31,15 @@ fn main() {
         })
         .setup(|app| {
             let handle = app.handle().clone();
-            app.state::<Arc<commands::App>>()
-                .on_live_change(move |live| {
-                    let _ = handle.run_on_main_thread(move || awake::set(live));
-                });
+            let state = app.state::<Arc<commands::App>>();
+            state.on_live_change(move |live| {
+                let _ = handle.run_on_main_thread(move || awake::set(live));
+            });
+            let handle = app.handle().clone();
+            state.on_finish(move |ending| {
+                let app = handle.clone();
+                let _ = handle.run_on_main_thread(move || finish::finished(&app, &ending));
+            });
             Ok(())
         })
         .on_page_load(|webview, payload| {
@@ -52,6 +58,9 @@ fn main() {
                 WindowEvent::CloseRequested { api, .. } if live(window.app_handle()) => {
                     api.prevent_close();
                     let _ = window.hide();
+                }
+                WindowEvent::Focused(true) => {
+                    let _ = window.set_title(finish::TITLE);
                 }
                 WindowEvent::Destroyed => {
                     window.state::<Arc<commands::App>>().invalidate_page();
@@ -75,6 +84,7 @@ fn main() {
             commands::ack_run,
             commands::unsubscribe_run,
             commands::cancel_pending,
+            commands::receipt_seen,
             commands::quit_status,
             commands::detach_and_quit,
             commands::quit_now
@@ -172,6 +182,7 @@ mod tests {
                 "allow-prepare-deploy",
                 "allow-quit-now",
                 "allow-quit-status",
+                "allow-receipt-seen",
                 "allow-review-attach",
                 "allow-review-trust",
                 "allow-review-up",

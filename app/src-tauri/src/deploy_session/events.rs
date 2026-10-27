@@ -218,6 +218,7 @@ struct History {
     interrupt: Stage,
     subscriber: Option<Subscriber>,
     closed: bool,
+    outcome: Option<DeployOutcome>,
 }
 
 pub struct RunFeed {
@@ -236,6 +237,7 @@ impl RunFeed {
                 interrupt: Stage::Running,
                 subscriber: None,
                 closed: false,
+                outcome: None,
             }),
             info,
         })
@@ -365,6 +367,7 @@ impl RunFeed {
                     succeeded: outcome == DeployOutcome::Succeeded,
                     unknown: matches!(outcome, DeployOutcome::Unknown { .. }),
                 });
+                history.outcome = Some(outcome);
                 None
             }
             DeployEvent::Detached { index } => {
@@ -548,6 +551,35 @@ impl RunFeed {
         }
     }
 
+    pub fn ending(&self) -> Ending {
+        let history = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        let state = &history.state;
+        let (words, mut critical) = match &history.outcome {
+            Some(outcome) => (
+                lower_first(&outcome.label()),
+                !matches!(
+                    outcome,
+                    DeployOutcome::Succeeded
+                        | DeployOutcome::CancelledBeforeChanges
+                        | DeployOutcome::AbortedBeforeChanges(_)
+                ),
+            ),
+            // Detached, interrupted or an error: no result was recorded.
+            None => ("needs attention".into(), true),
+        };
+        critical |= state.app_left_down;
+        let new_errors = state
+            .watch
+            .as_ref()
+            .is_some_and(|watch| !watch.groups.is_empty() || watch.more_groups > 0);
+        Ending {
+            run_id: self.info.run_id.clone(),
+            title: format!("{} → {}: {words}", self.info.project, self.info.env),
+            critical,
+            flagged: critical || new_errors,
+        }
+    }
+
     pub fn interrupt_stage(&self) -> Stage {
         self.inner
             .lock()
@@ -592,6 +624,26 @@ impl RunFeed {
             ),
         };
         QuitRun::new(&self.info, history.stage.clone(), detach, quit_now)
+    }
+}
+
+/// How a run ended, for the signal outside the window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ending {
+    pub run_id: Option<String>,
+    /// e.g. "shop → production: failed at step 2".
+    pub title: String,
+    /// Failed, unknown, stopped part-way or the app left down.
+    pub critical: bool,
+    /// Critical or new log errors: badged until its receipt is seen.
+    pub flagged: bool,
+}
+
+fn lower_first(text: &str) -> String {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
     }
 }
 

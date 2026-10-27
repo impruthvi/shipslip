@@ -11,9 +11,10 @@ use shipslip::receipt::{default_receipts_root, overview, ReceiptError};
 use tauri::async_runtime::spawn_blocking;
 
 use crate::deploy_session::{
-    CommandError, CurrentRuns, DeployReview, ErrorCode, OpenSsh, QuitRun, RecoveryReview, RunBatch,
-    RunInfo, Sessions, TrustReview,
+    CommandError, CurrentRuns, DeployReview, Ending, ErrorCode, OpenSsh, QuitRun, RecoveryReview,
+    RunBatch, RunInfo, Sessions, TrustReview,
 };
+use crate::finish::{self, Unseen};
 use crate::git_path;
 use crate::state::SelectionError;
 use crate::state::{with_git, AppState, CompareResult, LoadResult, ReceiptResult};
@@ -24,6 +25,7 @@ pub struct App {
     paths: Result<(PathBuf, PathBuf), String>,
     git: Option<Git>,
     sessions: Option<Arc<Sessions<OpenSsh>>>,
+    unseen: Unseen,
 }
 
 impl App {
@@ -48,6 +50,7 @@ impl App {
             state: AppState::default(),
             paths,
             git,
+            unseen: Unseen::default(),
         }
     }
 
@@ -91,6 +94,16 @@ impl App {
         if let Some(sessions) = &self.sessions {
             sessions.set_live_observer(observer);
         }
+    }
+
+    pub fn on_finish(&self, observer: impl Fn(Ending) + Send + Sync + 'static) {
+        if let Some(sessions) = &self.sessions {
+            sessions.set_finish_observer(observer);
+        }
+    }
+
+    pub fn unseen(&self) -> &Unseen {
+        &self.unseen
     }
 
     pub fn invalidate_page(&self) {
@@ -405,6 +418,15 @@ pub fn unsubscribe_run(
     subscription: String,
 ) -> Result<(), CommandError> {
     app.sessions()?.unsubscribe_run(&handle, &subscription)
+}
+
+/// The pane shows this run's receipt. A sync command runs on the main
+/// thread, so it is ordered with the finish signal.
+#[tauri::command]
+pub fn receipt_seen(app: tauri::State<'_, Arc<App>>, window: tauri::WebviewWindow, run_id: String) {
+    if let Some(show) = app.unseen.seen(&run_id, finish::focused(&window)) {
+        finish::badge(&window, show);
+    }
 }
 
 #[tauri::command]

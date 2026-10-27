@@ -16,6 +16,7 @@ vi.mock("./api", () => ({
       window.addEventListener("focus", handler);
       return () => window.removeEventListener("focus", handler);
     },
+    receiptSeen: async () => {},
   },
 }));
 

@@ -8,6 +8,7 @@ import { target, type PaneView } from "./slipTarget";
 import { useCompare } from "./useCompare";
 import { useReceipt, type Request } from "./useReceipt";
 import { useReleaseMap } from "./useReleaseMap";
+import { useSeen } from "./useSeen";
 import { useSelection } from "./useSelection";
 
 const cellKey = (repoRoot: string, env: string) => `${repoRoot}\n${env}`;
@@ -101,6 +102,8 @@ export default function App() {
   }, []);
 
   const showPane = request !== null && (!narrow || drawerOpen);
+  const shown = showPane && receipt.shown?.key === request?.key ? receipt.shown : null;
+  useSeen(shown?.opened.kind === "receipt" ? shown.opened.runId : null);
   return (
     <div className="window">
       <main className="main">

@@ -1452,3 +1452,83 @@ fn quit_text_for_a_running_step_says_maintenance_stays_on() {
     });
     assert!(feed.quit_run().detach.contains("log watch stops early"));
 }
+
+fn ending_after(events: Vec<DeployEvent>) -> Ending {
+    let feed = display_feed();
+    for event in events {
+        feed.record(event);
+    }
+    feed.close();
+    feed.ending()
+}
+
+#[test]
+fn run_endings_name_the_result_and_ask_for_attention_only_when_needed() {
+    use shipslip::DeployOutcome::{CancelledBeforeChanges, FailedAtStep, Succeeded};
+    let finished = |outcome| DeployEvent::Finished(outcome);
+    let ok = ending_after(vec![finished(Succeeded)]);
+    assert_eq!(ok.title, "example → production: succeeded");
+    assert_eq!(ok.run_id.as_deref(), Some("recorded-run"));
+    assert!(!ok.critical && !ok.flagged);
+
+    let failed = ending_after(vec![finished(FailedAtStep {
+        step: 2,
+        partial_update: false,
+    })]);
+    assert_eq!(failed.title, "example → production: failed at step 2");
+    assert!(failed.critical && failed.flagged);
+
+    let cancelled = ending_after(vec![finished(CancelledBeforeChanges)]);
+    assert!(!cancelled.critical && !cancelled.flagged);
+
+    let down = ending_after(vec![DeployEvent::AppLeftDown, finished(Succeeded)]);
+    assert!(down.critical && down.flagged);
+
+    let mut watch = shipslip::WatchResult::not_run();
+    watch.overflow_groups = 1;
+    let errors = ending_after(vec![DeployEvent::WatchFinished(watch), finished(Succeeded)]);
+    assert!(
+        !errors.critical && errors.flagged,
+        "new errors badge, gently"
+    );
+
+    let lost = ending_after(vec![DeployEvent::Interrupted {
+        index: 2,
+        reason: "gone".into(),
+    }]);
+    assert_eq!(lost.title, "example → production: needs attention");
+    assert!(lost.critical && lost.flagged);
+}
+
+#[test]
+fn each_run_that_ends_reports_its_ending_once() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        let endings = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = endings.clone();
+        sessions.set_finish_observer(move |ending| sink.lock().unwrap().push(ending));
+        approve(&sessions, &root).await;
+        let review = sessions
+            .prepare(root.clone(), "production".into(), RunPlan::Deploy)
+            .await
+            .unwrap();
+        assert!(endings.lock().unwrap().is_empty(), "a preview is not a run");
+        let run = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        until(|| sessions.current_runs().runs.is_empty());
+        let endings = endings.lock().unwrap();
+        assert_eq!(endings.len(), 1);
+        assert_eq!(endings[0].run_id, run.run_id);
+        // The recheck finds a dirty checkout and stops before any change.
+        assert_eq!(
+            endings[0].title,
+            "example → production: aborted before changes"
+        );
+        assert!(!endings[0].flagged);
+    });
+}

@@ -34,4 +34,5 @@ export const backend: Backend = {
     window.addEventListener("focus", handler);
     return () => window.removeEventListener("focus", handler);
   },
+  receiptSeen: async () => {},
 };
