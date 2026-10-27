@@ -14,6 +14,7 @@ vi.mock("./api", () => ({
     loadReceipt: (generation: number, id: number) => loadReceipt(generation, id),
     copyText: async () => {},
     onFocus: async () => () => {},
+    receiptSeen: async () => {},
   },
 }));
 

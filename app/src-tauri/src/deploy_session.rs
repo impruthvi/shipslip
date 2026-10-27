@@ -20,7 +20,7 @@ use crate::view::{break_lock_command, refusal_command, Span};
 
 mod events;
 use events::RunFeed;
-pub use events::{QuitRun, RunBatch, RunSnapshot};
+pub use events::{Ending, QuitRun, RunBatch, RunSnapshot};
 
 // Keep terminal delivery available across the completion/reload race, with
 // bounded history. Active runs are never evicted.
@@ -311,6 +311,7 @@ pub struct Sessions<C: Connector> {
     nonce: String,
     inner: Mutex<Registry<C::Remote>>,
     live_observer: OnceLock<Box<dyn Fn(bool) + Send + Sync>>,
+    finish_observer: OnceLock<Box<dyn Fn(Ending) + Send + Sync>>,
 }
 
 impl<C: Connector> Sessions<C> {
@@ -341,6 +342,7 @@ impl<C: Connector> Sessions<C> {
                 idle: Vec::new(),
             }),
             live_observer: OnceLock::new(),
+            finish_observer: OnceLock::new(),
         })
     }
 
@@ -509,6 +511,12 @@ impl<C: Connector> Sessions<C> {
         let _ = self.live_observer.set(Box::new(observer));
     }
 
+    /// Called once per run that ends after it started, while the registry is
+    /// locked. Keep it cheap.
+    pub fn set_finish_observer(&self, observer: impl Fn(Ending) + Send + Sync + 'static) {
+        let _ = self.finish_observer.set(Box::new(observer));
+    }
+
     fn settle(&self, state: &mut Registry<C::Remote>) {
         let live = state
             .slots
@@ -649,6 +657,10 @@ impl<C: Connector> Sessions<C> {
         let mut state = self.registry();
         if state.slots.get(key).is_some_and(|slot| slot.id == handle) {
             state.slots.remove(key);
+        }
+        if let (Some(feed), Some(observer)) = (state.feeds.get(handle), self.finish_observer.get())
+        {
+            observer(feed.ending());
         }
         state.recent.push_back(handle.into());
         while state.recent.len() > RECENT_RUNS {
