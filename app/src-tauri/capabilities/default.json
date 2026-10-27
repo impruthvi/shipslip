@@ -12,6 +12,7 @@
     "allow-load-map",
     "allow-compare",
     "allow-load-receipt",
+    "allow-deploy-entry",
     "allow-prepare-deploy",
     "allow-review-trust",
     "allow-approve-trust",

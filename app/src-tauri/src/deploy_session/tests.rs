@@ -231,6 +231,8 @@ impl Transport for Remote {
                 gate.recv().await;
             }
             vec![
+                "@phase fetch".into(),
+                "@phase check".into(),
                 format!("@head {}", crate::fixture::OLD),
                 "@branch main".into(),
                 format!("@target {}", crate::fixture::NEW),
@@ -1530,5 +1532,114 @@ fn each_run_that_ends_reports_its_ending_once() {
             "example → production: aborted before changes"
         );
         assert!(!endings[0].flagged);
+    });
+}
+
+#[test]
+fn prepare_reports_each_phase_as_it_starts() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        let phases = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = phases.clone();
+        sessions
+            .prepare_with_progress(root, "production".into(), RunPlan::Deploy, move |phase| {
+                sink.lock().unwrap().push(phase)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            *phases.lock().unwrap(),
+            [
+                PrepareProgress::Connecting {
+                    alias: "web1".into()
+                },
+                PrepareProgress::Fetching {
+                    branch: "main".into()
+                },
+                PrepareProgress::Checking,
+                PrepareProgress::Locking,
+            ]
+        );
+        let json = serde_json::to_value(PrepareProgress::Fetching {
+            branch: "main".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"phase": "fetching", "branch": "main"})
+        );
+    });
+}
+
+#[test]
+fn deploy_entry_says_why_an_env_cannot_be_deployed_and_when_trust_comes_first() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let (release, gate) = tauri::async_runtime::channel(1);
+        *remote.state_gate.lock().await = Some(gate);
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        let entry = |env: &str| sessions.deploy_entry(root.clone(), env.into());
+
+        assert_eq!(
+            entry("production").await,
+            DeployEntry::Ready {
+                production: true,
+                needs_trust: true
+            }
+        );
+        assert_eq!(entry("staging").await, DeployEntry::Hidden);
+        approve(&sessions, &root).await;
+        assert_eq!(
+            entry("production").await,
+            DeployEntry::Ready {
+                production: true,
+                needs_trust: false
+            }
+        );
+
+        let review = sessions
+            .prepare(root.clone(), "production".into(), RunPlan::Deploy)
+            .await
+            .unwrap();
+        assert_eq!(
+            entry("production").await,
+            DeployEntry::Unavailable {
+                reason: "Preparing…".into()
+            }
+        );
+        let run = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            entry("production").await,
+            DeployEntry::Running {
+                handle: run.handle.clone()
+            }
+        );
+        release.send(()).await.unwrap();
+        until(|| sessions.current_runs().runs.is_empty());
+
+        std::fs::write(root.join(".shipslip.toml"), "[project\n").unwrap();
+        let DeployEntry::Unavailable { reason } = entry("production").await else {
+            panic!("broken config must disable the entry");
+        };
+        assert!(reason.starts_with("Config has errors: "), "{reason}");
+        std::fs::remove_file(root.join(".shipslip.toml")).unwrap();
+        assert_eq!(entry("production").await, DeployEntry::Hidden);
+        assert_eq!(
+            sessions
+                .deploy_entry(fx.dir().join("gone"), "production".into())
+                .await,
+            DeployEntry::Unavailable {
+                reason: "Checkout folder is missing".into()
+            }
+        );
     });
 }

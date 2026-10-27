@@ -4,6 +4,7 @@ fn main() {
             "load_map",
             "compare",
             "load_receipt",
+            "deploy_entry",
             "prepare_deploy",
             "review_trust",
             "approve_trust",
