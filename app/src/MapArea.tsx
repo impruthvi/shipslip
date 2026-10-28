@@ -17,9 +17,21 @@ interface Props {
   onProblem: (row: number, col: number) => void;
   onCellFocus: () => void;
   compare: Compare | null;
+  /** Outcome lines of cells with a run going now, by `repoRoot\nenv`. */
+  live?: Record<string, string>;
 }
 
-export function MapArea({ state, onRetry, selected, onSelect, onEnter, onProblem, onCellFocus, compare }: Props) {
+export function MapArea({
+  state,
+  onRetry,
+  selected,
+  onSelect,
+  onEnter,
+  onProblem,
+  onCellFocus,
+  compare,
+  live,
+}: Props) {
   switch (state.phase) {
     case "loading":
       return <p className="placeholder">Reading local receipts…</p>;
@@ -67,6 +79,7 @@ export function MapArea({ state, onRetry, selected, onSelect, onEnter, onProblem
               onEnter={onEnter}
               onCellFocus={onCellFocus}
               compare={compare}
+              live={live}
             />
           )}
         </>

@@ -1,12 +1,20 @@
 import { useState, type FormEvent } from "react";
+import { firstStep } from "./run";
 import { clock } from "./time";
-import type { DeployReview } from "./types";
+import type { DeployReview, RunPlan } from "./types";
 
 const FIRST_COMMITS = 5;
 
 export type PreviewBusy = "confirming" | "releasing" | null;
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** The primary button: what confirming starts. */
+export function planAction(plan: RunPlan, env: string): string {
+  if (plan === "Deploy") return `Deploy to ${env}`;
+  if (plan === "Rerun") return "Rerun all steps";
+  return `Run from step ${plan.FromStep}`;
+}
 
 /** What the reviewed deploy will do, and the typed confirm for production. */
 export function Preview({
@@ -15,12 +23,15 @@ export function Preview({
   busy,
   onBack,
   onDeploy,
+  onRerun,
 }: {
   review: DeployReview;
   lockedAt: Date;
   busy: PreviewBusy;
   onBack: () => void;
   onDeploy: (typedEnv: string | null) => void;
+  /** "Already up to date": release this preview and prepare a rerun. */
+  onRerun: () => void;
 }) {
   const [typed, setTyped] = useState("");
   const [allCommits, setAllCommits] = useState(false);
@@ -28,8 +39,11 @@ export function Preview({
   const listed = allCommits ? review.commits : review.commits.slice(0, FIRST_COMMITS);
   const hidden = count - listed.length;
   const ready = !review.production || typed === review.env;
+  const deploying = review.runPlan === "Deploy";
+  const first = firstStep(review.runPlan);
+  const running = deploying ? review.steps.length : review.steps.length - Math.max(first, 1) + 1;
   const facts = [
-    plural(review.steps.length, "step"),
+    plural(running, "step"),
     review.maintenance && "maintenance on",
     review.watchMs !== null && `log watch ${Math.round(review.watchMs / 60_000)} min`,
   ].filter(Boolean);
@@ -38,25 +52,38 @@ export function Preview({
     event.preventDefault();
     if (ready && busy === null) onDeploy(review.production ? typed : null);
   };
+  const canRun = !deploying || count > 0;
 
   return (
     <>
       <div className="workspace-body">
         <div className="workspace-section">
-          <p>
-            <span className="mono preview-shas">
-              {review.fromSha.slice(0, 7)} → {review.targetSha.slice(0, 7)}
-            </span>{" "}
-            <span className="muted">· {plural(count, "commit")}</span>
-          </p>
+          {deploying ? (
+            <p>
+              <span className="mono preview-shas">
+                {review.fromSha.slice(0, 7)} → {review.targetSha.slice(0, 7)}
+              </span>{" "}
+              <span className="muted">· {plural(count, "commit")}</span>
+            </p>
+          ) : (
+            <p>
+              On the deployed commit <span className="mono preview-shas">{review.targetSha.slice(0, 7)}</span>
+            </p>
+          )}
           <p className="muted">{facts.join(" · ")}</p>
         </div>
+        {deploying && (
         <section className="workspace-section" aria-labelledby="preview-commits">
           <h2 id="preview-commits" className="caps">
             Commits
           </h2>
           {count === 0 ? (
-            <p>Already up to date</p>
+            <p>
+              Already up to date{" "}
+              <button type="button" className="button" disabled={busy !== null} onClick={onRerun}>
+                Rerun…
+              </button>
+            </p>
           ) : (
             <ul className="commit-list mono">
               {listed.map((commit, i) => (
@@ -75,17 +102,22 @@ export function Preview({
               </button>
             ))}
         </section>
+        )}
         <section className="workspace-section" aria-labelledby="preview-steps">
           <h2 id="preview-steps" className="caps">
             Steps
           </h2>
           <ol className="recipe mono">
-            {review.steps.map((step, i) => (
-              <li key={i}>
-                <span className="recipe-index muted">{i + 1}</span>
-                <code>{step}</code>
-              </li>
-            ))}
+            {review.steps.map((step, i) => {
+              const skipped = i + 1 < first;
+              return (
+                <li key={i} className={skipped ? "step-skipped" : undefined}>
+                  <span className="recipe-index muted">{i + 1}</span>
+                  <code>{step}</code>
+                  {skipped && <span className="muted step-skip-note">skipped</span>}
+                </li>
+              );
+            })}
           </ol>
         </section>
         <p className="workspace-section muted">
@@ -97,11 +129,11 @@ export function Preview({
           Back
         </button>
         {busy === "releasing" && <span className="muted">Releasing the server lock…</span>}
-        {count > 0 && (
+        {canRun && (
           <div className="footer-end">
             {review.production && (
               <label className="typed-field">
-                Type {review.env} to deploy
+                Type {review.env} to {deploying ? "deploy" : "continue"}
                 <input
                   value={typed}
                   onChange={(event) => setTyped(event.target.value)}
@@ -113,7 +145,7 @@ export function Preview({
               </label>
             )}
             <button type="submit" className="button button-primary" disabled={!ready || busy !== null}>
-              {busy === "confirming" ? "Starting…" : `Deploy to ${review.env}`}
+              {busy === "confirming" ? "Starting…" : planAction(review.runPlan, review.env)}
             </button>
           </div>
         )}

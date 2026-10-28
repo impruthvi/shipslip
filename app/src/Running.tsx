@@ -4,7 +4,7 @@ import { deploy } from "./deployApi";
 import { Mark } from "./Mark";
 import { applyBatch, runRows, watching, type RunLog } from "./run";
 import { countdown, elapsed, spoken } from "./time";
-import type { CommandError, DeployReview, OutputLine, ProgressStatus, RunInfo, Terminal } from "./types";
+import type { CommandError, OutputLine, ProgressStatus, RunInfo, Terminal } from "./types";
 
 const TICK_MS = 1000;
 
@@ -70,12 +70,10 @@ function Output({ label, lines }: { label: string; lines: OutputLine[] }) {
 
 /** A run in progress: its steps as they go, then the log watch. */
 export function Running({
-  review,
   info,
   announce,
   onEnd,
 }: {
-  review: DeployReview;
   info: RunInfo;
   announce: Announce;
   onEnd: (terminal: Terminal) => void;
@@ -114,7 +112,7 @@ export function Running({
   }, [info.handle]);
 
   const state = log?.state ?? null;
-  const rows = useMemo(() => (state ? runRows(review, state) : []), [review, state]);
+  const rows = useMemo(() => (state ? runRows(info, state) : []), [info, state]);
   const terminal = state?.terminal ?? null;
 
   // Times and announcements as each step starts and ends.
@@ -132,7 +130,7 @@ export function Running({
         changed = true;
         props.current.announce(
           numbered
-            ? `Step ${row.index} of ${review.steps.length} started: ${row.command}`
+            ? `Step ${row.index} of ${info.steps.length} started: ${row.command}`
             : `${row.command} started`,
         );
       } else if (status && status !== "Running" && status !== "Pending" && time && !time.end) {
@@ -154,7 +152,7 @@ export function Running({
       setWatchStart(at);
       props.current.announce(`Log watch started, ${spoken(state.watchWindowMs ?? 0)}`);
     }
-  }, [state, rows, review.steps.length]);
+  }, [state, rows, info.steps.length]);
 
   useEffect(() => {
     if (ended.current) return;
@@ -195,7 +193,7 @@ export function Running({
           <h2 id="run-steps" className="caps">
             Steps
           </h2>
-          {!state && <p className="muted">Connecting to {review.sshAlias}…</p>}
+          {!state && <p className="muted">Connecting to {info.sshAlias}…</p>}
           {log && log.dropped > 0 && (
             <p className="muted">Earlier output not kept: {log.dropped} lines</p>
           )}

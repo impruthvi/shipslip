@@ -14,5 +14,10 @@ vi.mock("./deployApi", () => ({
     cancel: async () => {},
     follow: async () => () => {},
     stop: async () => {},
+    reviewTrust: () => new Promise(() => {}),
+    approveTrust: () => new Promise(() => {}),
+    reviewUp: () => new Promise(() => {}),
+    reviewAttach: () => new Promise(() => {}),
+    liveRuns: async () => ({ runs: [], closedPreviews: [] }),
   },
 }));

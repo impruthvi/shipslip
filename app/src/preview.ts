@@ -1,7 +1,8 @@
 // Dev-only stand-in for Rust when the UI runs in a plain browser, serving
 // src/fixtures.gen.ts. `?screen=firstRun|noneReadable|failed` picks the
 // first load; `?slow=ms` delays every answer. `?deploy=failed` ends a
-// deploy at its failed step instead of succeeding.
+// deploy at its failed step instead of succeeding; `?recovery=failed` shows
+// the recovery actions a failed run leaves.
 
 import type { Backend } from "./api";
 import type { DeployBackend } from "./deployApi";
@@ -42,7 +43,12 @@ export const backend: Backend = {
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export const deploy: DeployBackend = {
-  entry: () => later(fixtures.deployEntries[3]),
+  entry: () =>
+    later(
+      params.get("recovery") === "failed"
+        ? { ...fixtures.deployEntries[3], recovery: fixtures.recoveries[0] }
+        : fixtures.deployEntries[3],
+    ),
   prepare: async (_generation, _row, _env, _plan, onProgress) => {
     for (const phase of fixtures.prepareProgress) {
       onProgress(phase);
@@ -50,6 +56,22 @@ export const deploy: DeployBackend = {
     }
     return fixtures.deployReview;
   },
+  reviewTrust: () => later(fixtures.trustReview),
+  approveTrust: () => wait(300),
+  reviewUp: () =>
+    later({
+      handle: "up-1",
+      env: fixtures.runInfo.env,
+      production: true,
+      operation: "up",
+      sshAlias: fixtures.runInfo.sshAlias,
+      path: fixtures.runInfo.path,
+      runId: null,
+      targetSha: null,
+      phase: "Bring this app out of maintenance mode",
+      remainingSteps: ["php artisan up"],
+    }),
+  reviewAttach: () => Promise.reject({ code: "notFound", message: "There is no unfinished run for this checkout and environment." }),
   confirm: () => later(fixtures.runInfo),
   cancel: () => wait(400),
   follow: async (_handle, onBatch) => {
@@ -62,4 +84,5 @@ export const deploy: DeployBackend = {
     return () => timers.forEach(clearTimeout);
   },
   stop: () => wait(200),
+  liveRuns: async () => ({ runs: [], closedPreviews: [] }),
 };

@@ -18,6 +18,7 @@ use shipslip::{
     Confirmation, ExecutionHandle, PrepareError, PreparePhase, Preview, RunEvents, RunPlan,
 };
 
+use crate::recovery::{recovery, RecoveryView};
 use crate::view::{break_lock_command, refusal_command, Span};
 
 mod events;
@@ -61,6 +62,14 @@ pub enum ErrorCode {
     Local,
 }
 
+/// Which preflight refusal a `Blocked` error is, for the refusal screen's title.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BlockedKind {
+    LockHeld,
+    FetchFailed,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandError {
@@ -68,6 +77,8 @@ pub struct CommandError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connection_kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_kind: Option<BlockedKind>,
     /// A command the refusal screen offers to copy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_step: Option<Span>,
@@ -79,6 +90,7 @@ impl CommandError {
             code,
             message: escape_field(message.as_ref()),
             connection_kind: None,
+            blocked_kind: None,
             next_step: None,
         }
     }
@@ -176,7 +188,39 @@ pub struct TrustReview {
     pub handle: String,
     pub env: String,
     pub project: String,
-    pub changes: Vec<String>,
+    pub production: bool,
+    /// Every approved setting, in review order.
+    pub settings: Vec<TrustRow>,
+}
+
+/// One setting under review. Values are lines of display text.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustRow {
+    pub name: String,
+    /// `None` for a first approval.
+    pub previous: Option<Vec<String>>,
+    pub proposed: Vec<String>,
+    /// The lines are the numbered recipe steps.
+    pub steps: bool,
+    pub changed: bool,
+}
+
+impl From<config::TrustSetting> for TrustRow {
+    fn from(setting: config::TrustSetting) -> Self {
+        let changed = setting.changed();
+        let lines = |value: config::TrustValue| match value {
+            config::TrustValue::One(line) => vec![escape_field(&line)],
+            config::TrustValue::Steps(steps) => steps.iter().map(|s| escape_field(s)).collect(),
+        };
+        Self {
+            name: setting.name.into(),
+            steps: matches!(setting.proposed, config::TrustValue::Steps(_)),
+            previous: setting.previous.map(lines),
+            proposed: lines(setting.proposed),
+            changed,
+        }
+    }
 }
 
 // Per canonical (checkout, env): Idle -> Preparing -> Ready -> Starting -> Running.
@@ -243,10 +287,14 @@ pub enum DeployEntry {
         production: bool,
         /// New or changed settings: Trust review comes first.
         needs_trust: bool,
+        /// Recipe steps 1..N, for picking where a run starts.
+        steps: Vec<String>,
+        /// What this checkout's newest run left to do.
+        recovery: Option<RecoveryView>,
     },
 }
 
-fn entry_sync(checkout: &Path, env: &str, trust_path: &Path) -> DeployEntry {
+fn entry_sync(checkout: &Path, env: &str, trust_path: &Path, receipts_root: &Path) -> DeployEntry {
     let unavailable = |reason: String| DeployEntry::Unavailable { reason };
     let Ok(checkout) = std::fs::canonicalize(checkout) else {
         return unavailable("Checkout folder is missing".into());
@@ -273,12 +321,41 @@ fn entry_sync(checkout: &Path, env: &str, trust_path: &Path) -> DeployEntry {
         Ok(status) => DeployEntry::Ready {
             production: snapshot.production,
             needs_trust: !matches!(status, TrustStatus::Trusted),
+            steps: snapshot.steps.iter().map(|s| escape_field(s)).collect(),
+            recovery: newest_run(receipts_root, config.project_name(), env, &checkout)
+                .as_ref()
+                .and_then(recovery),
         },
         Err(error) => unavailable(format!(
             "Approved settings can't be read: {}",
             escape_field(&error.to_string())
         )),
     }
+}
+
+/// How many of the env's newest receipts are searched for this checkout's.
+const NEWEST_RUNS: usize = 20;
+
+/// This checkout's newest receipt for the env. An unreadable newer receipt
+/// hides older ones: its run may be the one that matters.
+fn newest_run(
+    receipts_root: &Path,
+    project: &str,
+    env: &str,
+    checkout: &Path,
+) -> Option<receipt::Receipt> {
+    let listing = receipt::list(receipts_root, project, Some(env), Some(NEWEST_RUNS)).ok()?;
+    let checkout = checkout.to_string_lossy();
+    for row in listing.rows {
+        match row {
+            receipt::Listed::Receipt { receipt, .. } if receipt.repo_root == checkout => {
+                return Some(*receipt)
+            }
+            receipt::Listed::Receipt { .. } => {}
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// What a preview is waiting on, sent as each phase starts.
@@ -327,9 +404,7 @@ impl DeployReview {
             path: escape_field(&preview.target().path),
             branch: escape_field(&preview.target().branch),
             maintenance: preview.target().maintenance,
-            watch_ms: preview.target().watch_log.then(|| {
-                u64::try_from(shipslip::POST_DEPLOY_WATCH.as_millis()).unwrap_or(u64::MAX)
-            }),
+            watch_ms: watch_ms(preview.target()),
             recipe_hash: escape_field(preview.recipe_hash()),
             from_sha: escape_field(preview.from_sha()),
             target_sha: escape_field(preview.target_sha()),
@@ -357,6 +432,62 @@ pub struct RunInfo {
     pub target_sha: Option<String>,
     pub operation: &'static str,
     pub stage: String,
+    pub production: bool,
+    pub ssh_alias: String,
+    pub path: String,
+    pub maintenance: bool,
+    /// Recipe steps 1..N.
+    pub steps: Vec<String>,
+    /// `None` when bringing the app up.
+    pub run_plan: Option<RunPlan>,
+    pub watch_ms: Option<u64>,
+    pub started_at_ms: u64,
+}
+
+impl RunInfo {
+    /// A run starting now. `run_id` and `target_sha` are filled in by the caller.
+    fn starting(
+        handle: &str,
+        project: &str,
+        key: &Key,
+        operation: &'static str,
+        target: &shipslip::DeployTarget,
+        run_plan: Option<RunPlan>,
+    ) -> Self {
+        Self {
+            handle: handle.into(),
+            project: escape_field(project),
+            checkout: escape_field(&key.checkout.to_string_lossy()),
+            env: escape_field(&key.env),
+            run_id: None,
+            target_sha: None,
+            operation,
+            stage: "starting".into(),
+            production: target.production,
+            ssh_alias: escape_field(&target.ssh_alias),
+            path: escape_field(&target.path),
+            maintenance: target.maintenance,
+            steps: match run_plan {
+                Some(_) => target.steps.iter().map(|s| escape_field(s)).collect(),
+                None => Vec::new(),
+            },
+            run_plan,
+            watch_ms: run_plan.and(watch_ms(target)),
+            started_at_ms: u64::try_from(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            )
+            .unwrap_or(u64::MAX),
+        }
+    }
+}
+
+fn watch_ms(target: &shipslip::DeployTarget) -> Option<u64> {
+    target
+        .watch_log
+        .then(|| u64::try_from(shipslip::POST_DEPLOY_WATCH.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -364,6 +495,22 @@ pub struct RunInfo {
 pub enum RunStop {
     AfterStep,
     Watch,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveRuns {
+    pub runs: Vec<RunInfo>,
+    pub closed_previews: Vec<ClosedPreview>,
+}
+
+/// A preview the window's reload closed. Nothing ran on the server.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClosedPreview {
+    pub checkout: String,
+    pub env: String,
+    pub released: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -380,6 +527,8 @@ struct Registry<T: Transport> {
     tickets: HashMap<String, TrustTicket>,
     slots: HashMap<Key, Slot<T>>,
     warnings: Vec<CommandError>,
+    /// Previews a page reload closed, and whether their lock was released.
+    closed: Vec<(Key, bool)>,
     feeds: HashMap<String, Arc<RunFeed>>,
     recent: VecDeque<String>,
     /// Whether any run is starting or running, as last told to the observer.
@@ -419,6 +568,7 @@ impl<C: Connector> Sessions<C> {
                 tickets: HashMap::new(),
                 slots: HashMap::new(),
                 warnings: Vec::new(),
+                closed: Vec::new(),
                 feeds: HashMap::new(),
                 recent: VecDeque::new(),
                 live: false,
@@ -441,8 +591,9 @@ impl<C: Connector> Sessions<C> {
 
     pub async fn deploy_entry(&self, checkout: PathBuf, env: String) -> DeployEntry {
         let trust_path = self.trust_path.clone();
+        let receipts_root = self.receipts_root.clone();
         let checked = blocking(move || {
-            let entry = entry_sync(&checkout, &env, &trust_path);
+            let entry = entry_sync(&checkout, &env, &trust_path, &receipts_root);
             Ok((std::fs::canonicalize(&checkout).ok(), env, entry))
         })
         .await;
@@ -490,7 +641,7 @@ impl<C: Connector> Sessions<C> {
             .map_err(local)
         })
         .await?;
-        let changes = config::trust_changes(
+        let settings = config::trust_settings(
             match &previous {
                 TrustStatus::Trusted => Some(&stamp.snapshot),
                 TrustStatus::Untrusted { previous } => previous.as_ref(),
@@ -498,7 +649,7 @@ impl<C: Connector> Sessions<C> {
             &stamp.snapshot,
         )
         .into_iter()
-        .map(|s| escape_field(&s))
+        .map(TrustRow::from)
         .collect();
         let mut state = self.registry();
         if state.page != page {
@@ -510,7 +661,8 @@ impl<C: Connector> Sessions<C> {
             handle: handle.clone(),
             env: escape_field(&stamp.key.env),
             project: escape_field(&stamp.project),
-            changes,
+            production: stamp.snapshot.production,
+            settings,
         };
         state.tickets.insert(handle, TrustTicket { page, stamp });
         Ok(review)
@@ -545,10 +697,12 @@ impl<C: Connector> Sessions<C> {
         for (key, id, ready) in cleanup {
             let owner = self.clone();
             tauri::async_runtime::spawn(async move {
-                let _ = owner
+                let released = owner
                     .cancel_preview(&key, ready.preview, ready.remote)
-                    .await;
+                    .await
+                    .is_ok();
                 owner.remove(&key, &id);
+                owner.closed_by_reload(key, released);
             });
         }
     }
@@ -788,6 +942,41 @@ impl<C: Connector> Sessions<C> {
         }
     }
 
+    /// Live runs for the map, and the previews the last reload closed.
+    pub fn live_runs(&self) -> LiveRuns {
+        let state = self.registry();
+        let mut runs: Vec<_> = state
+            .slots
+            .values()
+            .filter_map(|slot| match &slot.phase {
+                Phase::Running { info, .. } | Phase::Starting(info) => Some(info.clone()),
+                _ => None,
+            })
+            .collect();
+        runs.sort_by(|a, b| a.handle.cmp(&b.handle));
+        LiveRuns {
+            runs,
+            closed_previews: state
+                .closed
+                .iter()
+                .map(|(key, released)| ClosedPreview {
+                    checkout: escape_field(&key.checkout.to_string_lossy()),
+                    env: escape_field(&key.env),
+                    released: *released,
+                })
+                .collect(),
+        }
+    }
+
+    fn closed_by_reload(&self, key: Key, released: bool) {
+        let mut state = self.registry();
+        state.closed.retain(|(closed, _)| *closed != key);
+        if state.closed.len() == 16 {
+            state.closed.remove(0);
+        }
+        state.closed.push((key, released));
+    }
+
     fn archive(&self, key: &Key, handle: &str) {
         let mut state = self.registry();
         if state.slots.get(key).is_some_and(|slot| slot.id == handle) {
@@ -941,7 +1130,7 @@ impl<C: Connector> Sessions<C> {
         recovery: Recovery,
     ) -> Result<RunInfo, CommandError> {
         let key = recovery.stamp.key.clone();
-        let project = escape_field(&recovery.stamp.project);
+        let project = recovery.stamp.project.clone();
         let result = async {
             let config = unchanged(&recovery.stamp).await?;
             let trusted = self
@@ -976,16 +1165,19 @@ impl<C: Connector> Sessions<C> {
                 None
             };
             let saved = attach_journal.as_ref().map(|j| j.snapshot());
-            let info = RunInfo {
-                handle: handle.into(),
-                project,
-                checkout: escape_field(&key.checkout.to_string_lossy()),
-                env: escape_field(&key.env),
-                run_id: saved.as_ref().map(|r| escape_field(&r.run_id)),
-                target_sha: saved.as_ref().map(|r| escape_field(&r.target_sha)),
-                operation: if saved.is_some() { "attach" } else { "up" },
-                stage: "starting".into(),
+            let mut info = match &saved {
+                Some(r) => RunInfo::starting(
+                    handle,
+                    &project,
+                    &key,
+                    "attach",
+                    &r.target,
+                    (r.kind == receipt::ReceiptKind::Deploy).then_some(r.run_plan),
+                ),
+                None => RunInfo::starting(handle, &project, &key, "up", trusted.target(), None),
             };
+            info.run_id = saved.as_ref().map(|r| escape_field(&r.run_id));
+            info.target_sha = saved.as_ref().map(|r| escape_field(&r.target_sha));
             {
                 let mut state = self.registry();
                 if state.page != page {
@@ -1151,16 +1343,16 @@ impl<C: Connector> Sessions<C> {
                 return Err(error);
             }
         };
-        let info = RunInfo {
-            handle: handle.clone(),
-            project: escape_field(&ready.stamp.project),
-            checkout: escape_field(&key.checkout.to_string_lossy()),
-            env: escape_field(&key.env),
-            run_id: Some(escape_field(ready.preview.run_id())),
-            target_sha: Some(escape_field(ready.preview.target_sha())),
-            operation: "deploy",
-            stage: "starting".into(),
-        };
+        let mut info = RunInfo::starting(
+            &handle,
+            &ready.stamp.project,
+            &key,
+            "deploy",
+            ready.preview.target(),
+            Some(ready.preview.run_plan()),
+        );
+        info.run_id = Some(escape_field(ready.preview.run_id()));
+        info.target_sha = Some(escape_field(ready.preview.target_sha()));
         let result = {
             let mut state = self.registry();
             if state.page != page {
@@ -1307,6 +1499,7 @@ impl<C: Connector> Sessions<C> {
             if state.slots.contains_key(&key) {
                 return Err(busy());
             }
+            state.closed.retain(|(closed, _)| *closed != key);
             let id = self.next_handle(&mut state);
             state.slots.insert(
                 key.clone(),
@@ -1339,7 +1532,7 @@ impl<C: Connector> Sessions<C> {
                 })
             })
             .await
-            .map_err(|e| prepare_error(e, &key.env, &trusted.target().ssh_alias))?;
+            .map_err(|e| prepare_error(e, &key, &trusted.target().ssh_alias))?;
             let review = DeployReview::from_preview(id.clone(), &preview, &key.checkout);
             let ready = Ready {
                 stamp: loaded.stamp,
@@ -1355,8 +1548,9 @@ impl<C: Connector> Sessions<C> {
                 }
                 ready
             };
-            self.cancel_preview(&key, ready.preview, ready.remote)
-                .await?;
+            let released = self.cancel_preview(&key, ready.preview, ready.remote).await;
+            self.closed_by_reload(key.clone(), released.is_ok());
+            released?;
             Err(cancelled())
         }
         .await;
@@ -1477,11 +1671,21 @@ fn lock_not_released(key: &Key) -> CommandError {
     result.next_step = break_lock_command(&key.checkout.to_string_lossy(), &key.env);
     result
 }
-fn prepare_error(error: PrepareError, env: &str, alias: &str) -> CommandError {
+fn prepare_error(error: PrepareError, key: &Key, alias: &str) -> CommandError {
+    let env = &key.env;
     match error {
         PrepareError::Transport(e) => connection(e, alias),
-        PrepareError::LockHeld(info) => CommandError::new(ErrorCode::Blocked, format!("Deploy lock {info}. Check the old run on the server; use slip break-lock {env} only after reviewing the holder.")),
-        PrepareError::Blocked(shipslip::BlockReason::FetchFailed(output)) => CommandError::new(ErrorCode::Blocked, format!("The server could not fetch origin: {output}. Environments that require a local GitHub token must deploy through the CLI; token authentication is not available in the app.")),
+        PrepareError::LockHeld(info) => {
+            let mut result = CommandError::new(ErrorCode::Blocked, format!("Deploy lock {info} ({}). Check the old run on the server; use slip break-lock {env} only after reviewing the holder.", if info.is_stale() { "stale" } else { "live" }));
+            result.blocked_kind = Some(BlockedKind::LockHeld);
+            result.next_step = break_lock_command(&key.checkout.to_string_lossy(), env);
+            result
+        }
+        PrepareError::Blocked(shipslip::BlockReason::FetchFailed(output)) => {
+            let mut result = CommandError::new(ErrorCode::Blocked, format!("The server could not fetch origin: {output}. Environments that require a local GitHub token must deploy through the CLI; token authentication is not available in the app."));
+            result.blocked_kind = Some(BlockedKind::FetchFailed);
+            result
+        }
         other => CommandError::new(ErrorCode::Blocked, other.to_string()),
     }
 }
@@ -1498,20 +1702,44 @@ fn cancelled() -> CommandError {
     )
 }
 
+#[cfg(test)]
+impl RunInfo {
+    /// A production deploy of shop, as the UI fixtures show it.
+    pub(crate) fn sample(handle: &str, operation: &'static str) -> Self {
+        Self {
+            handle: handle.into(),
+            project: "shop".into(),
+            checkout: "/Users/you/code/shop".into(),
+            env: "production".into(),
+            run_id: Some("1791795000000-0000beef".into()),
+            target_sha: Some("b".repeat(40)),
+            operation,
+            stage: "starting".into(),
+            production: true,
+            ssh_alias: "shop-prod".into(),
+            path: "/var/www/shop".into(),
+            maintenance: true,
+            steps: vec![
+                "composer install --no-dev".into(),
+                "php artisan migrate --force".into(),
+                "php artisan optimize".into(),
+            ],
+            run_plan: Some(RunPlan::Deploy),
+            watch_ms: Some(120_000),
+            started_at_ms: 1_791_795_000_000,
+        }
+    }
+}
+
 /// Quit dialog states for the UI fixtures: a step running with maintenance on,
 /// and a run still connecting.
 #[cfg(test)]
 pub(crate) fn sample_quit_runs() -> Vec<QuitRun> {
     use shipslip::{DeployEvent, MaintenancePhase, StepStatus};
     let info = |handle: &str, operation| RunInfo {
-        handle: handle.into(),
-        project: "shop".into(),
-        checkout: "/Users/you/code/shop".into(),
-        env: "production".into(),
         run_id: None,
         target_sha: None,
-        operation,
-        stage: "starting".into(),
+        ..RunInfo::sample(handle, operation)
     };
     let feed = RunFeed::new(info("run-1", "deploy"));
     feed.record(DeployEvent::MaintenanceStarted {
@@ -1538,16 +1766,7 @@ mod tests;
 pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, serde_json::Value> {
     use serde_json::to_value;
     use shipslip::{DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, StepStatus};
-    let info = RunInfo {
-        handle: "run-1".into(),
-        project: "shop".into(),
-        checkout: "/Users/you/code/shop".into(),
-        env: "production".into(),
-        run_id: Some("1791795000000-0000beef".into()),
-        target_sha: Some("b".repeat(40)),
-        operation: "deploy",
-        stage: "starting".into(),
-    };
+    let info = RunInfo::sample("run-1", "deploy");
     let review = DeployReview {
         handle: "review-1".into(),
         env: "production".into(),
@@ -1660,6 +1879,85 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
     watching.close();
     views.insert("succeeded", batch(&watching));
 
+    let taken = RunFeed::new(info.clone());
+    taken.record(DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
+        shipslip::AbortReason::LockLost,
+    )));
+    taken.close();
+    views.insert("lockTaken", batch(&taken));
+
+    let approved = TrustSnapshot {
+        ssh_alias: "shop-prod".into(),
+        path: "/var/www/shop".into(),
+        branch: "main".into(),
+        production: true,
+        maintenance: true,
+        steps: review.steps[..2].to_vec(),
+        ..Default::default()
+    };
+    let proposed = TrustSnapshot {
+        branch: "release".into(),
+        steps: review.steps.clone(),
+        ..approved.clone()
+    };
+    views.insert(
+        "trust",
+        to_value(TrustReview {
+            handle: "trust-1".into(),
+            env: "production".into(),
+            project: "shop".into(),
+            production: true,
+            settings: config::trust_settings(Some(&approved), &proposed)
+                .into_iter()
+                .map(TrustRow::from)
+                .collect(),
+        })
+        .unwrap(),
+    );
+
+    let mut failed_receipt = crate::fixture::run(1, "production");
+    failed_receipt["target"]["steps"] = serde_json::json!(review.steps);
+    failed_receipt["steps"][1]["status"] = "Failed".into();
+    failed_receipt["steps"][1]["exit_code"] = 1.into();
+    failed_receipt["outcome"] =
+        serde_json::json!({"FailedAtStep": {"step": 1, "partial_update": false}});
+    failed_receipt["app_left_down"] = true.into();
+    let failed_receipt: receipt::Receipt = serde_json::from_value(failed_receipt).unwrap();
+    let mut open_receipt = failed_receipt.clone();
+    open_receipt.status = ReceiptStatus::InProgress;
+    views.insert(
+        "recoveries",
+        to_value([recovery(&failed_receipt), recovery(&open_receipt)]).unwrap(),
+    );
+    views.insert(
+        "liveRuns",
+        to_value(LiveRuns {
+            runs: vec![info.clone()],
+            closed_previews: vec![ClosedPreview {
+                checkout: "/Users/you/code/shop".into(),
+                env: "staging".into(),
+                released: true,
+            }],
+        })
+        .unwrap(),
+    );
+    let checkout = Key {
+        checkout: "/Users/you/code/shop".into(),
+        env: "production".into(),
+    };
+    views.insert(
+        "lockHeld",
+        to_value(prepare_error(
+            PrepareError::LockHeld(shipslip::LockInfo {
+                owner: None,
+                age_secs: 30,
+            }),
+            &checkout,
+            "shop-prod",
+        ))
+        .unwrap(),
+    );
+
     views.insert("review", to_value(&review).unwrap());
     views.insert("runInfo", to_value(&info).unwrap());
     views.insert(
@@ -1675,6 +1973,8 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
             DeployEntry::Ready {
                 production: true,
                 needs_trust: false,
+                steps: info.steps.clone(),
+                recovery: None,
             },
         ])
         .unwrap(),

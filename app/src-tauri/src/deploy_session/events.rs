@@ -63,6 +63,8 @@ pub enum Terminal {
         summary: String,
         succeeded: bool,
         unknown: bool,
+        /// Another run took the server lock before anything ran.
+        lock_taken: bool,
     },
     Detached {
         step: usize,
@@ -366,6 +368,8 @@ impl RunFeed {
                     summary: escape_field(&outcome.summary()),
                     succeeded: outcome == DeployOutcome::Succeeded,
                     unknown: matches!(outcome, DeployOutcome::Unknown { .. }),
+                    lock_taken: outcome
+                        == DeployOutcome::AbortedBeforeChanges(shipslip::AbortReason::LockLost),
                 });
                 history.outcome = Some(outcome);
                 None
