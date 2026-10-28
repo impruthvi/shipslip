@@ -995,9 +995,33 @@ fn save_trust_store(path: &Path, store: &TrustStore) -> Result<(), ConfigError> 
     Ok(())
 }
 
-/// The settings a user reviews before trusting an environment: all of them
-/// for a first approval, only the changed ones after that.
-pub fn trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) -> Vec<String> {
+/// One approved setting's value: a single line, or the numbered recipe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustValue {
+    One(String),
+    Steps(Vec<String>),
+}
+
+/// One setting a user approves, with the value approved before if any.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustSetting {
+    pub name: &'static str,
+    /// `None` for a first approval.
+    pub previous: Option<TrustValue>,
+    pub proposed: TrustValue,
+}
+
+impl TrustSetting {
+    pub fn changed(&self) -> bool {
+        self.previous.as_ref() != Some(&self.proposed)
+    }
+}
+
+/// Every approved setting, in review order, with its previous value.
+pub fn trust_settings(
+    previous: Option<&TrustSnapshot>,
+    current: &TrustSnapshot,
+) -> Vec<TrustSetting> {
     // Destructured without `..` so a new setting must be shown here.
     let TrustSnapshot {
         ssh_alias,
@@ -1012,75 +1036,97 @@ pub fn trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) 
         logs,
         steps,
     } = current;
-    let mut lines = Vec::new();
-    let mut change = |label: &str, previous: Option<String>, current: String| {
-        if previous.as_deref() == Some(current.as_str()) {
-            return;
-        }
-        lines.push(match previous {
-            Some(previous) => format!("  {label}: {previous} -> {current}"),
-            None => format!("  {label}: {current}"),
-        });
-    };
     let log_setting = |log: &Option<String>| setting(log, "not set (Laravel default)");
     let smoke_setting = |url: &Option<String>| setting(url, "not set");
     let timezone_setting = |zone: &Option<String>| setting(zone, "not set (UTC)");
-    change(
+    let mut settings = Vec::new();
+    let mut one = |name, previous: Option<String>, proposed: String| {
+        settings.push(TrustSetting {
+            name,
+            previous: previous.map(TrustValue::One),
+            proposed: TrustValue::One(proposed),
+        })
+    };
+    one(
         "ssh",
         previous.map(|old| old.ssh_alias.clone()),
         ssh_alias.clone(),
     );
-    change("path", previous.map(|old| old.path.clone()), path.clone());
-    change(
+    one("path", previous.map(|old| old.path.clone()), path.clone());
+    one(
         "branch",
         previous.map(|old| old.branch.clone()),
         branch.clone(),
     );
-    change(
+    one(
         "production",
         previous.map(|old| old.production.to_string()),
         production.to_string(),
     );
-    change(
+    one(
         "maintenance",
         previous.map(|old| old.maintenance.to_string()),
         maintenance.to_string(),
     );
-    change(
+    one(
         "log",
         previous.map(|old| log_setting(&old.log)),
         log_setting(log),
     );
-    change(
+    one(
         "log_daily",
         previous.map(|old| old.log_daily.to_string()),
         log_daily.to_string(),
     );
-    change(
+    one(
         "smoke_url",
         previous.map(|old| smoke_setting(&old.smoke_url)),
         smoke_setting(smoke_url),
     );
-    change(
+    one(
         "timezone",
         previous.map(|old| timezone_setting(&old.timezone)),
         timezone_setting(timezone),
     );
-    change(
+    one(
         "logs",
         previous.map(|old| describe_log_channels(&old.logs)),
         describe_log_channels(logs),
     );
-    if previous.is_none_or(|old| old.steps != *steps) {
-        if let Some(old) = previous {
-            lines.push("  recipe steps before:".into());
-            for (index, step) in old.steps.iter().enumerate() {
-                lines.push(format!("    {}. {step}", index + 1));
-            }
-        }
-        lines.push("  recipe steps now:".into());
+    settings.push(TrustSetting {
+        name: "recipe steps",
+        previous: previous.map(|old| TrustValue::Steps(old.steps.clone())),
+        proposed: TrustValue::Steps(steps.clone()),
+    });
+    settings
+}
+
+/// The settings a user reviews before trusting an environment: all of them
+/// for a first approval, only the changed ones after that.
+pub fn trust_changes(previous: Option<&TrustSnapshot>, current: &TrustSnapshot) -> Vec<String> {
+    let numbered = |lines: &mut Vec<String>, steps: &[String]| {
         for (index, step) in steps.iter().enumerate() {
             lines.push(format!("    {}. {step}", index + 1));
+        }
+    };
+    let mut lines = Vec::new();
+    for setting in trust_settings(previous, current) {
+        if !setting.changed() {
+            continue;
+        }
+        match (setting.previous, setting.proposed) {
+            (previous, TrustValue::Steps(now)) => {
+                if let Some(TrustValue::Steps(before)) = previous {
+                    lines.push("  recipe steps before:".into());
+                    numbered(&mut lines, &before);
+                }
+                lines.push("  recipe steps now:".into());
+                numbered(&mut lines, &now);
+            }
+            (Some(TrustValue::One(before)), TrustValue::One(now)) => {
+                lines.push(format!("  {}: {before} -> {now}", setting.name))
+            }
+            (_, TrustValue::One(now)) => lines.push(format!("  {}: {now}", setting.name)),
         }
     }
     lines
@@ -1822,6 +1868,34 @@ mod tests {
         assert_eq!(
             trust_changes(Some(&snapshot), &changed),
             ["  smoke_url: https://staging.example.test/ -> not set"]
+        );
+
+        let settings = trust_settings(Some(&snapshot), &changed);
+        assert_eq!(settings.len(), 11);
+        let changed_rows: Vec<_> = settings.iter().filter(|s| s.changed()).collect();
+        assert_eq!(
+            changed_rows,
+            [&TrustSetting {
+                name: "smoke_url",
+                previous: Some(TrustValue::One("https://staging.example.test/".into())),
+                proposed: TrustValue::One("not set".into()),
+            }]
+        );
+        assert!(trust_settings(None, &snapshot)
+            .iter()
+            .all(|s| s.changed() && s.previous.is_none()));
+
+        changed.steps.push("php artisan optimize".into());
+        assert_eq!(
+            trust_changes(Some(&snapshot), &changed),
+            [
+                "  smoke_url: https://staging.example.test/ -> not set",
+                "  recipe steps before:",
+                "    1. php artisan migrate --force",
+                "  recipe steps now:",
+                "    1. php artisan migrate --force",
+                "    2. php artisan optimize",
+            ]
         );
     }
 }

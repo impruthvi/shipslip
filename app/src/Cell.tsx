@@ -2,7 +2,8 @@ import type { CompareLine } from "./compare";
 import { Mark, markLabel } from "./Mark";
 import type { PaneView } from "./slipTarget";
 import { lowerFirst } from "./text";
-import type { CellView, EnvCellView, FlagView, Tone } from "./types";
+import { elapsed } from "./time";
+import type { CellView, EnvCellView, FlagView, RunInfo, Tone } from "./types";
 import { WarningIcon } from "./Warning";
 
 const toneClass: Record<Tone, string> = { good: "tone-good", bad: "tone-bad", neutral: "" };
@@ -86,12 +87,25 @@ function compareText(line: CompareLine): { text: string; muted: boolean } {
   }
 }
 
+/** A live cell's outcome line, e.g. "Deploying… 2m 14s". */
+export function liveText(run: Pick<RunInfo, "operation" | "startedAtMs">, now: number): string {
+  const doing = { deploy: "Deploying…", up: "Bringing app up…", attach: "Attaching…" }[run.operation];
+  return `${doing} ${elapsed(now - run.startedAtMs)}`;
+}
+
 /** What a screen reader says for a cell: where it is, then the cell's lines
  * in reading order, e.g. "shop, production, recorded code a1b2c3d, 3d ago,
  * Succeeded". The target and the receipt's details are left to the pane. */
-export function cellName(label: string, env: string, cell: CellView, compareLine?: CompareLine): string {
+export function cellName(
+  label: string,
+  env: string,
+  cell: CellView,
+  compareLine?: CompareLine,
+  live?: string,
+): string {
   if (cell.kind === "absent") return `${label}, ${env}, none`;
   const parts = [label, env];
+  if (live) parts.push(live);
   parts.push(cell.shortSha ? `${markLabel[cell.mark]} ${cell.shortSha}` : cell.words);
   if (cell.age) parts.push(cell.age);
   parts.push(...cell.qualifiers);
@@ -115,9 +129,11 @@ interface Props {
   compareLine?: CompareLine;
   /** Opens one of the cell's other receipts in the pane. */
   onOpen?: (view: PaneView) => void;
+  /** A run going now: its outcome line. */
+  live?: string;
 }
 
-export function Cell({ cell, selected = false, compareLine, onOpen }: Props) {
+export function Cell({ cell, selected = false, compareLine, onOpen, live }: Props) {
   const never = cell.mark === "noCode" && cell.receipt === null;
   const state = stateLine(cell);
   const last = cell.lastAttempt;
@@ -126,7 +142,7 @@ export function Cell({ cell, selected = false, compareLine, onOpen }: Props) {
       className={`cell${cell.mark === "notKnown" ? " cell-hatched" : ""}${never ? " cell-empty" : ""}${selected ? " cell-selected" : ""}`}
     >
       <div className="cell-head">
-        <Mark kind={cell.mark} muted={never} />
+        <Mark kind={live ? "live" : cell.mark} muted={never && !live} />
         {cell.shortSha ? (
           <>
             <span className="cell-sha mono" title={cell.sha ?? undefined}>
@@ -145,7 +161,11 @@ export function Cell({ cell, selected = false, compareLine, onOpen }: Props) {
           onOpen={index === 0 && cell.staleReceipt !== null && onOpen ? () => onOpen("stale") : undefined}
         />
       ))}
-      {state && <div className={`cell-line ${state.className}`}>{state.text}</div>}
+      {live ? (
+        <div className="cell-line muted cell-live">{live}</div>
+      ) : (
+        state && <div className={`cell-line ${state.className}`}>{state.text}</div>
+      )}
       {compareLine && <CompareRow line={compareLine} />}
       {cell.flags.map((flag) => (
         <Flag key={flag.text} flag={flag} />

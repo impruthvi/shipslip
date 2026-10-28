@@ -1,11 +1,12 @@
 // What the Running screen draws, worked out from `RunBatch`es.
 
 import type {
-  DeployReview,
   OutputLine,
   OutputSource,
   Progress,
   RunBatch,
+  RunInfo,
+  RunPlan,
   RunState,
   Terminal,
 } from "./types";
@@ -43,33 +44,43 @@ export interface RunRow {
   owns: (source: OutputSource) => boolean;
 }
 
-/** Every step the run may take, in order, with what is known of each. */
-export function runRows(review: DeployReview, state: RunState): RunRow[] {
+/** The first recipe step a plan runs; 0 means it starts with the fast-forward. */
+export function firstStep(plan: RunPlan): number {
+  if (plan === "Deploy") return 0;
+  if (plan === "Rerun") return 1;
+  return plan.FromStep;
+}
+
+/** Every step the run may take, in order, with what is known of each.
+ * Bringing the app up has one row; skipped recipe steps are shown as such. */
+export function runRows(info: RunInfo, state: RunState): RunRow[] {
   const rows: RunRow[] = [];
-  if (review.maintenance) {
-    rows.push({
-      index: "on",
-      command: "Maintenance on: php artisan down",
-      progress: state.maintenanceDown,
-      owns: (s) => s.kind === "maintenance" && s.phase === "Down",
-    });
-  }
+  const on: RunRow = {
+    index: "on",
+    command: "Maintenance on: php artisan down",
+    progress: state.maintenanceDown,
+    owns: (s) => s.kind === "maintenance" && s.phase === "Down",
+  };
+  const off: RunRow = {
+    index: "off",
+    command: "Maintenance off: php artisan up",
+    progress: state.maintenanceUp,
+    owns: (s) => s.kind === "maintenance" && s.phase === "Up",
+  };
+  if (info.runPlan === null) return [off];
+  const first = firstStep(info.runPlan);
   const step = (index: number, command: string): RunRow => ({
     index: String(index),
     command: state.steps[index]?.name ?? command,
-    progress: state.steps[index] ?? null,
+    progress:
+      state.steps[index] ??
+      (index > 0 && index < first ? { name: null, status: "Skipped", exitCode: null } : null),
     owns: (s) => s.kind === "step" && s.index === index,
   });
-  rows.push(step(0, `git fast-forward to ${review.targetSha.slice(0, 7)}`));
-  review.steps.forEach((command, i) => rows.push(step(i + 1, command)));
-  if (review.maintenance) {
-    rows.push({
-      index: "off",
-      command: "Maintenance off: php artisan up",
-      progress: state.maintenanceUp,
-      owns: (s) => s.kind === "maintenance" && s.phase === "Up",
-    });
-  }
+  if (info.maintenance) rows.push(on);
+  if (first === 0) rows.push(step(0, `git fast-forward to ${(info.targetSha ?? "").slice(0, 7)}`));
+  info.steps.forEach((command, i) => rows.push(step(i + 1, command)));
+  if (info.maintenance) rows.push(off);
   return rows;
 }
 

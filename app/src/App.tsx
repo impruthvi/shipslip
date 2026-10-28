@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAnnouncer } from "./Announcer";
 import { ComparePicker } from "./ComparePicker";
-import { DeployEntryBar, useDeployEntry } from "./DeployEntry";
+import { liveText } from "./Cell";
+import { DeployEntryBar, useDeployEntry, type EntryChoice } from "./DeployEntry";
 import { Footer } from "./Footer";
 import { MapArea } from "./MapArea";
 import { useNarrow, usePaneWidth } from "./pane";
@@ -11,8 +12,10 @@ import { useCompare } from "./useCompare";
 import { useReceipt, type Request } from "./useReceipt";
 import { useReleaseMap } from "./useReleaseMap";
 import { useSeen } from "./useSeen";
+import { useLiveRuns } from "./useLiveRuns";
 import { useSelection } from "./useSelection";
-import { Workspace, type DeployTarget, type Leave } from "./Workspace";
+import { Workspace, type DeployTarget, type Leave, type Start } from "./Workspace";
+import type { RunInfo } from "./types";
 
 const cellKey = (repoRoot: string, env: string) => `${repoRoot}\n${env}`;
 
@@ -32,10 +35,16 @@ export default function App() {
   const [paneView, setPaneView] = useState<{ key: string; view: PaneView } | null>(null);
   /** Set by a keyboard open; the pane focuses the slip once it shows that receipt. */
   const [focusReceipt, setFocusReceipt] = useState(false);
-  const [workspace, setWorkspace] = useState<DeployTarget | null>(null);
-  /** Leaving the workspace returns focus to "Review deploy…". */
-  const [focusEntry, setFocusEntry] = useState(false);
+  const [workspace, setWorkspace] = useState<{ target: DeployTarget; start: Start } | null>(null);
+  /** Leaving the workspace returns focus to "Review deploy…", or to the
+   * toolbar's run link when a run keeps going. */
+  const [focusEntry, setFocusEntry] = useState<"entry" | "runs" | null>(null);
   const entryButton = useRef<HTMLButtonElement>(null);
+  const runsButton = useRef<HTMLButtonElement>(null);
+  /** Asks "Review deploy…" again after approvals and runs. */
+  const [entryVersion, setEntryVersion] = useState(0);
+  const [approved, setApproved] = useState<{ key: string; env: string } | null>(null);
+  const [runsMenu, setRunsMenu] = useState(false);
   const { announce, regions } = useAnnouncer();
   const selectedRef = useRef(selected);
   const narrowRef = useRef(narrow);
@@ -65,34 +74,87 @@ export default function App() {
     loaded && selected && !workspace
       ? { generation: loaded.generation, row: selected.row, env: selected.env }
       : null,
+    entryVersion,
   );
-  const onReview = () => {
+  // A run that ended away from the workspace shows on its cell; the selection stays.
+  const { live, now } = useLiveRuns(
+    useCallback(() => {
+      refresh();
+      setEntryVersion((v) => v + 1);
+    }, [refresh]),
+  );
+  const liveLines: Record<string, string> = {};
+  for (const run of live.runs) liveLines[cellKey(run.checkout, run.env)] = liveText(run, now);
+  const closed = live.closedPreviews.find(
+    (preview) => selected && cellKey(preview.checkout, preview.env) === selectedKey,
+  );
+  const notice =
+    approved && approved.key === selectedKey
+      ? `Configuration approved for ${approved.env}`
+      : closed
+        ? closed.released
+          ? "The preview closed when the window reloaded. The server lock was released; nothing ran."
+          : "The preview closed when the window reloaded. Nothing ran, but the server lock could not be released."
+        : null;
+
+  const onChoose = (choice: EntryChoice) => {
     if (!loaded || !selected || !row || entry?.kind !== "ready") return;
-    setWorkspace({
+    const target = {
       generation: loaded.generation,
       row: selected.row,
       env: selected.env,
       label: row.label,
       production: entry.production,
+    };
+    let start: Start;
+    if (entry.needsTrust) start = { kind: "trust" };
+    else if (choice.kind === "review") start = { kind: "deploy", plan: "Deploy" };
+    else if (choice.kind === "rerun") start = { kind: "deploy", plan: "Rerun" };
+    else if (choice.kind === "fromStep") start = { kind: "pick", steps: entry.steps, step: choice.step };
+    else start = { kind: choice.kind };
+    setApproved(null);
+    setWorkspace({ target, start });
+  };
+  /** The toolbar's way back to a run: its cell is selected, then its run shown. */
+  const follow = (run: RunInfo) => {
+    setRunsMenu(false);
+    const r = map?.rows.findIndex((x) => x.repoRoot === run.checkout) ?? -1;
+    const col = map?.envs.indexOf(run.env) ?? -1;
+    if (map && r >= 0 && col >= 0 && map.rows[r].cells[col].kind === "present") select(r, col);
+    setWorkspace({
+      target: {
+        generation: loaded?.generation ?? 0,
+        row: r,
+        env: run.env,
+        label: r >= 0 && map ? map.rows[r].label : run.project,
+        production: run.production,
+      },
+      start: { kind: "follow", info: run },
     });
   };
   const onLeave = useCallback(
     (how: Leave) => {
+      const left = workspaceRef.current;
       setWorkspace(null);
-      setFocusEntry(true);
+      setFocusEntry(how === "away" ? "runs" : "entry");
+      setEntryVersion((v) => v + 1);
+      if (how === "approved" && left) {
+        setApproved({ key: selectedKey ?? "", env: left.target.env });
+      }
       if (how === "finished") {
         // The new receipt opens in the pane, on the same cell.
         setDrawerOpen(true);
         refresh();
       }
     },
-    [refresh],
+    [refresh, selectedKey],
   );
   useEffect(() => {
-    if (!focusEntry || !entryButton.current) return;
-    entryButton.current.focus();
-    setFocusEntry(false);
-  }, [focusEntry, entry]);
+    const button = focusEntry === "runs" ? runsButton.current : entryButton.current;
+    if (!focusEntry || !button) return;
+    button.focus();
+    setFocusEntry(null);
+  }, [focusEntry, entry, live]);
 
   const onSelect = useCallback(
     (r: number, col: number, next: PaneView = "code") => {
@@ -156,6 +218,41 @@ export default function App() {
           {map?.screen === "map" && !workspace && (
             <ComparePicker envs={map.envs} pair={pair} onChange={setPair} />
           )}
+          {!workspace && live.runs.length === 1 && (
+            <button
+              type="button"
+              ref={runsButton}
+              className="toolbar-button"
+              onClick={() => follow(live.runs[0])}
+            >
+              1 deploy running · {live.runs[0].project} → {live.runs[0].env}
+            </button>
+          )}
+          {!workspace && live.runs.length > 1 && (
+            <div className="runs-menu">
+              <button
+                type="button"
+                ref={runsButton}
+                className="toolbar-button"
+                aria-expanded={runsMenu}
+                aria-controls="runs-menu-list"
+                onClick={() => setRunsMenu(!runsMenu)}
+              >
+                {live.runs.length} deploys running <span aria-hidden>▾</span>
+              </button>
+              {runsMenu && (
+                <ul id="runs-menu-list" className="runs-menu-list">
+                  {live.runs.map((run) => (
+                    <li key={run.handle}>
+                      <button type="button" className="toolbar-button" onClick={() => follow(run)}>
+                        {run.project} → {run.env}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           {narrow && request && !workspace && (
             <button
               type="button"
@@ -168,13 +265,18 @@ export default function App() {
           )}
         </header>
         {workspace ? (
-          <Workspace target={workspace} onLeave={onLeave} announce={announce} />
+          <Workspace
+            target={workspace.target}
+            start={workspace.start}
+            onLeave={onLeave}
+            announce={announce}
+          />
         ) : (
           <>
             <div className="title">
               <h1>Release map</h1>
               <p className="muted">
-                Last recorded code on each app and environment. Nothing here is live.
+                Last recorded code on each app and environment. Deploys started here show live.
               </p>
             </div>
             <div className="map-area">
@@ -187,6 +289,7 @@ export default function App() {
                 onProblem={onProblem}
                 onCellFocus={onCellFocus}
                 compare={pair ? { pair, lines } : null}
+                live={liveLines}
               />
             </div>
             <Footer state={state} onRetry={refresh} />
@@ -204,7 +307,14 @@ export default function App() {
           width={width}
           onResize={resize}
           drawer={narrow}
-          entry={<DeployEntryBar entry={entry} onReview={onReview} buttonRef={entryButton} />}
+          entry={
+            <DeployEntryBar
+              entry={entry}
+              notice={notice}
+              onChoose={onChoose}
+              buttonRef={entryButton}
+            />
+          }
         />
       )}
       {regions}

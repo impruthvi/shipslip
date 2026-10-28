@@ -11,7 +11,7 @@ use shipslip::receipt::{default_receipts_root, overview, ReceiptError};
 use tauri::async_runtime::spawn_blocking;
 
 use crate::deploy_session::{
-    CommandError, CurrentRuns, DeployEntry, DeployReview, Ending, ErrorCode, OpenSsh,
+    CommandError, CurrentRuns, DeployEntry, DeployReview, Ending, ErrorCode, LiveRuns, OpenSsh,
     PrepareProgress, QuitRun, RecoveryReview, RunBatch, RunInfo, RunStop, Sessions, TrustReview,
 };
 use crate::finish::{self, Unseen};
@@ -114,7 +114,7 @@ impl App {
 
     fn load_map(&self) -> LoadResult {
         self.state.load_map(now_ms, || match &self.paths {
-            Ok((root, trust)) => overview(root, trust),
+            Ok((root, trust)) => overview(root, trust).map(crate::state::with_configured_envs),
             Err(reason) => Err(ReceiptError::Invalid(reason.clone())),
         })
     }
@@ -399,6 +399,12 @@ pub async fn review_attach(
 ) -> Result<RecoveryReview, CommandError> {
     let checkout = app.selection(generation, row, &env)?;
     app.sessions()?.review_attach(checkout, env).await
+}
+
+/// Live runs for the map's cells and toolbar, polled while the window is open.
+#[tauri::command]
+pub fn live_runs(app: tauri::State<'_, Arc<App>>) -> Result<LiveRuns, CommandError> {
+    Ok(app.sessions()?.live_runs())
 }
 
 #[tauri::command]

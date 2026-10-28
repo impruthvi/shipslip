@@ -7,8 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
+use shipslip::config::LoadedConfig;
 use shipslip::git::{Comparison, Git};
-use shipslip::receipt::{compare_envs_with, read, Overview, ReceiptError};
+use shipslip::receipt::{compare_envs_with, read, CodeState, EnvCell, Overview, ReceiptError};
 
 use crate::receipt_view::{slip, SlipView};
 use crate::view::{self, compare_view, CompareView, Locators, MapView};
@@ -280,11 +281,45 @@ impl Drop for ReleaseOnPanic<'_> {
     }
 }
 
+/// Adds each checkout's configured envs that have no cell yet, as never
+/// deployed, so "Review deploy…" can reach them. A config that can't be read
+/// adds nothing; the env's entry explains why when there is a cell.
+pub fn with_configured_envs(mut overview: Overview) -> Overview {
+    for repo in overview.repos.iter_mut().filter(|repo| !repo.path_missing) {
+        let Ok(config) = LoadedConfig::load(Path::new(&repo.repo_root), None) else {
+            continue;
+        };
+        if config.repo_root() != Path::new(&repo.repo_root) {
+            continue;
+        }
+        for env in config.environment_names() {
+            if repo.envs.iter().any(|cell| cell.env == env) {
+                continue;
+            }
+            repo.envs.push(EnvCell {
+                env: env.into(),
+                approved: false,
+                approved_target: None,
+                code: CodeState::NeverDeployed,
+                last_attempt: None,
+                code_run: None,
+                stale_hint: None,
+                target: None,
+                newer_elsewhere: None,
+            });
+        }
+        repo.envs.sort_by(|a, b| a.env.cmp(&b.env));
+    }
+    overview
+}
+
 #[cfg(test)]
 mod tests {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
+
+    use std::fs;
 
     use serde_json::json;
     use shipslip::receipt::overview;
@@ -323,6 +358,43 @@ mod tests {
             state.resolve_target(generation, 0, "production"),
             Err(SelectionError::Stale)
         );
+    }
+
+    #[test]
+    fn configured_envs_without_runs_or_approval_show_as_never_deployed() {
+        let fx = Fixture::new();
+        let root = fx.dir().join("shop");
+        fs::create_dir_all(&root).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::write(
+            root.join(".shipslip.toml"),
+            "[project]\nname = \"app\"\nstack = \"laravel\"\n\
+             [env.production]\nssh = \"web1\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = true\n\
+             [env.staging]\nssh = \"web2\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = false\n",
+        )
+        .unwrap();
+        let root = fs::canonicalize(root).unwrap();
+        let mut receipt = run(1, "production");
+        receipt["repo_root"] = json!(root.to_string_lossy());
+        fx.save(&receipt);
+
+        let shown = with_configured_envs(overview(&fx.receipts(), &fx.trust()).unwrap());
+        let envs: Vec<_> = shown.repos[0].envs.iter().map(|c| c.env.as_str()).collect();
+        assert_eq!(envs, ["production", "staging"]);
+        let staging = &shown.repos[0].envs[1];
+        assert_eq!(staging.code, CodeState::NeverDeployed);
+        assert!(!staging.approved);
+        assert!(staging.last_attempt.is_none());
+
+        // A checkout that is gone or has no config adds nothing.
+        fs::remove_file(root.join(".shipslip.toml")).unwrap();
+        let shown = with_configured_envs(overview(&fx.receipts(), &fx.trust()).unwrap());
+        assert_eq!(shown.repos[0].envs.len(), 1);
     }
 
     const NOW: u128 = 1_000_000;

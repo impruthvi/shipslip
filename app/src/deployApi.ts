@@ -5,10 +5,13 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   DeployEntry,
   DeployReview,
+  LiveRuns,
   PrepareProgress,
+  RecoveryReview,
   RunBatch,
   RunInfo,
   RunPlan,
+  TrustReview,
 } from "./types";
 
 /** Rejections carry a `CommandError`. */
@@ -22,6 +25,12 @@ export interface DeployBackend {
     plan: RunPlan,
     onProgress: (phase: PrepareProgress) => void,
   ): Promise<DeployReview>;
+  /** The env's settings, each with the value approved before. */
+  reviewTrust(generation: number, row: number, env: string): Promise<TrustReview>;
+  /** Approves exactly the reviewed settings; the env name must be typed. */
+  approveTrust(handle: string, typedEnv: string): Promise<void>;
+  reviewUp(generation: number, row: number, env: string): Promise<RecoveryReview>;
+  reviewAttach(generation: number, row: number, env: string): Promise<RecoveryReview>;
   /** Starts the reviewed run. Production needs the env name typed. */
   confirm(handle: string, typedEnv: string | null): Promise<RunInfo>;
   /** Releases a review's server lock. */
@@ -30,6 +39,8 @@ export interface DeployBackend {
    * Resolves to an unsubscribe. */
   follow(handle: string, onBatch: (batch: RunBatch) => void): Promise<() => void>;
   stop(handle: string, stop: "afterStep" | "watch"): Promise<void>;
+  /** Runs going now, and previews the last reload closed. */
+  liveRuns(): Promise<LiveRuns>;
 }
 
 const tauriDeploy: DeployBackend = {
@@ -39,6 +50,12 @@ const tauriDeploy: DeployBackend = {
     progress.onmessage = onProgress;
     return invoke<DeployReview>("prepare_deploy", { generation, row, env, plan, progress });
   },
+  reviewTrust: (generation, row, env) =>
+    invoke<TrustReview>("review_trust", { generation, row, env }),
+  approveTrust: (handle, typedEnv) => invoke("approve_trust", { handle, typedEnv }),
+  reviewUp: (generation, row, env) => invoke<RecoveryReview>("review_up", { generation, row, env }),
+  reviewAttach: (generation, row, env) =>
+    invoke<RecoveryReview>("review_attach", { generation, row, env }),
   confirm: (handle, typedEnv) => invoke<RunInfo>("confirm_deploy", { handle, typedEnv }),
   cancel: (handle) => invoke("cancel_deploy", { handle }),
   follow: async (handle, onBatch) => {
@@ -56,6 +73,7 @@ const tauriDeploy: DeployBackend = {
     };
   },
   stop: (handle, stop) => invoke("stop_run", { handle, stop }),
+  liveRuns: () => invoke<LiveRuns>("live_runs"),
 };
 
 let backend: Promise<DeployBackend> | undefined;
@@ -74,8 +92,13 @@ function getBackend(): Promise<DeployBackend> {
 export const deploy: DeployBackend = {
   entry: async (...args) => (await getBackend()).entry(...args),
   prepare: async (...args) => (await getBackend()).prepare(...args),
+  reviewTrust: async (...args) => (await getBackend()).reviewTrust(...args),
+  approveTrust: async (...args) => (await getBackend()).approveTrust(...args),
+  reviewUp: async (...args) => (await getBackend()).reviewUp(...args),
+  reviewAttach: async (...args) => (await getBackend()).reviewAttach(...args),
   confirm: async (...args) => (await getBackend()).confirm(...args),
   cancel: async (handle) => (await getBackend()).cancel(handle),
   follow: async (...args) => (await getBackend()).follow(...args),
   stop: async (...args) => (await getBackend()).stop(...args),
+  liveRuns: async () => (await getBackend()).liveRuns(),
 };

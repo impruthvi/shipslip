@@ -12,6 +12,7 @@ mod finish;
 mod fixture;
 mod git_path;
 mod receipt_view;
+mod recovery;
 mod state;
 #[cfg(test)]
 mod ui_fixtures;
@@ -81,6 +82,7 @@ fn main() {
             commands::review_up,
             commands::review_attach,
             commands::current_runs,
+            commands::live_runs,
             commands::subscribe_run,
             commands::ack_run,
             commands::unsubscribe_run,
@@ -180,6 +182,7 @@ mod tests {
                 "allow-current-runs",
                 "allow-deploy-entry",
                 "allow-detach-and-quit",
+                "allow-live-runs",
                 "allow-load-map",
                 "allow-load-receipt",
                 "allow-prepare-deploy",

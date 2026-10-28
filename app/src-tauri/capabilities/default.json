@@ -21,6 +21,7 @@
     "allow-review-up",
     "allow-review-attach",
     "allow-current-runs",
+    "allow-live-runs",
     "allow-subscribe-run",
     "allow-ack-run",
     "allow-unsubscribe-run",

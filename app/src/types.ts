@@ -213,7 +213,77 @@ export type DeployEntry =
   | { kind: "hidden" }
   | { kind: "unavailable"; reason: string }
   | { kind: "running"; handle: string }
-  | { kind: "ready"; production: boolean; needsTrust: boolean };
+  | {
+      kind: "ready";
+      production: boolean;
+      needsTrust: boolean;
+      /** Recipe steps 1..N, for picking where a run starts. */
+      steps: string[];
+      /** What this checkout's newest run left to do. */
+      recovery: RecoveryView | null;
+    };
+
+/** One way to continue after a run, with the CLI command that does the same. */
+export type RecoveryAction = (
+  | { kind: "fromStep"; step: number }
+  | { kind: "attach" }
+  | { kind: "up" }
+) & { command: string };
+
+export interface RecoveryView {
+  runId: string;
+  sentence: string;
+  /** What to do first when nothing is safe to run yet. */
+  advice: string | null;
+  /** The recommended action first. */
+  actions: RecoveryAction[];
+}
+
+/** One setting under review; values are lines of untrusted display text. */
+export interface TrustRow {
+  name: string;
+  /** null for a first approval. */
+  previous: string[] | null;
+  proposed: string[];
+  /** The lines are the numbered recipe steps. */
+  steps: boolean;
+  changed: boolean;
+}
+
+export interface TrustReview {
+  handle: string;
+  env: string;
+  project: string;
+  production: boolean;
+  settings: TrustRow[];
+}
+
+/** Attach or Up, reviewed before it runs (`review_attach`, `review_up`). */
+export interface RecoveryReview {
+  handle: string;
+  env: string;
+  production: boolean;
+  operation: "up" | "attach";
+  sshAlias: string;
+  path: string;
+  runId: string | null;
+  targetSha: string | null;
+  phase: string;
+  remainingSteps: string[];
+}
+
+/** A preview the window's reload closed. Nothing ran on the server. */
+export interface ClosedPreview {
+  checkout: string;
+  env: string;
+  released: boolean;
+}
+
+/** `live_runs`: polled for the map's cells and toolbar. */
+export interface LiveRuns {
+  runs: RunInfo[];
+  closedPreviews: ClosedPreview[];
+}
 
 /** Sent on the `prepare_deploy` channel as each phase starts. */
 export type PrepareProgress =
@@ -264,6 +334,7 @@ export interface CommandError {
   code: ErrorCode;
   message: string;
   connectionKind?: "hostKeyUnknown" | "hostKeyChanged" | "keyNotLoaded" | "other";
+  blockedKind?: "lockHeld" | "fetchFailed";
   nextStep?: Span;
 }
 
@@ -276,6 +347,16 @@ export interface RunInfo {
   targetSha: string | null;
   operation: "deploy" | "up" | "attach";
   stage: string;
+  production: boolean;
+  sshAlias: string;
+  path: string;
+  maintenance: boolean;
+  /** Recipe steps 1..N. */
+  steps: string[];
+  /** null when bringing the app up. */
+  runPlan: RunPlan | null;
+  watchMs: number | null;
+  startedAtMs: number;
 }
 
 export type ProgressStatus =
@@ -294,7 +375,15 @@ export interface Progress {
 }
 
 export type Terminal =
-  | { kind: "finished"; label: string; summary: string; succeeded: boolean; unknown: boolean }
+  | {
+      kind: "finished";
+      label: string;
+      summary: string;
+      succeeded: boolean;
+      unknown: boolean;
+      /** Another run took the server lock before anything ran. */
+      lockTaken: boolean;
+    }
   | { kind: "detached"; step: number }
   | { kind: "interrupted"; step: number; reason: string }
   | { kind: "error"; reason: string };

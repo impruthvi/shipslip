@@ -64,7 +64,13 @@ fn trust_approval_is_exact_single_use_and_does_not_contact_ssh() {
             .review_trust(root.clone(), "production".into())
             .await
             .unwrap();
-        assert!(!review.changes.is_empty());
+        assert!(review.production);
+        assert!(review
+            .settings
+            .iter()
+            .all(|row| row.changed && row.previous.is_none()));
+        let steps = review.settings.iter().find(|row| row.steps).unwrap();
+        assert_eq!(steps.proposed, ["true"]);
         assert_eq!(
             sessions
                 .approve_trust(&review.handle, "staging")
@@ -126,6 +132,32 @@ fn changed_settings_and_reload_require_a_new_trust_review() {
             ErrorCode::InvalidHandle
         );
         assert!(!fx.trust().exists());
+    });
+}
+
+#[test]
+fn trust_review_shows_previous_and_proposed_values_for_changed_settings() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        approve(&sessions, &root).await;
+        let path = root.join(".shipslip.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace("/srv/app", "/srv/other")).unwrap();
+        let review = sessions
+            .review_trust(root, "production".into())
+            .await
+            .unwrap();
+        let changed: Vec<_> = review.settings.iter().filter(|row| row.changed).collect();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].name, "path");
+        assert_eq!(
+            changed[0].previous.as_deref(),
+            Some(&["/srv/app".to_string()][..])
+        );
+        assert_eq!(changed[0].proposed, ["/srv/other"]);
+        assert_eq!(review.settings.len(), 11);
     });
 }
 
@@ -310,8 +342,9 @@ fn preview_cancel_is_single_use_and_reload_releases_its_lock() {
             sessions.cancel(&preview.handle).await.unwrap_err().code,
             ErrorCode::InvalidHandle
         );
+        assert!(sessions.live_runs().closed_previews.is_empty());
         let preview = sessions
-            .prepare(root, "production".into(), shipslip::RunPlan::Deploy)
+            .prepare(root.clone(), "production".into(), shipslip::RunPlan::Deploy)
             .await
             .unwrap();
         sessions.invalidate_page();
@@ -326,6 +359,21 @@ fn preview_cancel_is_single_use_and_reload_releases_its_lock() {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         assert!(!remote.held.load(Ordering::SeqCst));
+
+        // The reloaded view hears which preview closed and that its lock went back.
+        until(|| !sessions.live_runs().closed_previews.is_empty());
+        let closed = sessions.live_runs().closed_previews;
+        assert_eq!(closed.len(), 1);
+        assert_eq!(closed[0].env, "production");
+        assert_eq!(closed[0].checkout, root.to_string_lossy());
+        assert!(closed[0].released);
+        // Preparing again clears the notice.
+        let preview = sessions
+            .prepare(root, "production".into(), shipslip::RunPlan::Deploy)
+            .await
+            .unwrap();
+        assert!(sessions.live_runs().closed_previews.is_empty());
+        sessions.cancel(&preview.handle).await.unwrap();
     });
 }
 
@@ -1103,14 +1151,11 @@ fn reload_replaces_the_view_subscription_and_replays_without_remote_attach() {
 
 fn display_feed() -> Arc<RunFeed> {
     RunFeed::new(RunInfo {
-        handle: "display-run".into(),
         project: "example".into(),
         checkout: "/work/app".into(),
-        env: "production".into(),
         run_id: Some("recorded-run".into()),
         target_sha: Some(crate::fixture::NEW.into()),
-        operation: "deploy",
-        stage: "starting".into(),
+        ..RunInfo::sample("display-run", "deploy")
     })
 }
 
@@ -1590,7 +1635,9 @@ fn deploy_entry_says_why_an_env_cannot_be_deployed_and_when_trust_comes_first() 
             entry("production").await,
             DeployEntry::Ready {
                 production: true,
-                needs_trust: true
+                needs_trust: true,
+                steps: vec!["true".into()],
+                recovery: None,
             }
         );
         assert_eq!(entry("staging").await, DeployEntry::Hidden);
@@ -1599,7 +1646,9 @@ fn deploy_entry_says_why_an_env_cannot_be_deployed_and_when_trust_comes_first() 
             entry("production").await,
             DeployEntry::Ready {
                 production: true,
-                needs_trust: false
+                needs_trust: false,
+                steps: vec!["true".into()],
+                recovery: None,
             }
         );
 
@@ -1623,6 +1672,12 @@ fn deploy_entry_says_why_an_env_cannot_be_deployed_and_when_trust_comes_first() 
                 handle: run.handle.clone()
             }
         );
+        let live = sessions.live_runs().runs;
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].handle, run.handle);
+        assert_eq!(live[0].steps, ["true"]);
+        assert_eq!(live[0].run_plan, Some(RunPlan::Deploy));
+        assert!(live[0].started_at_ms > 0);
         release.send(()).await.unwrap();
         until(|| sessions.current_runs().runs.is_empty());
 
@@ -1671,4 +1726,107 @@ fn stop_reaches_only_a_run_that_is_running() {
         let stop: RunStop = serde_json::from_str(r#""afterStep""#).unwrap();
         assert_eq!(stop, RunStop::AfterStep);
     });
+}
+
+#[test]
+fn recovery_comes_from_this_checkouts_newest_receipt() {
+    use crate::fixture::run;
+    use serde_json::json;
+    let fx = Fixture::new();
+    let newest = |checkout: &str| {
+        newest_run(&fx.receipts(), "app", "production", Path::new(checkout))
+            .map(|receipt| receipt.run_id)
+    };
+    assert_eq!(newest("/work/app"), None);
+
+    let mut failed = run(1, "production");
+    failed["outcome"] = json!({"FailedAtStep": {"step": 1, "partial_update": false}});
+    fx.save(&failed);
+    assert_eq!(newest("/work/app").as_deref(), Some("00000001-0"));
+    let receipt = newest_run(&fx.receipts(), "app", "production", Path::new("/work/app")).unwrap();
+    assert!(recovery(&receipt).is_some());
+
+    // Another checkout's newer run does not hide this one's.
+    let mut other = run(2, "production");
+    other["repo_root"] = json!("/work/other");
+    fx.save(&other);
+    assert_eq!(newest("/work/app").as_deref(), Some("00000001-0"));
+
+    // A newer success leaves nothing to recover.
+    fx.save(&run(3, "production"));
+    assert_eq!(newest("/work/app").as_deref(), Some("00000003-0"));
+
+    // An unreadable newer receipt may be the run that matters: no guess.
+    let dir = fx.receipts().join("app").join("production");
+    std::fs::write(dir.join("4000-00000004-0.json"), "{").unwrap();
+    assert_eq!(newest("/work/app"), None);
+}
+
+#[test]
+fn a_lock_taken_while_the_preview_was_open_ends_before_anything_ran() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        let review = sessions
+            .prepare(root, "production".into(), RunPlan::Deploy)
+            .await
+            .unwrap();
+        // Another run broke and took the lock while the preview was open.
+        remote.held.store(false, Ordering::SeqCst);
+        let run = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        until(|| sessions.current_runs().runs.is_empty());
+        let ended = sessions
+            .current_runs()
+            .recent
+            .into_iter()
+            .find(|snapshot| snapshot.info.handle == run.handle)
+            .unwrap();
+        let terminal = serde_json::to_value(ended.state.terminal).unwrap();
+        assert_eq!(terminal["kind"], "finished");
+        assert_eq!(terminal["lockTaken"], true, "{terminal}");
+        assert_eq!(remote.launches.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn lock_held_refusals_say_live_or_stale_and_offer_break_lock() {
+    let key = Key {
+        checkout: "/work/app".into(),
+        env: "production".into(),
+    };
+    let held = |age_secs| {
+        prepare_error(
+            PrepareError::LockHeld(shipslip::LockInfo {
+                owner: None,
+                age_secs,
+            }),
+            &key,
+            "web1",
+        )
+    };
+    let live = held(30);
+    assert_eq!(live.blocked_kind, Some(BlockedKind::LockHeld));
+    assert!(live.message.contains("(live)"), "{}", live.message);
+    let Some(Span::Command { copy_text, .. }) = &live.next_step else {
+        panic!("lock held must offer break-lock: {:?}", live.next_step);
+    };
+    assert!(
+        copy_text.ends_with("slip break-lock production"),
+        "{copy_text}"
+    );
+    assert!(held(600).message.contains("(stale)"));
+
+    let fetch = prepare_error(
+        PrepareError::Blocked(shipslip::BlockReason::FetchFailed("denied".into())),
+        &key,
+        "web1",
+    );
+    assert_eq!(fetch.blocked_kind, Some(BlockedKind::FetchFailed));
+    assert!(fetch.next_step.is_none());
 }

@@ -13,6 +13,7 @@ fn main() {
             "review_up",
             "review_attach",
             "current_runs",
+            "live_runs",
             "subscribe_run",
             "ack_run",
             "unsubscribe_run",

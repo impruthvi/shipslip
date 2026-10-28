@@ -6,13 +6,16 @@ import type {
   CompareResult,
   DeployEntry,
   DeployReview,
+  LiveRuns,
   LoadResult,
   PrepareProgress,
   QuitRun,
   ReceiptResult,
+  RecoveryView,
   RunBatch,
   RunInfo,
   SlipView,
+  TrustReview,
 } from "./types";
 
 export const map: LoadResult = {
@@ -1557,11 +1560,23 @@ export const runInfo: RunInfo = {
   "checkout": "/Users/you/code/shop",
   "env": "production",
   "handle": "run-1",
+  "maintenance": true,
   "operation": "deploy",
+  "path": "/var/www/shop",
+  "production": true,
   "project": "shop",
   "runId": "1791795000000-0000beef",
+  "runPlan": "Deploy",
+  "sshAlias": "shop-prod",
   "stage": "starting",
-  "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  "startedAtMs": 1791795000000,
+  "steps": [
+    "composer install --no-dev",
+    "php artisan migrate --force",
+    "php artisan optimize"
+  ],
+  "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "watchMs": 120000
 };
 
 export const runBatches: Record<string, RunBatch> = {
@@ -1614,6 +1629,7 @@ export const runBatches: Record<string, RunBatch> = {
       "terminal": {
         "kind": "finished",
         "label": "Failed at step 1",
+        "lockTaken": false,
         "succeeded": false,
         "summary": "Deploy failed at step 1.",
         "unknown": false
@@ -1625,6 +1641,36 @@ export const runBatches: Record<string, RunBatch> = {
     },
     "subscription": "sub-1",
     "through": 10
+  },
+  "lockTaken": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "run-1",
+    "output": [],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "droppedWarnings": 0,
+      "maintenanceDown": null,
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {},
+      "terminal": {
+        "kind": "finished",
+        "label": "Aborted before changes",
+        "lockTaken": true,
+        "succeeded": false,
+        "summary": "Deploy was aborted before changes: the deploy lock was taken over.",
+        "unknown": false
+      },
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchWindowMs": null
+    },
+    "subscription": "sub-1",
+    "through": 1
   },
   "running": {
     "after": 0,
@@ -1714,6 +1760,7 @@ export const runBatches: Record<string, RunBatch> = {
       "terminal": {
         "kind": "finished",
         "label": "Succeeded",
+        "lockTaken": false,
         "succeeded": true,
         "summary": "Deploy run succeeded.",
         "unknown": false
@@ -1791,7 +1838,13 @@ export const deployEntries: DeployEntry[] = [
   {
     "kind": "ready",
     "needsTrust": false,
-    "production": true
+    "production": true,
+    "recovery": null,
+    "steps": [
+      "composer install --no-dev",
+      "php artisan migrate --force",
+      "php artisan optimize"
+    ]
   }
 ];
 
@@ -1822,4 +1875,213 @@ export const refusal: CommandError = {
     "kind": "command",
     "prefix": ""
   }
+};
+
+export const lockHeld: CommandError = {
+  "blockedKind": "lockHeld",
+  "code": "blocked",
+  "message": "Deploy lock held, last heartbeat 30s ago (live). Check the old run on the server; use slip break-lock production only after reviewing the holder.",
+  "nextStep": {
+    "command": "slip break-lock production",
+    "copyText": "cd '/Users/you/code/shop' && slip break-lock production",
+    "kind": "command",
+    "prefix": "cd '/Users/you/code/shop' && "
+  }
+};
+
+export const trustReview: TrustReview = {
+  "env": "production",
+  "handle": "trust-1",
+  "production": true,
+  "project": "shop",
+  "settings": [
+    {
+      "changed": false,
+      "name": "ssh",
+      "previous": [
+        "shop-prod"
+      ],
+      "proposed": [
+        "shop-prod"
+      ],
+      "steps": false
+    },
+    {
+      "changed": false,
+      "name": "path",
+      "previous": [
+        "/var/www/shop"
+      ],
+      "proposed": [
+        "/var/www/shop"
+      ],
+      "steps": false
+    },
+    {
+      "changed": true,
+      "name": "branch",
+      "previous": [
+        "main"
+      ],
+      "proposed": [
+        "release"
+      ],
+      "steps": false
+    },
+    {
+      "changed": false,
+      "name": "production",
+      "previous": [
+        "true"
+      ],
+      "proposed": [
+        "true"
+      ],
+      "steps": false
+    },
+    {
+      "changed": false,
+      "name": "maintenance",
+      "previous": [
+        "true"
+      ],
+      "proposed": [
+        "true"
+      ],
+      "steps": false
+    },
+    {
+      "changed": false,
+      "name": "log",
+      "previous": [
+        "not set (Laravel default)"
+      ],
+      "proposed": [
+        "not set (Laravel default)"
+      ],
+      "steps": false
+    },
+    {
+      "changed": false,
+      "name": "log_daily",
+      "previous": [
+        "false"
+      ],
+      "proposed": [
+        "false"
+      ],
+      "steps": false
+    },
+    {
+      "changed": false,
+      "name": "smoke_url",
+      "previous": [
+        "not set"
+      ],
+      "proposed": [
+        "not set"
+      ],
+      "steps": false
+    },
+    {
+      "changed": false,
+      "name": "timezone",
+      "previous": [
+        "not set (UTC)"
+      ],
+      "proposed": [
+        "not set (UTC)"
+      ],
+      "steps": false
+    },
+    {
+      "changed": false,
+      "name": "logs",
+      "previous": [
+        "none"
+      ],
+      "proposed": [
+        "none"
+      ],
+      "steps": false
+    },
+    {
+      "changed": true,
+      "name": "recipe steps",
+      "previous": [
+        "composer install --no-dev",
+        "php artisan migrate --force"
+      ],
+      "proposed": [
+        "composer install --no-dev",
+        "php artisan migrate --force",
+        "php artisan optimize"
+      ],
+      "steps": true
+    }
+  ]
+};
+
+export const recoveries: (RecoveryView | null)[] = [
+  {
+    "actions": [
+      {
+        "command": "slip up production",
+        "kind": "up"
+      },
+      {
+        "command": "slip from-step production 1",
+        "kind": "fromStep",
+        "step": 1
+      }
+    ],
+    "advice": null,
+    "runId": "00000001-0",
+    "sentence": "Step 1 failed (exit 1): php artisan migrate --force"
+  },
+  {
+    "actions": [
+      {
+        "command": "slip attach production",
+        "kind": "attach"
+      }
+    ],
+    "advice": null,
+    "runId": "00000001-0",
+    "sentence": "The run did not finish. It may still be running on the server."
+  }
+];
+
+export const liveRuns: LiveRuns = {
+  "closedPreviews": [
+    {
+      "checkout": "/Users/you/code/shop",
+      "env": "staging",
+      "released": true
+    }
+  ],
+  "runs": [
+    {
+      "checkout": "/Users/you/code/shop",
+      "env": "production",
+      "handle": "run-1",
+      "maintenance": true,
+      "operation": "deploy",
+      "path": "/var/www/shop",
+      "production": true,
+      "project": "shop",
+      "runId": "1791795000000-0000beef",
+      "runPlan": "Deploy",
+      "sshAlias": "shop-prod",
+      "stage": "starting",
+      "startedAtMs": 1791795000000,
+      "steps": [
+        "composer install --no-dev",
+        "php artisan migrate --force",
+        "php artisan optimize"
+      ],
+      "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "watchMs": 120000
+    }
+  ]
 };

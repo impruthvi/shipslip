@@ -31,7 +31,7 @@ test("the window keeps the newest lines and counts the ones it let go", () => {
 });
 
 test("rows run maintenance on, step 0, the recipe, then maintenance off", () => {
-  const rows = runRows(fixtures.deployReview, fixtures.runBatches.running.state);
+  const rows = runRows(fixtures.runInfo, fixtures.runBatches.running.state);
   expect(rows.map((r) => [r.index, r.progress?.status ?? null])).toEqual([
     ["on", "Ok"],
     ["0", "Ok"],
@@ -43,8 +43,27 @@ test("rows run maintenance on, step 0, the recipe, then maintenance off", () => 
   expect(rows[1].owns({ kind: "step", index: 0 })).toBe(true);
   expect(rows[1].owns({ kind: "step", index: 1 })).toBe(false);
   expect(rows[0].owns({ kind: "maintenance", phase: "Down" })).toBe(true);
-  const plain = runRows({ ...fixtures.deployReview, maintenance: false }, fixtures.runBatches.running.state);
+  const plain = runRows({ ...fixtures.runInfo, maintenance: false }, fixtures.runBatches.running.state);
   expect(plain.map((r) => r.index)).toEqual(["0", "1", "2", "3"]);
+});
+
+test("reruns skip the fast-forward and from-step runs mark earlier steps skipped", () => {
+  const empty = { ...fixtures.runBatches.running.state, steps: {}, maintenanceDown: null };
+  const rerun = runRows({ ...fixtures.runInfo, runPlan: "Rerun" }, empty);
+  expect(rerun.map((r) => r.index)).toEqual(["on", "1", "2", "3", "off"]);
+  const from = runRows({ ...fixtures.runInfo, runPlan: { FromStep: 3 } }, empty);
+  expect(from.map((r) => [r.index, r.progress?.status ?? null])).toEqual([
+    ["on", null],
+    ["1", "Skipped"],
+    ["2", "Skipped"],
+    ["3", null],
+    ["off", null],
+  ]);
+});
+
+test("bringing the app up has only the maintenance off row", () => {
+  const up = runRows({ ...fixtures.runInfo, operation: "up", runPlan: null, steps: [] }, fixtures.runBatches.running.state);
+  expect(up.map((r) => r.index)).toEqual(["off"]);
 });
 
 test("watching is between the watch starting and any result", () => {

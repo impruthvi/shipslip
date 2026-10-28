@@ -24,6 +24,8 @@ interface Props {
   onEnter?: (row: number, col: number) => void;
   /** Focus moved to a cell (keys or mouse). */
   onCellFocus?: () => void;
+  /** Outcome lines of cells with a run going now, by `repoRoot\nenv`. */
+  live?: Record<string, string>;
 }
 
 /** The focused cell by identity, so it survives a refresh that moves rows. */
@@ -41,7 +43,15 @@ function resolve(map: MapView, key: FocusKey | null, selected: Selection | null)
   return selected ?? first(map);
 }
 
-export function ReleaseMap({ map, selected = null, onSelect, onEnter, onCellFocus, compare = null }: Props) {
+export function ReleaseMap({
+  map,
+  selected = null,
+  onSelect,
+  onEnter,
+  onCellFocus,
+  compare = null,
+  live = {},
+}: Props) {
   const source = compare ? map.envs.indexOf(compare.pair.a) : -1;
   const target = compare ? map.envs.indexOf(compare.pair.b) : -1;
   const grid = useRef<HTMLDivElement>(null);
@@ -101,6 +111,7 @@ export function ReleaseMap({ map, selected = null, onSelect, onEnter, onCellFocu
                 const isSelected = selected?.row === r && selected.col === col;
                 const isPresent = cell.kind === "present";
                 const compareLine = col === source ? compare?.lines[r] : undefined;
+                const liveLine = live[`${row.repoRoot}\n${map.envs[col]}`];
                 return (
                   <div
                     className="grid-env"
@@ -109,7 +120,7 @@ export function ReleaseMap({ map, selected = null, onSelect, onEnter, onCellFocu
                     data-row={isPresent ? r : undefined}
                     data-col={isPresent ? col : undefined}
                     tabIndex={isPresent ? (active?.row === r && active.col === col ? 0 : -1) : undefined}
-                    aria-label={cellName(row.label, map.envs[col], cell, compareLine)}
+                    aria-label={cellName(row.label, map.envs[col], cell, compareLine, liveLine)}
                     aria-selected={isPresent ? isSelected : undefined}
                     onFocus={
                       isPresent
@@ -127,6 +138,7 @@ export function ReleaseMap({ map, selected = null, onSelect, onEnter, onCellFocu
                         selected={isSelected}
                         compareLine={compareLine}
                         onOpen={onSelect && ((view) => onSelect(r, col, view))}
+                        live={liveLine}
                       />
                     )}
                   </div>
