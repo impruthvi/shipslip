@@ -11,8 +11,8 @@ use shipslip::receipt::{default_receipts_root, overview, ReceiptError};
 use tauri::async_runtime::spawn_blocking;
 
 use crate::deploy_session::{
-    CommandError, CurrentRuns, DeployReview, Ending, ErrorCode, OpenSsh, QuitRun, RecoveryReview,
-    RunBatch, RunInfo, Sessions, TrustReview,
+    CommandError, CurrentRuns, DeployEntry, DeployReview, Ending, ErrorCode, OpenSsh,
+    PrepareProgress, QuitRun, RecoveryReview, RunBatch, RunInfo, Sessions, TrustReview,
 };
 use crate::finish::{self, Unseen};
 use crate::git_path;
@@ -321,9 +321,25 @@ pub async fn prepare_deploy(
     row: usize,
     env: String,
     plan: shipslip::RunPlan,
+    progress: tauri::ipc::Channel<PrepareProgress>,
 ) -> Result<DeployReview, CommandError> {
     let checkout = app.selection(generation, row, &env)?;
-    app.sessions()?.prepare(checkout, env, plan).await
+    app.sessions()?
+        .prepare_with_progress(checkout, env, plan, move |phase| {
+            let _ = progress.send(phase);
+        })
+        .await
+}
+
+#[tauri::command]
+pub async fn deploy_entry(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+    env: String,
+) -> Result<DeployEntry, CommandError> {
+    let checkout = app.selection(generation, row, &env)?;
+    Ok(app.sessions()?.deploy_entry(checkout, env).await)
 }
 
 #[tauri::command]

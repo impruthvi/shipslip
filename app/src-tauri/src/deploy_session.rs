@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,9 @@ use shipslip::logs::escape_field;
 use shipslip::receipt::{self, ReceiptJournal, ReceiptStatus, ReceiptStepStatus};
 use shipslip::transport::ConnectFailure;
 use shipslip::transport::{SshTransport, Transport, TransportError};
-use shipslip::{Confirmation, ExecutionHandle, PrepareError, Preview, RunEvents, RunPlan};
+use shipslip::{
+    Confirmation, ExecutionHandle, PrepareError, PreparePhase, Preview, RunEvents, RunPlan,
+};
 
 use crate::view::{break_lock_command, refusal_command, Span};
 
@@ -223,6 +225,76 @@ pub struct RecoveryReview {
     pub remaining_steps: Vec<String>,
 }
 
+/// What "Review deploy…" offers for one checkout and env.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum DeployEntry {
+    /// This checkout has no config for the env.
+    Hidden,
+    /// Shown disabled, with this reason.
+    Unavailable { reason: String },
+    /// A run for this env is live; the view can return to it.
+    Running { handle: String },
+    Ready {
+        production: bool,
+        /// New or changed settings: Trust review comes first.
+        needs_trust: bool,
+    },
+}
+
+fn entry_sync(checkout: &Path, env: &str, trust_path: &Path) -> DeployEntry {
+    let unavailable = |reason: String| DeployEntry::Unavailable { reason };
+    let Ok(checkout) = std::fs::canonicalize(checkout) else {
+        return unavailable("Checkout folder is missing".into());
+    };
+    let config = match LoadedConfig::load(&checkout, None) {
+        Ok(config) => config,
+        Err(config::ConfigError::NotFound(_) | config::ConfigError::NoGitRoot(_)) => {
+            return DeployEntry::Hidden
+        }
+        Err(error) => {
+            return unavailable(format!(
+                "Config has errors: {}",
+                escape_field(&error.to_string())
+            ))
+        }
+    };
+    if config.repo_root() != checkout {
+        return DeployEntry::Hidden;
+    }
+    let Some(snapshot) = config.trust_snapshot(env) else {
+        return DeployEntry::Hidden;
+    };
+    match config::trust_status(trust_path, &checkout, env, &snapshot) {
+        Ok(status) => DeployEntry::Ready {
+            production: snapshot.production,
+            needs_trust: !matches!(status, TrustStatus::Trusted),
+        },
+        Err(error) => unavailable(format!(
+            "Approved settings can't be read: {}",
+            escape_field(&error.to_string())
+        )),
+    }
+}
+
+/// What a preview is waiting on, sent as each phase starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "phase",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum PrepareProgress {
+    Connecting { alias: String },
+    Fetching { branch: String },
+    Checking,
+    Locking,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeployReview {
@@ -353,6 +425,37 @@ impl<C: Connector> Sessions<C> {
     fn next_handle(&self, state: &mut Registry<C::Remote>) -> String {
         state.next += 1;
         format!("{}-{:x}", self.nonce, state.next)
+    }
+
+    pub async fn deploy_entry(&self, checkout: PathBuf, env: String) -> DeployEntry {
+        let trust_path = self.trust_path.clone();
+        let checked = blocking(move || {
+            let entry = entry_sync(&checkout, &env, &trust_path);
+            Ok((std::fs::canonicalize(&checkout).ok(), env, entry))
+        })
+        .await;
+        let (checkout, env, entry) = match checked {
+            Ok(checked) => checked,
+            Err(error) => {
+                return DeployEntry::Unavailable {
+                    reason: error.message,
+                }
+            }
+        };
+        let (Some(checkout), DeployEntry::Ready { .. }) = (checkout, &entry) else {
+            return entry;
+        };
+        let key = Key { checkout, env };
+        let state = self.registry();
+        match state.slots.get(&key).map(|slot| (&slot.id, &slot.phase)) {
+            None => entry,
+            Some((id, Phase::Starting(_) | Phase::Running { .. })) => {
+                DeployEntry::Running { handle: id.clone() }
+            }
+            Some(_) => DeployEntry::Unavailable {
+                reason: "Preparing…".into(),
+            },
+        }
     }
 
     pub async fn review_trust(
@@ -1107,17 +1210,32 @@ impl<C: Connector> Sessions<C> {
         });
     }
 
+    #[cfg(test)]
     pub async fn prepare(
         self: &Arc<Self>,
         checkout: PathBuf,
         env: String,
         plan: RunPlan,
     ) -> Result<DeployReview, CommandError> {
+        self.prepare_with_progress(checkout, env, plan, |_| {})
+            .await
+    }
+
+    /// Like `prepare`, calling `progress` as each phase starts.
+    pub async fn prepare_with_progress(
+        self: &Arc<Self>,
+        checkout: PathBuf,
+        env: String,
+        plan: RunPlan,
+        progress: impl Fn(PrepareProgress) + Send + Sync + 'static,
+    ) -> Result<DeployReview, CommandError> {
         let owner = self.clone();
         let page = self.registry().page;
-        tauri::async_runtime::spawn(
-            async move { owner.prepare_inner(checkout, env, plan, page).await },
-        )
+        tauri::async_runtime::spawn(async move {
+            owner
+                .prepare_inner(checkout, env, plan, page, &progress)
+                .await
+        })
         .await
         .map_err(local)?
     }
@@ -1144,6 +1262,7 @@ impl<C: Connector> Sessions<C> {
         env: String,
         plan: RunPlan,
         page: u64,
+        progress: &(dyn Fn(PrepareProgress) + Send + Sync),
     ) -> Result<DeployReview, CommandError> {
         let loaded = settings(checkout, env).await?;
         let trusted = self.trusted(&loaded).await?;
@@ -1168,14 +1287,27 @@ impl<C: Connector> Sessions<C> {
             id
         };
         let result = async {
+            let target = trusted.target();
+            progress(PrepareProgress::Connecting {
+                alias: escape_field(&target.ssh_alias),
+            });
             let remote = self
                 .connector
-                .connect(&trusted.target().ssh_alias)
+                .connect(&target.ssh_alias)
                 .await
-                .map_err(|e| connection(e, &trusted.target().ssh_alias))?;
-            let preview = shipslip::prepare_with_plan(&trusted, plan, &*remote)
-                .await
-                .map_err(|e| prepare_error(e, &key.env, &trusted.target().ssh_alias))?;
+                .map_err(|e| connection(e, &target.ssh_alias))?;
+            let branch = escape_field(&target.branch);
+            let preview = shipslip::prepare_with_progress(&trusted, plan, &*remote, |phase| {
+                progress(match phase {
+                    PreparePhase::Fetching => PrepareProgress::Fetching {
+                        branch: branch.clone(),
+                    },
+                    PreparePhase::Checking => PrepareProgress::Checking,
+                    PreparePhase::Locking => PrepareProgress::Locking,
+                })
+            })
+            .await
+            .map_err(|e| prepare_error(e, &key.env, &trusted.target().ssh_alias))?;
             let review = DeployReview::from_preview(id.clone(), &preview, &key.checkout);
             let ready = Ready {
                 stamp: loaded.stamp,
