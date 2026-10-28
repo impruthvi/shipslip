@@ -39,6 +39,7 @@ const pairs: [text: string, background: string][] = [
   ["status-good", "surface"],
   ["status-good", "surface-raised"],
   ["status-good", "selection"],
+  ["on-primary", "primary"],
 ];
 
 test.each(pairs)("%s on %s is at least 4.5:1", (text, background) => {

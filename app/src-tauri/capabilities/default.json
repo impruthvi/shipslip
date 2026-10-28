@@ -24,6 +24,7 @@
     "allow-subscribe-run",
     "allow-ack-run",
     "allow-unsubscribe-run",
+    "allow-stop-run",
     "allow-cancel-pending",
     "allow-receipt-seen",
     "allow-quit-status",

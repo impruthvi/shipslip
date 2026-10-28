@@ -53,6 +53,9 @@
   --color-status-bad: #b42318;
   --color-status-bad-soft: #fcedeb;
   --color-status-good: #1e6b45;
+  /* v2: the one primary action per screen is ink on paper. */
+  --color-primary: #16181d;
+  --color-on-primary: #fafaf7;
 
   --font-sans: "IBM Plex Sans", sans-serif;
   --font-mono: "IBM Plex Mono", monospace;
@@ -1074,4 +1077,322 @@ button {
   border-color: var(--color-accent);
   background: var(--color-accent);
   color: var(--color-surface-raised);
+}
+
+/* Buttons (v2). At most one primary per screen. */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 var(--space-16);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  font-size: var(--text-13);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+}
+
+.button-primary {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: var(--color-on-primary);
+  font-weight: var(--font-weight-semibold);
+}
+
+.button-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-primary) 90%, var(--color-on-primary));
+}
+
+.button:disabled {
+  border-color: var(--color-rule);
+  background: var(--color-surface-raised);
+  color: var(--color-text-muted);
+  cursor: default;
+}
+
+.production-chip {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border: 1px solid var(--color-text);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  font-family: var(--font-mono);
+  font-size: var(--text-11);
+  line-height: 14px;
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-caps);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Deploy entry at the top of the receipt pane */
+
+.deploy-entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-bottom: var(--space-16);
+  flex-shrink: 0;
+}
+
+.deploy-entry .button {
+  align-self: flex-start;
+}
+
+.deploy-entry-reason {
+  font-size: var(--text-12);
+  line-height: 16px;
+}
+
+/* Workspace: replaces the map area while deploying */
+
+.workspace {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-top: var(--space-8);
+  padding-bottom: var(--space-16);
+  border-bottom: 1px solid var(--color-rule);
+  flex-shrink: 0;
+}
+
+.workspace-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+}
+
+.workspace-heading h1 {
+  font-size: var(--text-22);
+  line-height: 28px;
+  letter-spacing: -0.01em;
+  font-weight: var(--font-weight-semibold);
+}
+
+.workspace-heading .link {
+  margin-left: auto;
+}
+
+.workspace-target {
+  font-size: var(--text-12);
+  line-height: 18px;
+}
+
+.workspace-body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--space-24);
+  font-size: var(--text-13);
+  line-height: var(--leading-body);
+}
+
+.workspace-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  margin-top: var(--space-24);
+}
+
+.workspace-section > h2 {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.workspace-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  min-height: 56px;
+  padding: var(--space-12) 0;
+  border-top: 1px solid var(--color-rule);
+  flex-shrink: 0;
+}
+
+.workspace-footer .footer-end {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  margin-left: auto;
+}
+
+.typed-field {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  font-size: var(--text-12);
+}
+
+.typed-field input {
+  width: 160px;
+  height: 32px;
+  padding: 0 var(--space-8);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  font-family: var(--font-mono);
+  font-size: var(--text-13);
+  color: var(--color-text);
+}
+
+.phases,
+.run-steps,
+.commit-list,
+.recipe {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.phase,
+.run-step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.phase-mark,
+.run-step-mark {
+  display: flex;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 14px;
+}
+
+.elapsed {
+  margin-left: auto;
+  font-size: var(--text-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.preview-shas {
+  font-size: var(--text-14);
+  font-weight: var(--font-weight-semibold);
+}
+
+.commit-list,
+.recipe {
+  font-size: var(--text-12);
+  line-height: 18px;
+}
+
+/* Long commands wrap with a 2-space hanging indent. */
+.recipe li,
+.commit-list li {
+  display: flex;
+  gap: 10px;
+}
+
+.recipe code,
+.commit-list code {
+  min-width: 0;
+  padding-left: 2ch;
+  text-indent: -2ch;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.recipe-index {
+  flex-shrink: 0;
+  min-width: 22px;
+}
+
+.more-button {
+  align-self: flex-start;
+  font-size: var(--text-12);
+  text-decoration: underline 1px;
+  text-underline-position: from-font;
+}
+
+.run-step-head {
+  width: 100%;
+  text-align: left;
+}
+
+.run-step-head code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.run-output-box {
+  position: relative;
+  margin: 6px 0 var(--space-4) 24px;
+}
+
+.run-output {
+  max-height: 60vh;
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-8) 10px;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  font-size: var(--text-12);
+  line-height: 17px;
+  white-space: pre;
+}
+
+.jump-latest {
+  position: absolute;
+  right: var(--space-8);
+  bottom: var(--space-8);
+}
+
+.log-errors {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-12);
+  line-height: 17px;
+}
+
+.workspace-message {
+  max-width: 640px;
+  margin-top: var(--space-24);
+  font-size: var(--text-14);
+  line-height: var(--leading-body);
+}
+
+.workspace-message + .command-box,
+.workspace-details {
+  max-width: 640px;
+  margin-top: var(--space-16);
+}
+
+.workspace-details summary {
+  cursor: pointer;
+  font-size: var(--text-12);
+}
+
+.workspace-details pre {
+  margin: var(--space-8) 0 0;
+  font-size: var(--text-12);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

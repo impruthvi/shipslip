@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useAnnouncer } from "./Announcer";
 import { ComparePicker } from "./ComparePicker";
+import { DeployEntryBar, useDeployEntry } from "./DeployEntry";
 import { Footer } from "./Footer";
 import { MapArea } from "./MapArea";
 import { useNarrow, usePaneWidth } from "./pane";
@@ -10,6 +12,7 @@ import { useReceipt, type Request } from "./useReceipt";
 import { useReleaseMap } from "./useReleaseMap";
 import { useSeen } from "./useSeen";
 import { useSelection } from "./useSelection";
+import { Workspace, type DeployTarget, type Leave } from "./Workspace";
 
 const cellKey = (repoRoot: string, env: string) => `${repoRoot}\n${env}`;
 
@@ -29,12 +32,19 @@ export default function App() {
   const [paneView, setPaneView] = useState<{ key: string; view: PaneView } | null>(null);
   /** Set by a keyboard open; the pane focuses the slip once it shows that receipt. */
   const [focusReceipt, setFocusReceipt] = useState(false);
+  const [workspace, setWorkspace] = useState<DeployTarget | null>(null);
+  /** Leaving the workspace returns focus to "Review deploy…". */
+  const [focusEntry, setFocusEntry] = useState(false);
+  const entryButton = useRef<HTMLButtonElement>(null);
+  const { announce, regions } = useAnnouncer();
   const selectedRef = useRef(selected);
   const narrowRef = useRef(narrow);
+  const workspaceRef = useRef(workspace);
   useEffect(() => {
     selectedRef.current = selected;
     narrowRef.current = narrow;
-  }, [selected, narrow]);
+    workspaceRef.current = workspace;
+  }, [selected, narrow, workspace]);
 
   const selectedKey = selected ? cellKey(selected.repoRoot, selected.env) : null;
   const view = paneView?.key === selectedKey ? paneView.view : "code";
@@ -51,6 +61,38 @@ export default function App() {
     };
   }
   const receipt = useReceipt(request, refresh);
+  const entry = useDeployEntry(
+    loaded && selected && !workspace
+      ? { generation: loaded.generation, row: selected.row, env: selected.env }
+      : null,
+  );
+  const onReview = () => {
+    if (!loaded || !selected || !row || entry?.kind !== "ready") return;
+    setWorkspace({
+      generation: loaded.generation,
+      row: selected.row,
+      env: selected.env,
+      label: row.label,
+      production: entry.production,
+    });
+  };
+  const onLeave = useCallback(
+    (how: Leave) => {
+      setWorkspace(null);
+      setFocusEntry(true);
+      if (how === "finished") {
+        // The new receipt opens in the pane, on the same cell.
+        setDrawerOpen(true);
+        refresh();
+      }
+    },
+    [refresh],
+  );
+  useEffect(() => {
+    if (!focusEntry || !entryButton.current) return;
+    entryButton.current.focus();
+    setFocusEntry(false);
+  }, [focusEntry, entry]);
 
   const onSelect = useCallback(
     (r: number, col: number, next: PaneView = "code") => {
@@ -85,6 +127,8 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      // The workspace owns Escape while it is open; the pane is hidden.
+      if (workspaceRef.current) return;
       const inPane = (event.target as Element | null)?.closest?.(".pane");
       const cell = selectedRef.current;
       if (event.metaKey && event.key.toLowerCase() === "i") {
@@ -101,7 +145,7 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const showPane = request !== null && (!narrow || drawerOpen);
+  const showPane = !workspace && request !== null && (!narrow || drawerOpen);
   const shown = showPane && receipt.shown?.key === request?.key ? receipt.shown : null;
   useSeen(shown?.opened.kind === "receipt" ? shown.opened.runId : null);
   return (
@@ -109,8 +153,10 @@ export default function App() {
       <main className="main">
         <header className="toolbar">
           <span className="wordmark">Shipslip</span>
-          {map?.screen === "map" && <ComparePicker envs={map.envs} pair={pair} onChange={setPair} />}
-          {narrow && request && (
+          {map?.screen === "map" && !workspace && (
+            <ComparePicker envs={map.envs} pair={pair} onChange={setPair} />
+          )}
+          {narrow && request && !workspace && (
             <button
               type="button"
               className="toolbar-button"
@@ -121,25 +167,31 @@ export default function App() {
             </button>
           )}
         </header>
-        <div className="title">
-          <h1>Release map</h1>
-          <p className="muted">
-            Last recorded code on each app and environment. Nothing here is live.
-          </p>
-        </div>
-        <div className="map-area">
-          <MapArea
-            state={state}
-            onRetry={refresh}
-            selected={selected}
-            onSelect={onSelect}
-            onEnter={onEnter}
-            onProblem={onProblem}
-            onCellFocus={onCellFocus}
-            compare={pair ? { pair, lines } : null}
-          />
-        </div>
-        <Footer state={state} onRetry={refresh} />
+        {workspace ? (
+          <Workspace target={workspace} onLeave={onLeave} announce={announce} />
+        ) : (
+          <>
+            <div className="title">
+              <h1>Release map</h1>
+              <p className="muted">
+                Last recorded code on each app and environment. Nothing here is live.
+              </p>
+            </div>
+            <div className="map-area">
+              <MapArea
+                state={state}
+                onRetry={refresh}
+                selected={selected}
+                onSelect={onSelect}
+                onEnter={onEnter}
+                onProblem={onProblem}
+                onCellFocus={onCellFocus}
+                compare={pair ? { pair, lines } : null}
+              />
+            </div>
+            <Footer state={state} onRetry={refresh} />
+          </>
+        )}
       </main>
       {showPane && request && (
         <ReceiptPane
@@ -152,8 +204,10 @@ export default function App() {
           width={width}
           onResize={resize}
           drawer={narrow}
+          entry={<DeployEntryBar entry={entry} onReview={onReview} buttonRef={entryButton} />}
         />
       )}
+      {regions}
     </div>
   );
 }

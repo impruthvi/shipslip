@@ -12,7 +12,7 @@ use tauri::async_runtime::spawn_blocking;
 
 use crate::deploy_session::{
     CommandError, CurrentRuns, DeployEntry, DeployReview, Ending, ErrorCode, OpenSsh,
-    PrepareProgress, QuitRun, RecoveryReview, RunBatch, RunInfo, Sessions, TrustReview,
+    PrepareProgress, QuitRun, RecoveryReview, RunBatch, RunInfo, RunStop, Sessions, TrustReview,
 };
 use crate::finish::{self, Unseen};
 use crate::git_path;
@@ -425,6 +425,15 @@ pub fn ack_run(
     through: u64,
 ) -> Result<(), CommandError> {
     app.sessions()?.ack_run(&handle, &subscription, through)
+}
+
+#[tauri::command]
+pub fn stop_run(
+    app: tauri::State<'_, Arc<App>>,
+    handle: String,
+    stop: RunStop,
+) -> Result<(), CommandError> {
+    app.sessions()?.stop_run(&handle, stop)
 }
 
 #[tauri::command]
