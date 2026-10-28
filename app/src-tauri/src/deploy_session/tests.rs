@@ -1643,3 +1643,32 @@ fn deploy_entry_says_why_an_env_cannot_be_deployed_and_when_trust_comes_first() 
         );
     });
 }
+
+#[test]
+fn stop_reaches_only_a_run_that_is_running() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let (release, gate) = tauri::async_runtime::channel(1);
+        *remote.observe_gate.lock().await = Some(gate);
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        let review = sessions.review_up(root, "production".into()).await.unwrap();
+        let run = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        until(|| remote.observe_entered.load(Ordering::SeqCst) == 1);
+        let error = sessions.stop_run("nope", RunStop::AfterStep).unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        sessions.stop_run(&run.handle, RunStop::AfterStep).unwrap();
+        sessions.stop_run(&run.handle, RunStop::Watch).unwrap();
+        release.send(()).await.unwrap();
+        until(|| sessions.current_runs().runs.is_empty());
+        let error = sessions.stop_run(&run.handle, RunStop::Watch).unwrap_err();
+        assert_eq!(error.message, "This run is not running any more.");
+        let stop: RunStop = serde_json::from_str(r#""afterStep""#).unwrap();
+        assert_eq!(stop, RunStop::AfterStep);
+    });
+}

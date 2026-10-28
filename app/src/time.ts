@@ -36,3 +36,27 @@ export function stamp(ms: number, timeZone?: string, zoneLocale?: string): strin
 export function utcStamp(ms: number): string {
   return `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;
 }
+
+/** A step's running time: "8s", "2m 14s", "1h 3m". */
+export function elapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/** Time left as m:ss, e.g. "1:42". */
+export function countdown(ms: number): string {
+  const seconds = Math.max(0, Math.ceil(ms / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** For screen readers: "12 seconds", "2 minutes 14 seconds". */
+export function spoken(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  const unit = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  if (seconds < 60) return unit(seconds, "second");
+  const rest = seconds % 60;
+  return `${unit(Math.floor(seconds / 60), "minute")}${rest ? ` ${unit(rest, "second")}` : ""}`;
+}

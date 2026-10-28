@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use shipslip::config::{self, LoadedConfig, TrustSnapshot, TrustStatus, TrustedTarget};
 use shipslip::interrupt::{on_interrupt, Interrupt, Stage};
 use shipslip::logs::escape_field;
@@ -306,6 +306,8 @@ pub struct DeployReview {
     pub path: String,
     pub branch: String,
     pub maintenance: bool,
+    /// How long the log is watched after the last step; `None` when it isn't.
+    pub watch_ms: Option<u64>,
     pub recipe_hash: String,
     pub from_sha: String,
     pub target_sha: String,
@@ -325,6 +327,9 @@ impl DeployReview {
             path: escape_field(&preview.target().path),
             branch: escape_field(&preview.target().branch),
             maintenance: preview.target().maintenance,
+            watch_ms: preview.target().watch_log.then(|| {
+                u64::try_from(shipslip::POST_DEPLOY_WATCH.as_millis()).unwrap_or(u64::MAX)
+            }),
             recipe_hash: escape_field(preview.recipe_hash()),
             from_sha: escape_field(preview.from_sha()),
             target_sha: escape_field(preview.target_sha()),
@@ -352,6 +357,13 @@ pub struct RunInfo {
     pub target_sha: Option<String>,
     pub operation: &'static str,
     pub stage: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RunStop {
+    AfterStep,
+    Watch,
 }
 
 #[derive(Debug, Serialize)]
@@ -719,6 +731,26 @@ impl<C: Connector> Sessions<C> {
             .get(handle)
             .ok_or_else(run_not_found)?
             .unsubscribe(subscription)
+    }
+
+    /// "Stop after this step", or "Stop watching" during the log watch.
+    pub fn stop_run(&self, handle: &str, stop: RunStop) -> Result<(), CommandError> {
+        let state = self.registry();
+        let control = state
+            .slots
+            .values()
+            .find_map(|slot| match &slot.phase {
+                Phase::Running { control, .. } if slot.id == handle => Some(control),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                CommandError::new(ErrorCode::NotFound, "This run is not running any more.")
+            })?;
+        match stop {
+            RunStop::AfterStep => control.stop_after_step(),
+            RunStop::Watch => control.cancel_watch(),
+        }
+        Ok(())
     }
 
     pub fn current_runs(&self) -> CurrentRuns {
@@ -1499,3 +1531,175 @@ pub(crate) fn sample_quit_runs() -> Vec<QuitRun> {
 
 #[cfg(test)]
 mod tests;
+
+/// Run screen states for the UI fixtures, built through the same types and
+/// feed the commands use.
+#[cfg(test)]
+pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, serde_json::Value> {
+    use serde_json::to_value;
+    use shipslip::{DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, StepStatus};
+    let info = RunInfo {
+        handle: "run-1".into(),
+        project: "shop".into(),
+        checkout: "/Users/you/code/shop".into(),
+        env: "production".into(),
+        run_id: Some("1791795000000-0000beef".into()),
+        target_sha: Some("b".repeat(40)),
+        operation: "deploy",
+        stage: "starting".into(),
+    };
+    let review = DeployReview {
+        handle: "review-1".into(),
+        env: "production".into(),
+        production: true,
+        checkout: "/Users/you/code/shop".into(),
+        ssh_alias: "shop-prod".into(),
+        path: "/var/www/shop".into(),
+        branch: "main".into(),
+        maintenance: true,
+        watch_ms: Some(120_000),
+        recipe_hash: "c".repeat(64),
+        from_sha: "a".repeat(40),
+        target_sha: "b".repeat(40),
+        commits: (1..=7)
+            .map(|n| format!("{n:07x} Change number {n}"))
+            .collect(),
+        more_commits: 5,
+        steps: vec![
+            "composer install --no-dev".into(),
+            "php artisan migrate --force".into(),
+            "php artisan optimize".into(),
+        ],
+        run_plan: RunPlan::Deploy,
+    };
+    let feed = RunFeed::new(info.clone());
+    let batch = |feed: &RunFeed| {
+        let snapshot = feed.snapshot();
+        to_value(RunBatch {
+            handle: snapshot.info.handle,
+            subscription: "sub-1".into(),
+            replay: true,
+            after: 0,
+            through: snapshot.sequence,
+            dropped_output: snapshot.dropped_output,
+            output: snapshot.output,
+            state: snapshot.state,
+        })
+        .unwrap()
+    };
+    let step = |index, name: &str, status| {
+        feed.record(DeployEvent::StepStarted {
+            index,
+            name: name.into(),
+        });
+        feed.record(DeployEvent::Output {
+            index,
+            line: format!("{name}: working"),
+        });
+        if let Some(status) = status {
+            let exit_code = Some(if status == StepStatus::Ok { 0 } else { 1 });
+            feed.record(DeployEvent::StepFinished {
+                index,
+                status,
+                exit_code,
+            });
+        }
+    };
+    let mut views = std::collections::BTreeMap::new();
+    feed.record(DeployEvent::MaintenanceStarted {
+        phase: MaintenancePhase::Down,
+    });
+    feed.record(DeployEvent::MaintenanceFinished {
+        phase: MaintenancePhase::Down,
+        status: StepStatus::Ok,
+        exit_code: Some(0),
+    });
+    step(0, "git fast-forward", Some(StepStatus::Ok));
+    step(1, "composer install --no-dev", None);
+    views.insert("running", batch(&feed));
+
+    let watching = RunFeed::new(info.clone());
+    for event in [
+        DeployEvent::StepStarted {
+            index: 0,
+            name: "git fast-forward".into(),
+        },
+        DeployEvent::StepFinished {
+            index: 0,
+            status: StepStatus::Ok,
+            exit_code: Some(0),
+        },
+        DeployEvent::WatchStarted {
+            window: std::time::Duration::from_secs(120),
+        },
+        DeployEvent::NewLogError {
+            phase: LogPhase::After,
+            message: "RuntimeException: Payment gateway timed out".into(),
+            file_line: Some("app/Billing.php:42".into()),
+        },
+    ] {
+        watching.record(event);
+    }
+    views.insert("watching", batch(&watching));
+
+    feed.record(DeployEvent::StepFinished {
+        index: 1,
+        status: StepStatus::Failed,
+        exit_code: Some(1),
+    });
+    feed.record(DeployEvent::AppLeftDown);
+    feed.record(DeployEvent::Finished(DeployOutcome::FailedAtStep {
+        step: 1,
+        partial_update: false,
+    }));
+    feed.close();
+    views.insert("failed", batch(&feed));
+
+    watching.record(DeployEvent::WatchFinished(shipslip::WatchResult::not_run()));
+    watching.record(DeployEvent::Finished(DeployOutcome::Succeeded));
+    watching.close();
+    views.insert("succeeded", batch(&watching));
+
+    views.insert("review", to_value(&review).unwrap());
+    views.insert("runInfo", to_value(&info).unwrap());
+    views.insert(
+        "entries",
+        to_value([
+            DeployEntry::Hidden,
+            DeployEntry::Unavailable {
+                reason: "Checkout folder is missing".into(),
+            },
+            DeployEntry::Running {
+                handle: "run-1".into(),
+            },
+            DeployEntry::Ready {
+                production: true,
+                needs_trust: false,
+            },
+        ])
+        .unwrap(),
+    );
+    views.insert(
+        "progress",
+        to_value([
+            PrepareProgress::Connecting {
+                alias: "shop-prod".into(),
+            },
+            PrepareProgress::Fetching {
+                branch: "main".into(),
+            },
+            PrepareProgress::Checking,
+            PrepareProgress::Locking,
+        ])
+        .unwrap(),
+    );
+    views.insert(
+        "refusal",
+        to_value(connection(
+            TransportError::Connect("Permission denied (publickey).".into()),
+            "shop-prod",
+        ))
+        .unwrap(),
+    );
+    views
+}

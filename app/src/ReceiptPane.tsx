@@ -1,4 +1,4 @@
-import { useEffect, useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { PANE_MAX, PANE_MIN } from "./pane";
 import { context, type PaneView, type Target } from "./slipTarget";
 import { Slip } from "./Slip";
@@ -29,6 +29,8 @@ interface Props {
   onResize: (width: number) => void;
   /** Drawer mode: over the map instead of beside it. */
   drawer: boolean;
+  /** "Review deploy…", above the slip. */
+  entry?: ReactNode;
 }
 
 /** A new receipt starts with its own slip state (expanded errors, Copy). */
@@ -46,6 +48,7 @@ export function ReceiptPane({
   width,
   onResize,
   drawer,
+  entry,
 }: Props) {
   const drag = useRef<{ x: number; width: number } | null>(null);
   const pane = useRef<HTMLElement>(null);
@@ -98,6 +101,7 @@ export function ReceiptPane({
         onLostPointerCapture={onPointerUp}
         onKeyDown={onKeyDown}
       />
+      {entry}
       {opening && (
         <p className="pane-opening muted">
           Opening receipt for {next.label} · {next.env}…

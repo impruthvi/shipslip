@@ -16,6 +16,7 @@ fn main() {
             "subscribe_run",
             "ack_run",
             "unsubscribe_run",
+            "stop_run",
             "cancel_pending",
             "receipt_seen",
             "quit_status",

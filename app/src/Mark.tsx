@@ -1,6 +1,7 @@
 import type { Mark as MarkKind } from "./types";
 
-export const markLabel: Record<MarkKind, string> = {
+export const markLabel: Record<MarkKind | "live", string> = {
+  live: "running now",
   recorded: "recorded code",
   incomplete: "deploy incomplete",
   observed: "observed after a failed step",
@@ -8,8 +9,17 @@ export const markLabel: Record<MarkKind, string> = {
   noCode: "no code recorded",
 };
 
-/** The shape that tells cell states apart without color. */
-export function Mark({ kind, size = 10, muted = false }: { kind: MarkKind; size?: number; muted?: boolean }) {
+/** The shape that tells cell states apart without color. `live` is a run in
+ * progress: a dashed ring with a centre dot. Nothing animates. */
+export function Mark({
+  kind,
+  size = 10,
+  muted = false,
+}: {
+  kind: MarkKind | "live";
+  size?: number;
+  muted?: boolean;
+}) {
   const color = muted ? "var(--color-text-muted)" : "var(--color-text)";
   return (
     <svg
@@ -40,6 +50,20 @@ export function Mark({ kind, size = 10, muted = false }: { kind: MarkKind; size?
           strokeWidth="1.5"
           strokeDasharray="2 2"
         />
+      )}
+      {kind === "live" && (
+        <>
+          <circle
+            cx="5"
+            cy="5"
+            r="4.25"
+            fill="none"
+            stroke={color}
+            strokeWidth="1.5"
+            strokeDasharray="2 2"
+          />
+          <circle cx="5" cy="5" r="1.5" fill={color} />
+        </>
       )}
       {kind === "noCode" && <path d="M0 5 H10" fill="none" stroke={color} strokeWidth="1.5" />}
     </svg>

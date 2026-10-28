@@ -1,8 +1,10 @@
 // Dev-only stand-in for Rust when the UI runs in a plain browser, serving
 // src/fixtures.gen.ts. `?screen=firstRun|noneReadable|failed` picks the
-// first load; `?slow=ms` delays every answer.
+// first load; `?slow=ms` delays every answer. `?deploy=failed` ends a
+// deploy at its failed step instead of succeeding.
 
 import type { Backend } from "./api";
+import type { DeployBackend } from "./deployApi";
 import * as fixtures from "./fixtures.gen";
 import type { LoadResult } from "./types";
 
@@ -35,4 +37,29 @@ export const backend: Backend = {
     return () => window.removeEventListener("focus", handler);
   },
   receiptSeen: async () => {},
+};
+
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+export const deploy: DeployBackend = {
+  entry: () => later(fixtures.deployEntries[3]),
+  prepare: async (_generation, _row, _env, _plan, onProgress) => {
+    for (const phase of fixtures.prepareProgress) {
+      onProgress(phase);
+      await wait(600);
+    }
+    return fixtures.deployReview;
+  },
+  confirm: () => later(fixtures.runInfo),
+  cancel: () => wait(400),
+  follow: async (_handle, onBatch) => {
+    const end = params.get("deploy") === "failed" ? "failed" : "succeeded";
+    const timers = [
+      setTimeout(() => onBatch(fixtures.runBatches.running), 300),
+      setTimeout(() => onBatch(fixtures.runBatches.watching), 4000),
+      setTimeout(() => onBatch(fixtures.runBatches[end]), 9000),
+    ];
+    return () => timers.forEach(clearTimeout);
+  },
+  stop: () => wait(200),
 };

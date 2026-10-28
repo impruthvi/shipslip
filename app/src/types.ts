@@ -207,3 +207,142 @@ export interface QuitRun {
   /** What "Quit now" may leave behind. */
   quitNow: string;
 }
+
+/** What "Review deploy…" offers for the selected cell (`deploy_entry`). */
+export type DeployEntry =
+  | { kind: "hidden" }
+  | { kind: "unavailable"; reason: string }
+  | { kind: "running"; handle: string }
+  | { kind: "ready"; production: boolean; needsTrust: boolean };
+
+/** Sent on the `prepare_deploy` channel as each phase starts. */
+export type PrepareProgress =
+  | { phase: "connecting"; alias: string }
+  | { phase: "fetching"; branch: string }
+  | { phase: "checking" }
+  | { phase: "locking" };
+
+export type RunPlan = "Deploy" | "Rerun" | { FromStep: number };
+
+export interface DeployReview {
+  handle: string;
+  env: string;
+  production: boolean;
+  checkout: string;
+  sshAlias: string;
+  path: string;
+  branch: string;
+  maintenance: boolean;
+  /** How long the log is watched after the last step; null when it isn't. */
+  watchMs: number | null;
+  recipeHash: string;
+  fromSha: string;
+  targetSha: string;
+  /** Short SHA and subject, newest first. */
+  commits: string[];
+  moreCommits: number;
+  /** Recipe steps 1..N; step 0, the git fast-forward, is built in. */
+  steps: string[];
+  runPlan: RunPlan;
+}
+
+export type ErrorCode =
+  | "stale"
+  | "notFound"
+  | "busy"
+  | "cancelled"
+  | "invalidHandle"
+  | "changed"
+  | "untrusted"
+  | "confirmation"
+  | "connection"
+  | "blocked"
+  | "local";
+
+/** A refused command. `message` is untrusted text, already escaped. */
+export interface CommandError {
+  code: ErrorCode;
+  message: string;
+  connectionKind?: "hostKeyUnknown" | "hostKeyChanged" | "keyNotLoaded" | "other";
+  nextStep?: Span;
+}
+
+export interface RunInfo {
+  handle: string;
+  project: string;
+  checkout: string;
+  env: string;
+  runId: string | null;
+  targetSha: string | null;
+  operation: "deploy" | "up" | "attach";
+  stage: string;
+}
+
+export type ProgressStatus =
+  | "Pending"
+  | "Running"
+  | "Ok"
+  | "Failed"
+  | "Unknown"
+  | "NotStarted"
+  | "Skipped";
+
+export interface Progress {
+  name: string | null;
+  status: ProgressStatus;
+  exitCode: number | null;
+}
+
+export type Terminal =
+  | { kind: "finished"; label: string; summary: string; succeeded: boolean; unknown: boolean }
+  | { kind: "detached"; step: number }
+  | { kind: "interrupted"; step: number; reason: string }
+  | { kind: "error"; reason: string };
+
+export interface SmokeView {
+  status: "notConfigured" | "skipped" | "passed" | "failed";
+  httpStatus: number | null;
+  latencyMs: number | null;
+  reason: string | null;
+}
+
+export interface RunState {
+  terminal: Terminal | null;
+  /** Keyed by step index; 0 is the git fast-forward. */
+  steps: Record<string, Progress>;
+  maintenanceUp: Progress | null;
+  maintenanceDown: Progress | null;
+  warnings: string[];
+  droppedWarnings: number;
+  appLeftDown: boolean;
+  serverHead: string | null;
+  treeDirty: boolean | null;
+  watchWindowMs: number | null;
+  watch: WatchView | null;
+  smoke: SmokeView | null;
+}
+
+export type OutputSource =
+  | { kind: "step"; index: number }
+  | { kind: "maintenance"; phase: "Down" | "Up" }
+  | { kind: "log"; phase: "During" | "After"; fileLine: string | null };
+
+/** One line of remote output: untrusted text, already escaped. */
+export interface OutputLine {
+  sequence: number;
+  text: string;
+  source: OutputSource;
+}
+
+/** One `subscribe_run` delivery. `state` is whole; `output` is new lines only,
+ * except on `replay`, which starts over. Ack `through` before the next. */
+export interface RunBatch {
+  handle: string;
+  subscription: string;
+  replay: boolean;
+  after: number;
+  through: number;
+  droppedOutput: number;
+  output: OutputLine[];
+  state: RunState;
+}
