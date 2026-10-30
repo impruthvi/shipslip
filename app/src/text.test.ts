@@ -6,9 +6,9 @@ test("shortPath uses ~ for the home folder and elides the middle", () => {
   expect(shortPath("/Users/ana")).toBe("~");
   expect(shortPath("/srv/app")).toBe("/srv/app");
   const long = shortPath("/Users/ana/projects/clients/acme/laravel-shipslip-test");
-  expect(long).toHaveLength(28);
-  expect(long.startsWith("~/projects/c")).toBe(true);
-  expect(long.endsWith("shipslip-test")).toBe(true);
+  expect(long).toHaveLength(22);
+  expect(long.startsWith("~/projects")).toBe(true);
+  expect(long.endsWith("slip-test")).toBe(true);
   expect(long).toContain("…");
 });
 

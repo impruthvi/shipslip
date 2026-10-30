@@ -1,4 +1,5 @@
 import { CommandBox } from "./CommandBox";
+import { withCode } from "./text";
 import type { CommandError } from "./types";
 
 interface Wording {
@@ -30,12 +31,17 @@ export function refusalWording(error: CommandError): Wording {
       return { title: "Another run holds the server lock" };
     case "fetchFailed":
       return { title: "The server couldn't fetch the code" };
+    case "upToDate":
+      return { title: "Already up to date" };
   }
   switch (error.code) {
     case "connection":
       return { title: "Couldn't release the server lock" };
     case "untrusted":
-      return { title: "These settings need approval" };
+      return {
+        title: "These settings need approval",
+        body: "The settings for this env changed since they were approved. Review them before deploying.",
+      };
     case "changed":
       return { title: "The config changed" };
     case "busy":
@@ -55,12 +61,13 @@ export function refusalWording(error: CommandError): Wording {
 export function Refusal({
   error,
   where,
-  onCheckAgain,
+  action,
 }: {
   error: CommandError;
   /** "shop · production · shop-prod" */
   where: string;
-  onCheckAgain?: () => void;
+  /** The one thing to do from here: Check again, Rerun…, Review configuration. */
+  action?: { label: string; run: () => void };
 }) {
   const { title, body } = refusalWording(error);
   // A changed host key never gets a command to run.
@@ -69,15 +76,15 @@ export function Refusal({
     <div className="workspace-body">
       <h2 className="refusal-title">{title}</h2>
       <p className="muted">{where}</p>
-      <p className="workspace-message">{body ?? error.message}</p>
+      <p className="workspace-message">{withCode(body ?? error.message)}</p>
       {step?.kind === "command" && (
         <CommandBox prefix={step.prefix} command={step.command} copyText={step.copyText} />
       )}
       {step?.kind === "text" && <p className="workspace-message">{step.text}</p>}
-      {onCheckAgain && (
+      {action && (
         <p className="workspace-message">
-          <button type="button" className="button" onClick={onCheckAgain}>
-            Check again
+          <button type="button" className="button" onClick={action.run}>
+            {action.label}
           </button>
         </p>
       )}

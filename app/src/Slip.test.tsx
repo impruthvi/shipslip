@@ -58,7 +58,8 @@ describe("receipt slips", () => {
       "Copy slip from-step staging 1",
       "Copy slip deploy staging",
     ]);
-    expect(screen.getByText("`slip from-step staging 1`")).toBeInTheDocument();
+    const command = screen.getByText("slip from-step staging 1", { selector: "p code" });
+    expect(command.textContent).not.toContain("`");
   });
 
   test("the header: run id, local start time with UTC on hover, from → to", () => {

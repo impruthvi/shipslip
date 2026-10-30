@@ -1626,6 +1626,10 @@ fn run_endings_name_the_result_and_ask_for_attention_only_when_needed() {
     let mut watch = shipslip::WatchResult::not_run();
     watch.overflow_groups = 1;
     let errors = ending_after(vec![DeployEvent::WatchFinished(watch), finished(Succeeded)]);
+    assert_eq!(
+        errors.title,
+        "example → production: succeeded, 1 new error group"
+    );
     assert!(
         !errors.critical && errors.flagged,
         "new errors badge, gently"
@@ -1921,4 +1925,12 @@ fn lock_held_refusals_say_live_or_stale_and_offer_break_lock() {
     );
     assert_eq!(fetch.blocked_kind, Some(BlockedKind::FetchFailed));
     assert!(fetch.next_step.is_none());
+
+    let current = prepare_error(
+        PrepareError::Blocked(shipslip::BlockReason::UpToDate),
+        &key,
+        "web1",
+    );
+    assert_eq!(current.blocked_kind, Some(BlockedKind::UpToDate));
+    assert!(current.message.contains("Rerun"));
 }

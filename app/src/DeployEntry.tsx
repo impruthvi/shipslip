@@ -1,5 +1,6 @@
 import { useEffect, useState, type Ref } from "react";
 import { deploy } from "./deployApi";
+import { withCode } from "./text";
 import type { DeployEntry, RecoveryAction } from "./types";
 
 export interface EntryAt {
@@ -80,8 +81,8 @@ export function DeployEntryBar({
       {notice && <p className="deploy-entry-notice muted">{notice}</p>}
       {recovery && (
         <section className="recovery" aria-label="What the last run left">
-          <p className="recovery-sentence">{recovery.sentence}</p>
-          {recovery.advice && <p className="muted">{recovery.advice}</p>}
+          <p className="recovery-sentence">{withCode(recovery.sentence)}</p>
+          {recovery.advice && <p className="muted">{withCode(recovery.advice)}</p>}
           {recovery.actions.map((action, i) => (
             <div className="recovery-action" key={action.kind}>
               <button

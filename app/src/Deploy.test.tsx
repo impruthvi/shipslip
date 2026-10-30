@@ -569,6 +569,59 @@ test("a held lock can be checked again", async () => {
   expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
 });
 
+test("an env already up to date offers a rerun from its refusal", async () => {
+  const { pending } = await openWorkspace();
+  await act(async () =>
+    pending.reject({
+      code: "blocked",
+      blockedKind: "upToDate",
+      message: "The server is already on the newest commit. Rerun runs the steps again on it.",
+    } as CommandError),
+  );
+  expect(screen.getByRole("heading", { level: 2, name: "Already up to date" })).toBeInTheDocument();
+  prepare.mockReturnValue(new Promise(() => {}));
+  fireEvent.click(screen.getByRole("button", { name: "Rerun…" }));
+  expect(prepare).toHaveBeenLastCalledWith(1, expect.any(Number), expect.any(String), "Rerun", expect.any(Function));
+});
+
+test("settings that changed after the map was read lead to their review, not a CLI command", async () => {
+  const { pending } = await openWorkspace();
+  await act(async () =>
+    pending.reject({
+      code: "untrusted",
+      message: "config for `production` is untrusted; run `slip trust production` first. Review and approve these settings first.",
+    } as CommandError),
+  );
+  const main = within(screen.getByRole("main"));
+  expect(main.getByRole("heading", { level: 2, name: "These settings need approval" })).toBeInTheDocument();
+  expect(
+    main.getByText("The settings for this env changed since they were approved. Review them before deploying."),
+  ).toBeInTheDocument();
+  reviewTrust.mockResolvedValue(fixtures.trustReview);
+  fireEvent.click(main.getByRole("button", { name: "Review configuration" }));
+  await settle();
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Review configuration · /);
+  expect(screen.getByRole("button", { name: "Approve configuration" })).toBeInTheDocument();
+});
+
+test("commands in library sentences show as code, never as markup", async () => {
+  entry.mockResolvedValue(
+    ready({
+      recovery: {
+        ...fixtures.recoveries[0]!,
+        sentence: "The log showed 1 new error group after this run. `slip logs <b>production</b>` shows the log.",
+        advice: null,
+      },
+    }),
+  );
+  await renderApp();
+  const pane = within(screen.getByRole("complementary", { name: "Receipt" }));
+  const code = pane.getByText("slip logs <b>production</b>");
+  expect(code.tagName).toBe("CODE");
+  expect(pane.queryByText(/`/)).toBeNull();
+  expect(code.querySelector("b")).toBeNull();
+});
+
 const upReview: RecoveryReview = {
   handle: "up-1",
   env: "production",
