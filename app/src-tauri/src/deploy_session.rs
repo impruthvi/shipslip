@@ -68,6 +68,7 @@ pub enum ErrorCode {
 pub enum BlockedKind {
     LockHeld,
     FetchFailed,
+    UpToDate,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1725,6 +1726,14 @@ fn prepare_error(error: PrepareError, key: &Key, alias: &str) -> CommandError {
         PrepareError::Blocked(shipslip::BlockReason::FetchFailed(output)) => {
             let mut result = CommandError::new(ErrorCode::Blocked, format!("The server could not fetch origin: {output}. Environments that require a local GitHub token must deploy through the CLI; token authentication is not available in the app."));
             result.blocked_kind = Some(BlockedKind::FetchFailed);
+            result
+        }
+        PrepareError::Blocked(shipslip::BlockReason::UpToDate) => {
+            let mut result = CommandError::new(
+                ErrorCode::Blocked,
+                "The server is already on the newest commit. Rerun runs the steps again on it.",
+            );
+            result.blocked_kind = Some(BlockedKind::UpToDate);
             result
         }
         other => CommandError::new(ErrorCode::Blocked, other.to_string()),

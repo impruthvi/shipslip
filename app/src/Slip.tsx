@@ -348,7 +348,7 @@ function NextSteps({ guidance }: { guidance: Guidance }) {
           <div className="guidance-line" key={index}>
             <p>
               {line.map((span, i) =>
-                span.kind === "text" ? span.text : <code key={i}>`{span.command}`</code>,
+                span.kind === "text" ? span.text : <code key={i}>{span.command}</code>,
               )}
             </p>
             {commands.map((span) => (

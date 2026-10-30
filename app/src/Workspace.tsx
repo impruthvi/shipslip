@@ -256,6 +256,18 @@ export function Workspace({
       (error: unknown) => refuse(error),
     );
   };
+  /** The refusal's way forward, if it has one. */
+  const refusalAction = (error: CommandError, retry: RunPlan | null) => {
+    if (error.blockedKind === "lockHeld" && retry !== null) {
+      return { label: "Check again", run: () => prepare(retry) };
+    }
+    if (error.blockedKind === "upToDate" && retry === "Deploy") {
+      return { label: "Rerun…", run: () => prepare("Rerun") };
+    }
+    // The settings changed after the map was read: review them here.
+    if (error.code === "untrusted") return { label: "Review configuration", run: loadTrust };
+    return undefined;
+  };
   const rerun = () => {
     if (screen.kind !== "preview") return;
     const { handle } = screen.review;
@@ -314,7 +326,7 @@ export function Workspace({
   const production = sub?.production ?? (screen.kind === "trust" ? screen.review.production : target.production);
   const where = [target.label, target.env, alias].filter(Boolean).join(" · ");
   const title =
-    start.kind === "trust"
+    start.kind === "trust" || screen.kind === "trust"
       ? `Review configuration · ${target.label} · ${target.env}`
       : `Deploy ${target.label} → ${target.env}`;
 
@@ -380,15 +392,7 @@ export function Workspace({
       )}
       {screen.kind === "refused" && (
         <>
-          <Refusal
-            error={screen.error}
-            where={where}
-            onCheckAgain={
-              screen.error.blockedKind === "lockHeld" && screen.retry !== null
-                ? () => prepare(screen.retry!)
-                : undefined
-            }
-          />
+          <Refusal error={screen.error} where={where} action={refusalAction(screen.error, screen.retry)} />
           <footer className="workspace-footer">
             <button type="button" className="button" onClick={() => onLeave("back")}>
               Back

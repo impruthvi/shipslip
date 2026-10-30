@@ -575,10 +575,16 @@ impl RunFeed {
         let new_errors = state
             .watch
             .as_ref()
-            .is_some_and(|watch| !watch.groups.is_empty() || watch.more_groups > 0);
+            .map_or(0, |watch| watch.groups.len() as u64 + watch.more_groups);
+        let mut title = format!("{} → {}: {words}", self.info.project, self.info.env);
+        if new_errors > 0 {
+            let noun = if new_errors == 1 { "group" } else { "groups" };
+            title.push_str(&format!(", {new_errors} new error {noun}"));
+        }
+        let new_errors = new_errors > 0;
         Ending {
             run_id: self.info.run_id.clone(),
-            title: format!("{} → {}: {words}", self.info.project, self.info.env),
+            title,
             critical,
             flagged: critical || new_errors,
         }

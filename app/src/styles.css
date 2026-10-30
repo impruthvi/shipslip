@@ -420,9 +420,11 @@ button {
 }
 
 .app-path {
+  overflow: hidden;
   font-size: var(--text-12);
   line-height: 16px;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .app-gone {
@@ -982,10 +984,6 @@ button {
   gap: 10px;
 }
 
-.guidance-line code {
-  font-family: inherit;
-}
-
 .guidance-note {
   font-size: var(--text-12);
   line-height: 16px;
@@ -1017,6 +1015,8 @@ button {
 
 .quit-backdrop {
   position: fixed;
+  /* Above the map's sticky header and app column. */
+  z-index: 20;
   inset: 0;
   display: flex;
   align-items: center;
