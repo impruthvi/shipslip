@@ -14,6 +14,7 @@ mod git_path;
 mod receipt_view;
 mod recovery;
 mod state;
+mod terminate;
 #[cfg(test)]
 mod ui_fixtures;
 mod view;
@@ -31,6 +32,7 @@ fn main() {
             }
         })
         .setup(|app| {
+            terminate::install(app.handle());
             let handle = app.handle().clone();
             let state = app.state::<Arc<commands::App>>();
             state.on_live_change(move |live| {
@@ -122,6 +124,12 @@ fn live(app: &AppHandle) -> bool {
     !app.state::<Arc<commands::App>>().quit_runs().is_empty()
 }
 
+/// A run is live or a preview holds a server lock: quitting goes through
+/// `request_quit` first.
+fn quit_needs_app(app: &AppHandle) -> bool {
+    live(app) || app.state::<Arc<commands::App>>().previews_open()
+}
+
 fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
@@ -131,7 +139,7 @@ fn show_main(app: &AppHandle) {
 }
 
 /// The quit dialog lives in the window, so a hidden window is shown first.
-fn request_quit(app: &AppHandle) {
+pub(crate) fn request_quit(app: &AppHandle) {
     if !live(app) {
         commands::exit(app);
         return;
