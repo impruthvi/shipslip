@@ -70,7 +70,7 @@ export const deploy: DeployBackend = {
       runId: null,
       targetSha: null,
       phase: "Bring this app out of maintenance mode",
-      remainingSteps: ["php artisan up"],
+      remainingSteps: [{ index: null, command: "php artisan up" }],
     }),
   reviewAttach: () => Promise.reject({ code: "notFound", message: "There is no unfinished run for this checkout and environment." }),
   confirm: () => later(fixtures.runInfo),

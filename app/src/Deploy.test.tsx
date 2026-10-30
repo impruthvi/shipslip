@@ -666,7 +666,7 @@ const upReview: RecoveryReview = {
   runId: null,
   targetSha: null,
   phase: "Bring this app out of maintenance mode",
-  remainingSteps: ["php artisan up"],
+  remainingSteps: [{ index: null, command: "php artisan up" }],
 };
 
 test("a failed run's recovery: one recommended action, each with its command", async () => {
@@ -691,7 +691,8 @@ test("bring the app up: a confirm shows the one step and needs the name typed", 
   expect(reviewUp).toHaveBeenCalledWith(1, cell.row, cell.env);
   expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
   const steps = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("listitem");
-  expect(steps.map((s) => s.textContent)).toEqual(["1php artisan up"]);
+  expect(steps.map((s) => s.textContent)).toEqual(["offphp artisan up"]);
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Bring .+ → .+ out of maintenance$/);
   const go = screen.getByRole("button", { name: "Bring app out of maintenance" });
   expect(go).toBeDisabled();
   fireEvent.change(screen.getByLabelText("Type production to continue"), {
@@ -704,6 +705,8 @@ test("bring the app up: a confirm shows the one step and needs the name typed", 
   await act(async () => send({ ...fixtures.runBatches.running, handle: "up-1" }));
   const rows = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("button");
   expect(rows.map((r) => r.textContent)).toEqual(["·not startedoffMaintenance off: php artisan up"]);
+  // One step: nothing after it to stop before.
+  expect(screen.queryByRole("button", { name: "Stop after this step" })).toBeNull();
 });
 
 test("back from a recovery confirm frees its reservation", async () => {
@@ -730,13 +733,19 @@ test("attach shows the recorded run and what is left; a missing run is refused",
     runId: "1791795000000-0000beef",
     targetSha: "b".repeat(40),
     phase: "Steps",
-    remainingSteps: ["php artisan migrate --force", "php artisan optimize"],
+    remainingSteps: [
+      { index: 2, command: "php artisan migrate --force" },
+      { index: 3, command: "php artisan optimize" },
+    ],
   });
   await renderApp();
   fireEvent.click(screen.getByRole("button", { name: "Attach…" }));
   await settle();
   expect(screen.getByText("Run 1791795000000-0000beef · target bbbbbbb")).toBeInTheDocument();
   expect(screen.getByText("Last phase: Steps")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Attach to .+ → .+$/);
+  const left = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("listitem");
+  expect(left.map((s) => s.textContent)).toEqual(["2php artisan migrate --force", "3php artisan optimize"]);
   expect(screen.getByRole("button", { name: "Attach and continue" })).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Back" }));
   await settle();

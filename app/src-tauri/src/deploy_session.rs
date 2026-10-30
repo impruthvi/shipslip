@@ -18,7 +18,7 @@ use shipslip::{
     Confirmation, ExecutionHandle, PrepareError, PreparePhase, Preview, RunEvents, RunPlan,
 };
 
-use crate::recovery::{recovery, RecoveryView};
+use crate::recovery::{recovery_from, RecoveryView};
 use crate::view::{break_lock_command, refusal_command, Span};
 
 mod events;
@@ -267,7 +267,27 @@ pub struct RecoveryReview {
     pub run_id: Option<String>,
     pub target_sha: Option<String>,
     pub phase: String,
-    pub remaining_steps: Vec<String>,
+    pub remaining_steps: Vec<RemainingStep>,
+}
+
+/// A step a recovery would run: its recipe number, or `None` for
+/// `php artisan up` on its own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RemainingStep {
+    pub index: Option<usize>,
+    pub command: String,
+}
+
+/// Where an unfinished run was, in words.
+fn phase_words(phase: &receipt::ReceiptPhase) -> String {
+    match phase {
+        receipt::ReceiptPhase::Preview => "Preview".into(),
+        receipt::ReceiptPhase::MaintenanceDown => "Turning maintenance on".into(),
+        receipt::ReceiptPhase::Step(step) => format!("Step {step}"),
+        receipt::ReceiptPhase::BetweenSteps => "Between steps".into(),
+        receipt::ReceiptPhase::MaintenanceUp => "Turning maintenance off".into(),
+        receipt::ReceiptPhase::Finished => "Finished".into(),
+    }
 }
 
 /// What "Review deploy…" offers for one checkout and env.
@@ -323,9 +343,12 @@ fn entry_sync(checkout: &Path, env: &str, trust_path: &Path, receipts_root: &Pat
             production: snapshot.production,
             needs_trust: !matches!(status, TrustStatus::Trusted),
             steps: snapshot.steps.iter().map(|s| escape_field(s)).collect(),
-            recovery: newest_run(receipts_root, config.project_name(), env, &checkout)
-                .as_ref()
-                .and_then(recovery),
+            recovery: recovery_from(&newest_runs(
+                receipts_root,
+                config.project_name(),
+                env,
+                &checkout,
+            )),
         },
         Err(error) => unavailable(format!(
             "Approved settings can't be read: {}",
@@ -337,26 +360,29 @@ fn entry_sync(checkout: &Path, env: &str, trust_path: &Path, receipts_root: &Pat
 /// How many of the env's newest receipts are searched for this checkout's.
 const NEWEST_RUNS: usize = 20;
 
-/// This checkout's newest receipt for the env. An unreadable newer receipt
+/// This checkout's receipts for the env, newest first. An unreadable receipt
 /// hides older ones: its run may be the one that matters.
-fn newest_run(
+fn newest_runs(
     receipts_root: &Path,
     project: &str,
     env: &str,
     checkout: &Path,
-) -> Option<receipt::Receipt> {
-    let listing = receipt::list(receipts_root, project, Some(env), Some(NEWEST_RUNS)).ok()?;
+) -> Vec<receipt::Receipt> {
+    let Ok(listing) = receipt::list(receipts_root, project, Some(env), Some(NEWEST_RUNS)) else {
+        return Vec::new();
+    };
     let checkout = checkout.to_string_lossy();
+    let mut runs = Vec::new();
     for row in listing.rows {
         match row {
             receipt::Listed::Receipt { receipt, .. } if receipt.repo_root == checkout => {
-                return Some(*receipt)
+                runs.push(*receipt)
             }
             receipt::Listed::Receipt { .. } => {}
-            _ => return None,
+            _ => break,
         }
     }
-    None
+    runs
 }
 
 /// What a preview is waiting on, sent as each phase starts.
@@ -1054,7 +1080,10 @@ impl<C: Connector> Sessions<C> {
             run_id: None,
             target_sha: None,
             phase: "Bring this app out of maintenance mode".into(),
-            remaining_steps: vec!["php artisan up".into()],
+            remaining_steps: vec![RemainingStep {
+                index: None,
+                command: "php artisan up".into(),
+            }],
         };
         state.slots.insert(
             key,
@@ -1127,7 +1156,7 @@ impl<C: Connector> Sessions<C> {
             path: escape_field(&receipt.target.path),
             run_id: Some(escape_field(&receipt.run_id)),
             target_sha: Some(escape_field(&receipt.target_sha)),
-            phase: format!("{:?}", receipt.phase),
+            phase: phase_words(&receipt.phase),
             remaining_steps: receipt
                 .steps
                 .iter()
@@ -1137,7 +1166,10 @@ impl<C: Connector> Sessions<C> {
                         ReceiptStepStatus::Ok | ReceiptStepStatus::Skipped
                     )
                 })
-                .map(|step| escape_field(&step.command))
+                .map(|step| RemainingStep {
+                    index: Some(step.index),
+                    command: escape_field(&step.command),
+                })
                 .collect(),
         };
         state.slots.insert(
@@ -1814,6 +1846,7 @@ mod tests;
 /// feed the commands use.
 #[cfg(test)]
 pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, serde_json::Value> {
+    use crate::recovery::recovery;
     use serde_json::to_value;
     use shipslip::{DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, StepStatus};
     let info = RunInfo::sample("run-1", "deploy");

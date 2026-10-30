@@ -49,8 +49,8 @@ export function RecoveryConfirm({
             <ol className="recipe mono">
               {review.remainingSteps.map((step, i) => (
                 <li key={i}>
-                  <span className="recipe-index muted">{i + 1}</span>
-                  <code>{step}</code>
+                  <span className="recipe-index muted">{step.index ?? "off"}</span>
+                  <code>{step.command}</code>
                 </li>
               ))}
             </ol>

@@ -260,14 +260,17 @@ export function Running({
             Stop watching
           </button>
         ) : (
-          <button
-            type="button"
-            className="button"
-            disabled={stopping !== null || !state || terminal !== null}
-            onClick={() => stop("afterStep")}
-          >
-            Stop after this step
-          </button>
+          // Bringing the app up is one step: there is no step after it to stop before.
+          info.operation !== "up" && (
+            <button
+              type="button"
+              className="button"
+              disabled={stopping !== null || !state || terminal !== null}
+              onClick={() => stop("afterStep")}
+            >
+              Stop after this step
+            </button>
+          )
         )}
         {stopping && (
           <span className="muted">
