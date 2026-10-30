@@ -124,6 +124,26 @@ pub enum MarkView {
 pub struct OutcomeView {
     pub text: String,
     pub tone: Tone,
+    pub kind: OutcomeKind,
+}
+
+/// How a run ended, for the one status word a map cell shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OutcomeKind {
+    Succeeded,
+    /// A step exited non-zero.
+    Failed,
+    /// Stopped after a step, by the user or a lost lock.
+    Stopped,
+    /// Stopped before any deploy step ran; maintenance mode may be on.
+    StoppedInMaintenance,
+    /// Nothing changed on the server.
+    Cancelled,
+    /// A step's result could not be read.
+    Unknown,
+    /// The receipt is still in progress.
+    Unfinished,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -143,6 +163,18 @@ pub struct FlagView {
     /// Something may be wrong now: new errors, a failed smoke check, or the
     /// app left in maintenance mode. Other flags say what was not recorded.
     pub bad: bool,
+    pub kind: FlagKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FlagKind {
+    NewErrors,
+    LogNotFullyObserved,
+    LogNotRecorded,
+    SmokeFailed,
+    SmokeNotRecorded,
+    AppLeftDown,
 }
 
 #[derive(Debug, Serialize)]
@@ -327,10 +359,26 @@ fn attempt_view(attempt: &AttemptSummary, now_ms: u128, locators: &mut Locators)
     }
 }
 
-fn outcome(badge: &Badge) -> OutcomeView {
+pub fn outcome(badge: &Badge) -> OutcomeView {
     OutcomeView {
         text: escape_field(&badge.headline()),
         tone: tone(badge),
+        kind: outcome_kind(badge),
+    }
+}
+
+fn outcome_kind(badge: &Badge) -> OutcomeKind {
+    if badge.unfinished {
+        return OutcomeKind::Unfinished;
+    }
+    match &badge.outcome {
+        Some(DeployOutcome::Succeeded) => OutcomeKind::Succeeded,
+        Some(DeployOutcome::FailedAtStep { .. }) => OutcomeKind::Failed,
+        Some(DeployOutcome::StoppedAfterStep { .. }) => OutcomeKind::Stopped,
+        Some(DeployOutcome::StoppedInMaintenance(_)) => OutcomeKind::StoppedInMaintenance,
+        Some(DeployOutcome::Unknown { .. }) => OutcomeKind::Unknown,
+        Some(DeployOutcome::CancelledBeforeChanges | DeployOutcome::AbortedBeforeChanges(_))
+        | None => OutcomeKind::Cancelled,
     }
 }
 
@@ -362,6 +410,14 @@ pub fn flags(badge: &Badge) -> Vec<FlagView> {
                 flag,
                 Flag::NewErrors(_) | Flag::SmokeFailed(_) | Flag::AppLeftDown
             ),
+            kind: match flag {
+                Flag::NewErrors(_) => FlagKind::NewErrors,
+                Flag::LogNotFullyObserved => FlagKind::LogNotFullyObserved,
+                Flag::LogNotRecorded => FlagKind::LogNotRecorded,
+                Flag::SmokeFailed(_) => FlagKind::SmokeFailed,
+                Flag::SmokeNotRecorded => FlagKind::SmokeNotRecorded,
+                Flag::AppLeftDown => FlagKind::AppLeftDown,
+            },
         })
         .collect()
 }
@@ -639,6 +695,35 @@ mod tests {
             .flags
             .iter()
             .any(|flag| flag.text == "app may be in maintenance mode" && flag.bad));
+        // The map words it as possible maintenance, not as a failed step.
+        assert_eq!(last.outcome.kind, OutcomeKind::StoppedInMaintenance);
+        assert!(last
+            .flags
+            .iter()
+            .any(|flag| flag.kind == FlagKind::AppLeftDown));
+        assert_eq!(cell.outcome.as_ref().unwrap().kind, OutcomeKind::Succeeded);
+    }
+
+    #[test]
+    fn unknown_and_unfinished_receipts_keep_distinct_structured_outcomes() {
+        for (unfinished, expected) in [
+            (false, OutcomeKind::Unknown),
+            (true, OutcomeKind::Unfinished),
+        ] {
+            let fx = Fixture::new();
+            let mut receipt = run(1, "staging");
+            receipt["outcome"] = json!({"Unknown": {"step": 1, "reason": "Connection lost"}});
+            receipt["steps"][1]["status"] = json!("Unknown");
+            if unfinished {
+                receipt["status"] = json!("InProgress");
+                receipt["finished_at_ms"] = Value::Null;
+            }
+            fx.save(&receipt);
+            let (view, _) = load(&fx);
+            let outcome = present(&view, 0, 0).outcome.as_ref().unwrap();
+            assert_eq!(outcome.kind, expected);
+            assert_eq!(outcome.tone, Tone::Bad);
+        }
     }
 
     #[test]

@@ -223,7 +223,7 @@ button {
   display: flex;
   flex-direction: column;
   gap: var(--space-16);
-  padding: 0 var(--space-24) var(--space-16);
+  padding: 0 20px var(--space-16);
 }
 
 /* The window's title bar: macOS draws the traffic lights over the sidebar. */
@@ -234,8 +234,8 @@ button {
   height: 52px;
   flex-shrink: 0;
   border-bottom: 1px solid var(--color-rule);
-  margin: 0 calc(-1 * var(--space-24));
-  padding: 0 var(--space-24);
+  margin: 0 -20px;
+  padding: 0 20px;
 }
 
 .toolbar-title {
@@ -260,7 +260,7 @@ button {
 }
 
 .sidebar {
-  width: 220px;
+  width: 200px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -282,8 +282,12 @@ button {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 0;
+  margin: 0 0 var(--space-4);
   padding: 0 var(--space-8);
+  font-size: var(--text-12);
+  line-height: 16px;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-muted);
 }
 
 .side-count {
@@ -305,17 +309,39 @@ button {
 
 .side-item {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 2px var(--space-8);
+  flex-direction: column;
+  gap: 2px;
   width: 100%;
   min-height: 28px;
-  padding: var(--space-4) var(--space-8);
+  padding: 5px var(--space-8);
   border-radius: var(--radius-sm);
   text-align: left;
 }
 
-.side-item:hover {
+.side-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  width: 100%;
+}
+
+.side-why {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  padding-left: 18px;
+  font-size: var(--text-11);
+  line-height: 14px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.side-item-static {
+  cursor: default;
+}
+
+button.side-item:hover {
   background: color-mix(in srgb, var(--color-text) 6%, transparent);
 }
 
@@ -336,23 +362,36 @@ button {
   font-size: var(--text-11);
 }
 
-/* Status sits under the name, in line with it. */
-.side-name:has(+ .flap) {
-  flex-basis: calc(100% - 26px);
+.side-why-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .sidebar .flap {
-  margin-left: 18px;
+  flex-shrink: 0;
+  font-size: var(--text-11);
+  line-height: 14px;
 }
 
 .side-name + .side-meta {
   flex-shrink: 0;
 }
 
+/* An unreadable receipt is a note, not a failed deploy. */
 .sidebar .banner {
   flex-direction: column;
   gap: var(--space-4);
-  padding: var(--space-8);
+  padding: 0 var(--space-8);
+  background: none;
+}
+
+.sidebar .banner-title {
+  color: var(--color-text);
+  font-size: var(--text-12);
+}
+
+.sidebar .warning-icon {
+  stroke: var(--color-status-attention);
 }
 
 .sidebar .banner-detail {
@@ -553,7 +592,7 @@ button {
   position: sticky;
   left: 0;
   z-index: 1;
-  width: 180px;
+  width: 150px;
   flex-shrink: 0;
   display: flex;
   align-items: baseline;
@@ -573,11 +612,57 @@ button {
 
 .grid-env {
   flex: 1 1 0;
-  min-width: 240px;
+  min-width: 232px;
+  max-width: 360px;
 }
 
 .grid-heads .grid-env {
-  padding-left: var(--space-8);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--space-4);
+  padding: 0 var(--space-8);
+}
+
+.grid-head-env {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Status, commit and age line up under these in every row. */
+.cell-head,
+.grid-subheads {
+  display: grid;
+  grid-template-columns: 10px 92px 52px 1fr;
+  align-items: center;
+  column-gap: 6px;
+}
+
+.grid-subheads {
+  font-size: var(--text-11);
+  line-height: 14px;
+}
+
+.grid-row-open {
+  background: color-mix(in srgb, var(--color-selection) 55%, transparent);
+}
+
+.grid-row-open .grid-app {
+  background: transparent;
+}
+
+.cell-absent {
+  display: block;
+  padding: 9px var(--space-8);
+  padding-left: calc(var(--space-8) + 18px);
+}
+
+.cell-reason {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .app-name {
@@ -675,10 +760,6 @@ button {
 }
 
 .cell-head {
-  display: grid;
-  grid-template-columns: 10px 92px 64px 1fr;
-  align-items: center;
-  column-gap: var(--space-8);
   height: 20px;
 }
 
@@ -738,6 +819,7 @@ button {
 .cell-age {
   grid-column: 4;
   font-size: var(--text-12);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
@@ -749,11 +831,11 @@ button {
 .flap {
   position: relative;
   overflow: hidden;
-  padding: 1px 6px;
+  padding: 1px 5px;
   border-radius: 3px;
   background: var(--color-surface-alt);
   box-shadow: inset 0 0 0 1px var(--color-rule);
-  font-size: var(--text-12);
+  font-size: var(--text-11);
   line-height: 16px;
   font-weight: var(--font-weight-semibold);
   white-space: nowrap;
@@ -946,13 +1028,57 @@ button {
 
 /* Receipt pane */
 
+.inspector-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin-bottom: var(--space-12);
+  flex-shrink: 0;
+}
+
+.inspector-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  font-size: var(--text-16);
+  line-height: var(--leading-body);
+  font-weight: var(--font-weight-semibold);
+}
+
+.inspector-target {
+  font-size: var(--text-12);
+  overflow-wrap: anywhere;
+}
+
+.inspector-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  margin: var(--space-4) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-12);
+  line-height: 16px;
+}
+
+.inspector-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.inspector-warning .warning-icon {
+  padding-top: 2px;
+  stroke: currentColor;
+}
+
 .pane {
   position: relative;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  padding: 52px var(--space-24) var(--space-24);
+  padding: 52px 20px var(--space-24);
   border-left: 1px solid var(--color-rule);
   background: var(--color-surface-alt);
 }
@@ -1496,12 +1622,14 @@ button {
   flex-direction: column;
 }
 
+/* The deploy screens' title lives in the window's title bar. */
 .workspace-header {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-4);
-  padding-top: var(--space-8);
-  padding-bottom: var(--space-16);
+  align-items: center;
+  gap: var(--space-12);
+  height: 52px;
+  margin: 0 -20px;
+  padding: 0 20px;
   border-bottom: 1px solid var(--color-rule);
   flex-shrink: 0;
 }
@@ -1509,23 +1637,26 @@ button {
 .workspace-heading {
   display: flex;
   align-items: center;
-  gap: var(--space-12);
+  gap: var(--space-8);
+  min-width: 0;
 }
 
 .workspace-heading h1 {
-  font-size: var(--text-22);
-  line-height: 28px;
-  letter-spacing: -0.01em;
+  overflow: hidden;
+  font-size: 15px;
+  line-height: 20px;
   font-weight: var(--font-weight-semibold);
-}
-
-.workspace-heading .link {
-  margin-left: auto;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .workspace-target {
+  overflow: hidden;
+  margin-left: auto;
   font-size: var(--text-12);
   line-height: 18px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .workspace-body {
@@ -1533,6 +1664,7 @@ button {
   min-height: 0;
   overflow-y: auto;
   padding-bottom: var(--space-24);
+  max-width: 880px;
   font-size: var(--text-13);
   line-height: var(--leading-body);
 }
@@ -1599,6 +1731,7 @@ button {
 
 .phase,
 .run-progress {
+  margin-top: var(--space-16);
   font-size: var(--text-14);
   line-height: var(--leading-body);
   font-weight: var(--font-weight-medium);
@@ -1611,6 +1744,11 @@ button {
   margin: 0;
   padding-left: var(--space-16);
   color: var(--color-status-attention);
+}
+
+.recipe-note {
+  margin-left: var(--space-8);
+  font-size: var(--text-12);
 }
 
 .recipe-watch {
@@ -1853,6 +1991,7 @@ button {
 .deploy-entry-row,
 .deploy-entry-more {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-8);
 }
 

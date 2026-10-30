@@ -155,7 +155,7 @@ export function Preview({
               <li>
                 <span className="recipe-index muted">off</span>
                 <code>php artisan up</code>
-                <span className="muted step-skip-note">once every step succeeds</span>
+                <span className="muted recipe-note">once every step succeeds</span>
               </li>
             )}
             {review.watchMs !== null && (

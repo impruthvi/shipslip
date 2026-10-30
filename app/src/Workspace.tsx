@@ -73,6 +73,12 @@ export function phaseText(progress: PrepareProgress): string {
   }
 }
 
+function planVerb(plan: RunPlan | null): string {
+  if (plan === "Rerun") return "Rerun";
+  if (plan !== null && typeof plan === "object") return `Run from step ${plan.FromStep} ·`;
+  return "Deploy";
+}
+
 /** A thrown value from a command, as the refusal it carries. */
 function refusal(error: unknown): CommandError {
   if (error && typeof error === "object" && "message" in error && "code" in error) {
@@ -336,6 +342,17 @@ export function Workspace({
       : start.kind === "follow"
         ? start.info.operation
         : "deploy";
+  // The verb follows the plan being run: a rerun is not called a deploy.
+  const plan: RunPlan | null =
+    screen.kind === "preparing" || screen.kind === "taken"
+      ? screen.plan
+      : screen.kind === "preview"
+        ? screen.review.runPlan
+        : screen.kind === "running"
+          ? screen.info.runPlan
+          : start.kind === "deploy"
+            ? start.plan
+            : null;
   const title =
     start.kind === "trust" || screen.kind === "trust"
       ? `Review configuration · ${target.label} · ${target.env}`
@@ -343,19 +360,19 @@ export function Workspace({
         ? `Bring ${target.label} → ${target.env} out of maintenance`
         : operation === "attach"
           ? `Attach to ${target.label} → ${target.env}`
-          : `Deploy ${target.label} → ${target.env}`;
+          : `${planVerb(plan)} ${target.label} → ${target.env}`;
 
   return (
     <div className="workspace">
-      <header className="workspace-header">
-        <div className="workspace-heading">
+      <header className="workspace-header" data-tauri-drag-region>
+        <div className="workspace-heading" data-tauri-drag-region>
           <h1 ref={heading} tabIndex={-1}>
             {title}
           </h1>
           {production && <span className="production-chip">PRODUCTION</span>}
         </div>
         {sub && (
-          <p className="workspace-target mono muted">
+          <p className="workspace-target mono muted" data-tauri-drag-region>
             {sub.sshAlias} · {sub.path}
           </p>
         )}

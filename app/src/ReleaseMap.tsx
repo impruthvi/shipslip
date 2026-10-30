@@ -91,10 +91,18 @@ export function ReleaseMap({
               App
             </div>
             {map.envs.map((env, col) => (
-              <div className="grid-env caps grid-head" role="columnheader" key={env}>
-                {col === source && <SourceMarker />}
-                {col === target && <TargetMarker />}
-                {env}
+              <div className="grid-env grid-head" role="columnheader" key={env}>
+                <span className="grid-head-env caps">
+                  {col === source && <SourceMarker />}
+                  {col === target && <TargetMarker />}
+                  {env}
+                </span>
+                <span className="grid-subheads muted" aria-hidden>
+                  <span />
+                  <span>Status</span>
+                  <span>Commit</span>
+                  <span>Age</span>
+                </span>
               </div>
             ))}
           </div>
@@ -136,12 +144,16 @@ export function ReleaseMap({
                     }
                     onClick={isPresent ? () => onSelect?.(r, col) : undefined}
                   >
+                    {cell.kind === "absent" && (
+                      <span className="cell-absent muted" aria-hidden>
+                        —
+                      </span>
+                    )}
                     {cell.kind === "present" && (
                       <Cell
                         cell={cell}
                         selected={isSelected}
                         compareLine={compareLine}
-                        onOpen={onSelect && ((view) => onSelect(r, col, view))}
                         live={liveLine}
                         expanded={selected?.row === r}
                       />

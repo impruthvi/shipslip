@@ -100,19 +100,6 @@ test("tabs switch between the latest attempt and the recorded code; arrows move 
   expect(tabs.getByRole("tab", { name: "Latest attempt" })).toHaveFocus();
 });
 
-test("Last: in the cell opens the latest attempt", async () => {
-  render(<App />);
-  await settle();
-  fireEvent.click(gridcell("/Users/you/code/shop", "production"));
-  await settle();
-  const { cell } = at("/Users/you/code/shop", "production");
-  expect(loadReceipt).toHaveBeenLastCalledWith(loaded.generation, cell.receipt);
-  fireEvent.click(screen.getByRole("button", { name: /^Last: cancelled before changes/ }));
-  await settle();
-  expect(loadReceipt).toHaveBeenLastCalledWith(loaded.generation, cell.lastAttempt!.receipt);
-  expect(within(pane()).getByText(/^Latest attempt · /)).toBeInTheDocument();
-});
-
 test("an expanded error on one receipt does not stay expanded on the next", async () => {
   render(<App />);
   await settle();

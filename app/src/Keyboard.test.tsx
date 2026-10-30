@@ -175,16 +175,6 @@ test("⌘I closing the drawer from inside it puts focus back on the cell", async
   expect(shop).toHaveFocus();
 });
 
-test("Enter on a link inside a cell is the link's, not the cell's", async () => {
-  render(<App />);
-  await settle();
-  const last = screen.getByRole("button", { name: /^Last: stopped in maintenance/ });
-  last.focus();
-  fireEvent.keyDown(last, { key: "Enter" });
-  await settle();
-  expect(screen.queryByRole("heading", { name: "api · production" })).not.toHaveFocus();
-});
-
 test("Select cell in the problems strip selects and focuses that cell", async () => {
   render(<App />);
   await settle();

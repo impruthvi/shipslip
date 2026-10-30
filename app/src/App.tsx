@@ -3,6 +3,7 @@ import { useAnnouncer } from "./Announcer";
 import { ComparePicker } from "./ComparePicker";
 import { liveText } from "./Cell";
 import { DeployEntryBar, useDeployEntry, type EntryChoice } from "./DeployEntry";
+import { InspectorHead } from "./Inspector";
 import { MapArea } from "./MapArea";
 import { useNarrow, usePaneWidth } from "./pane";
 import { ReceiptPane, type SlipMeta } from "./ReceiptPane";
@@ -32,7 +33,7 @@ export default function App() {
   const { selected, select } = useSelection(map);
   const { pair, setPair, lines } = useCompare(loaded);
   const { width, resize } = usePaneWidth();
-  const narrow = useNarrow();
+  const narrow = useNarrow(width);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [paneView, setPaneView] = useState<{ key: string; view: PaneView } | null>(null);
   /** The cell whose run just ended: its new receipt slides up into the pane. */
@@ -239,31 +240,29 @@ export default function App() {
         live={liveLines}
       />
       <main className="main">
-        <header className="toolbar" data-tauri-drag-region>
-          {!workspace && (
-            <>
-              <h1 className="toolbar-title" data-tauri-drag-region>
-                Release map
-              </h1>
-              <p className="toolbar-subtitle muted" data-tauri-drag-region>
-                Last recorded code on each app and environment. Deploys started here show live.
-              </p>
-            </>
-          )}
-          {map?.screen === "map" && !workspace && (
-            <ComparePicker envs={map.envs} pair={pair} onChange={setPair} />
-          )}
-          {narrow && request && !workspace && (
-            <button
-              type="button"
-              className="toolbar-button"
-              aria-expanded={drawerOpen}
-              onClick={() => setDrawerOpen(!drawerOpen)}
-            >
-              Receipt <kbd className="muted">⌘I</kbd>
-            </button>
-          )}
-        </header>
+        {!workspace && (
+          <header className="toolbar" data-tauri-drag-region>
+            <h1 className="toolbar-title" data-tauri-drag-region>
+              Release map
+            </h1>
+            <p className="toolbar-subtitle muted" data-tauri-drag-region>
+              Last recorded code on each app and environment. Deploys started here show live.
+            </p>
+            {map?.screen === "map" && (
+              <ComparePicker envs={map.envs} pair={pair} onChange={setPair} />
+            )}
+            {narrow && request && (
+              <button
+                type="button"
+                className="toolbar-button"
+                aria-expanded={drawerOpen}
+                onClick={() => setDrawerOpen(!drawerOpen)}
+              >
+                Receipt <kbd className="muted">⌘I</kbd>
+              </button>
+            )}
+          </header>
+        )}
         {workspace ? (
           <Workspace
             target={workspace.target}
@@ -300,6 +299,14 @@ export default function App() {
           width={width}
           onResize={resize}
           drawer={narrow}
+          head={
+            <InspectorHead
+              cell={request.meta.cell}
+              label={request.meta.label}
+              env={request.meta.env}
+              production={entry?.kind === "ready" && entry.production}
+            />
+          }
           entry={
             <DeployEntryBar
               entry={entry}

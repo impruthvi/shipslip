@@ -32,6 +32,8 @@ interface Props {
   drawer: boolean;
   /** A run just ended here: its receipt slides up as it shows. */
   print?: boolean;
+  /** Which app and env, its target and warnings, at the top. */
+  head?: ReactNode;
   /** The deploy button and recovery choices, above the slip. */
   entry?: ReactNode;
 }
@@ -52,6 +54,7 @@ export function ReceiptPane({
   onResize,
   drawer,
   print = false,
+  head,
   entry,
 }: Props) {
   const drag = useRef<{ x: number; width: number } | null>(null);
@@ -106,6 +109,7 @@ export function ReceiptPane({
         onLostPointerCapture={onPointerUp}
         onKeyDown={onKeyDown}
       />
+      {head}
       {entry}
       <ReceiptTabs cell={next.cell} role={next.role} onView={onView} />
       {opening && (

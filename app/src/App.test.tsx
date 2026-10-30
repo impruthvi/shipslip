@@ -119,8 +119,8 @@ test("launch selects the first cell that needs attention; clicks and problems se
   fireEvent.click(within(screen.getByLabelText("Problems")).getByRole("button", { name: "Select cell" }));
   expect(selected()[0]).toHaveTextContent("ddddddd");
 
-  const absent = screen.getAllByRole("gridcell").find((c) => c.childElementCount === 0)!;
-  fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: /^blog · production/ }));
+  const absent = screen.getAllByRole("gridcell").find((c) => c.getAttribute("aria-label")?.endsWith(", none"))!;
+  fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: /^blog Not known production$/ }));
   expect(selected()[0]).toHaveAccessibleName(/^blog, production/);
   expect(selected()[0]).toHaveFocus();
 
