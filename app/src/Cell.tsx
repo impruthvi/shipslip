@@ -25,7 +25,7 @@ function stateLine(cell: EnvCellView): { text: string; className: string } | nul
     case "notKnown":
       return {
         text: [outcome, ...cell.evidence].filter(Boolean).join(" · "),
-        className: "tone-bad",
+        className: "tone-attention",
       };
     case "noCode": {
       const text = [outcome, ...cell.evidence].filter(Boolean).join(" · ");

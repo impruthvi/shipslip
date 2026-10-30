@@ -322,13 +322,15 @@ test("running lists every step with its mark and follows the running step's outp
   const steps = within(screen.getByRole("region", { name: "Steps" }));
   const heads = steps.getAllByRole("button").map((b) => b.textContent);
   expect(heads).toEqual([
-    "✓doneonMaintenance on: php artisan down",
-    "✓done0git fast-forward",
+    "onMaintenance on: php artisan down",
+    "0git fast-forward",
     expect.stringMatching(/^1composer install --no-dev\d+s$/),
-    "·not started2php artisan migrate --force",
-    "·not started3php artisan optimize",
-    "·not startedoffMaintenance off: php artisan up",
+    "2php artisan migrate --force",
+    "3php artisan optimize",
+    "offMaintenance off: php artisan up",
   ]);
+  expect(steps.getAllByRole("img", { name: "done" })).toHaveLength(2);
+  expect(steps.getAllByRole("img", { name: "not started" })).toHaveLength(3);
   expect(steps.getByRole("img", { name: "running now" })).toBeInTheDocument();
   expect(screen.getByRole("region", { name: "Output of step 1" })).toHaveTextContent(
     "composer install --no-dev: working",
@@ -704,7 +706,7 @@ test("bring the app up: a confirm shows the one step and needs the name typed", 
   expect(confirm).toHaveBeenCalledWith("up-1", "production");
   await act(async () => send({ ...fixtures.runBatches.running, handle: "up-1" }));
   const rows = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("button");
-  expect(rows.map((r) => r.textContent)).toEqual(["·not startedoffMaintenance off: php artisan up"]);
+  expect(rows.map((r) => r.textContent)).toEqual(["offMaintenance off: php artisan up"]);
   // One step: nothing after it to stop before.
   expect(screen.queryByRole("button", { name: "Stop after this step" })).toBeNull();
 });

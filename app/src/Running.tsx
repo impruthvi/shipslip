@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Announce } from "./Announcer";
 import { deploy } from "./deployApi";
-import { Mark } from "./Mark";
+import { StepIcon } from "./Mark";
 import { applyBatch, runRows, watching, type RunLog } from "./run";
 import { countdown, elapsed, spoken } from "./time";
 import type { CommandError, OutputLine, ProgressStatus, RunInfo, Terminal } from "./types";
@@ -11,29 +11,18 @@ const TICK_MS = 1000;
 function StepMark({ status }: { status: ProgressStatus | undefined }) {
   switch (status) {
     case "Running":
-      return <Mark kind="live" />;
+      return <StepIcon kind="running" label="running now" />;
     case "Ok":
-      return <Glyph glyph="✓" label="done" className="tone-good" />;
+      return <StepIcon kind="ok" />;
     case "Failed":
-      return <Glyph glyph="✗" label="failed" className="tone-bad" />;
+      return <StepIcon kind="failed" />;
     case "Unknown":
-      return <Glyph glyph="◌" label="result unknown" className="tone-bad" />;
+      return <StepIcon kind="unknown" />;
     case "Skipped":
-      return <Glyph glyph="↷" label="skipped" className="muted" />;
+      return <StepIcon kind="skipped" />;
     default:
-      return <Glyph glyph="·" label="not started" className="muted" />;
+      return <StepIcon kind="notRun" label="not started" />;
   }
-}
-
-function Glyph({ glyph, label, className }: { glyph: string; label: string; className: string }) {
-  return (
-    <>
-      <span className={className} aria-hidden>
-        {glyph}
-      </span>
-      <span className="visually-hidden">{label}</span>
-    </>
-  );
 }
 
 /** A step's output: follows new lines unless scrolled up. Untrusted text, shown as text. */

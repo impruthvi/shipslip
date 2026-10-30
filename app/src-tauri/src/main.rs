@@ -247,11 +247,11 @@ mod tests {
     }
 
     #[test]
-    fn window_is_light_with_minimum_size() {
+    fn window_follows_system_appearance_with_minimum_size() {
         let conf = json(include_str!("../tauri.conf.json"));
         let window = &conf["app"]["windows"][0];
         assert_eq!(window["label"], "main");
-        assert_eq!(window["theme"], "Light");
+        assert!(window["theme"].is_null(), "the window follows macOS light/dark");
         assert_eq!(window["minWidth"], 1024);
         assert_eq!(window["minHeight"], 680);
     }

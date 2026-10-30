@@ -66,12 +66,12 @@ describe("cells", () => {
     expect(within(c).getByText("app may be in maintenance mode")).toHaveClass("sentence");
   });
 
-  test("not known: hatched, no commit, the reason in red", () => {
+  test("not known: hatched, no commit, the reason in attention amber, not failure red", () => {
     const c = cell("/Users/you/code/blog", "production");
     expect(c.querySelector(".cell")).toHaveClass("cell-hatched");
     expect(c).toHaveTextContent("server code not known");
     expect(c.querySelector(".cell-sha")).toBeNull();
-    expect(within(c).getByText(/fast-forward failed/)).toHaveClass("tone-bad");
+    expect(within(c).getByText(/fast-forward failed/)).toHaveClass("tone-attention");
   });
 
   test("approved but never deployed here: dashed, muted, says approved before", () => {

@@ -1,22 +1,4 @@
 @font-face {
-  font-family: "IBM Plex Sans";
-  font-weight: 400;
-  font-display: block;
-  src: url("./assets/fonts/IBMPlexSans-Regular.woff2") format("woff2");
-}
-@font-face {
-  font-family: "IBM Plex Sans";
-  font-weight: 500;
-  font-display: block;
-  src: url("./assets/fonts/IBMPlexSans-Medium.woff2") format("woff2");
-}
-@font-face {
-  font-family: "IBM Plex Sans";
-  font-weight: 600;
-  font-display: block;
-  src: url("./assets/fonts/IBMPlexSans-SemiBold.woff2") format("woff2");
-}
-@font-face {
   font-family: "IBM Plex Mono";
   font-weight: 400;
   font-display: block;
@@ -37,9 +19,9 @@
 }
 
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
 
-  /* Colors (Paper "Shipslip — Release map"). Components use these names only. */
+  /* Colors. Components use these names only. Light is warm paper. */
   --color-surface: #fafaf7;
   --color-surface-alt: #f1f0eb;
   --color-surface-raised: #ffffff;
@@ -53,11 +35,14 @@
   --color-status-bad: #b42318;
   --color-status-bad-soft: #fcedeb;
   --color-status-good: #1e6b45;
-  /* v2: the one primary action per screen is ink on paper. */
+  /* Needs a person to look: unknown, stale, maintenance uncertain. Never failure. */
+  --color-status-attention: #8f4f00;
+  --color-status-attention-soft: #fbf1e0;
+  /* The one primary action per screen is ink on paper. */
   --color-primary: #16181d;
   --color-on-primary: #fafaf7;
 
-  --font-sans: "IBM Plex Sans", sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
   --font-mono: "IBM Plex Mono", monospace;
   --font-weight-regular: 400;
   --font-weight-medium: 500;
@@ -87,6 +72,59 @@
   font-family: var(--font-sans);
   color: var(--color-text);
   background: var(--color-surface);
+}
+
+/* Dark follows macOS appearance: a graphite desk. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-surface: #1c1d20;
+    --color-surface-alt: #232427;
+    --color-surface-raised: #2a2b2f;
+    --color-text: #ececea;
+    --color-text-muted: #a5a8ae;
+    --color-rule: #37393e;
+    --color-hatch: #303236;
+    --color-selection: #26324d;
+    --color-accent: #9db3ff;
+    --color-status-bad: #ff9a8f;
+    --color-status-bad-soft: #3d2323;
+    --color-status-good: #7fd3a1;
+    --color-status-attention: #f2bb62;
+    --color-status-attention-soft: #3b2e18;
+    --color-primary: #ececea;
+    --color-on-primary: #1c1d20;
+  }
+}
+
+/* The receipt stays printed paper in both appearances. */
+.slip {
+  --color-surface: #fafaf7;
+  --color-surface-alt: #f1f0eb;
+  --color-surface-raised: #ffffff;
+  --color-text: #16181d;
+  --color-text-muted: #62666e;
+  --color-rule: #e2e0d9;
+  --color-hatch: #e6e4dd;
+  --color-selection: #e8ecf7;
+  --color-accent: #2445a8;
+  --color-focus: var(--color-accent);
+  --color-status-bad: #b42318;
+  --color-status-bad-soft: #fcedeb;
+  --color-status-good: #1e6b45;
+  --color-status-attention: #8f4f00;
+  --color-status-attention-soft: #fbf1e0;
+  color: var(--color-text);
+}
+
+/* A lit receipt on a dark desk: dimmed paper, same ink. */
+@media (prefers-color-scheme: dark) {
+  .slip {
+    --color-surface: #e9e6dd;
+    --color-surface-raised: #e9e6dd;
+    --color-surface-alt: #e4e0d6;
+    --color-text-muted: #575b63;
+    --color-rule: #cdc9be;
+  }
 }
 
 code,
@@ -503,6 +541,48 @@ button {
   flex-shrink: 0;
 }
 
+.mark-ink {
+  color: var(--color-text);
+}
+
+.mark-muted {
+  color: var(--color-text-muted);
+}
+
+.mark-good {
+  color: var(--color-status-good);
+}
+
+.mark-bad {
+  color: var(--color-status-bad);
+}
+
+.mark-attention {
+  color: var(--color-status-attention);
+}
+
+.mark-running {
+  color: var(--color-accent);
+}
+
+/* The one continuous motion in the app: a step that is running right now. */
+.mark-spin {
+  transform-origin: 5px 5px;
+  animation: mark-spin 1.2s linear infinite;
+}
+
+@keyframes mark-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mark-spin {
+    animation: none;
+  }
+}
+
 .cell-sha {
   flex: 1 1 0;
   font-size: var(--text-14);
@@ -533,7 +613,7 @@ button {
   display: flex;
   align-items: flex-start;
   gap: 6px;
-  color: var(--color-status-bad);
+  color: var(--color-status-attention);
 }
 
 .cell-warning .warning-icon {
@@ -578,6 +658,10 @@ button {
 
 .tone-bad {
   color: var(--color-status-bad);
+}
+
+.tone-attention {
+  color: var(--color-status-attention);
 }
 
 .legend {

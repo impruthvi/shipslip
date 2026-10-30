@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Announce } from "./Announcer";
 import { deploy } from "./deployApi";
-import { Mark } from "./Mark";
+import { StepIcon } from "./Mark";
 import { Preview, type PreviewBusy } from "./DeployPreview";
 import { RecoveryConfirm, type RecoveryBusy } from "./RecoveryConfirm";
 import { Refusal, refusalWording } from "./Refusal";
@@ -382,11 +382,9 @@ export function Workspace({
                   <li key={i} className="phase">
                     <span className="phase-mark">
                       {next ? (
-                        <span className="tone-good" aria-label="done">
-                          ✓
-                        </span>
+                        <StepIcon kind="ok" />
                       ) : (
-                        <Mark kind="live" />
+                        <StepIcon kind="running" />
                       )}
                     </span>
                     <span>{phaseText(progress)}</span>
