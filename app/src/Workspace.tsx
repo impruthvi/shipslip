@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { Announce } from "./Announcer";
+import { notify } from "./notify";
 import { deploy } from "./deployApi";
 import { StepIcon } from "./Mark";
 import { Preview, type PreviewBusy } from "./DeployPreview";
@@ -352,14 +353,6 @@ export function Workspace({
             {title}
           </h1>
           {production && <span className="production-chip">PRODUCTION</span>}
-          <button
-            type="button"
-            className="link"
-            disabled={!idle && screen.kind !== "running"}
-            onClick={back}
-          >
-            Release map
-          </button>
         </div>
         {sub && (
           <p className="workspace-target mono muted">
@@ -470,6 +463,7 @@ export function Workspace({
         <Running
           info={screen.info}
           announce={announce}
+          onLeave={() => onLeave("away")}
           onEnd={(terminal) => {
             const plan = screen.info.runPlan;
             if (terminal.kind === "finished" && terminal.lockTaken && plan !== null) {
@@ -478,6 +472,7 @@ export function Workspace({
               return;
             }
             announce(endSentence(terminal), true);
+            void notify(`${target.label} → ${target.env}`, endSentence(terminal));
             onLeave("finished");
           }}
         />

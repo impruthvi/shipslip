@@ -15,6 +15,7 @@ import { useSeen } from "./useSeen";
 import { useLiveRuns } from "./useLiveRuns";
 import { useSelection } from "./useSelection";
 import { Workspace, type DeployTarget, type Leave, type Start } from "./Workspace";
+import { notify } from "./notify";
 import { deploy } from "./deployApi";
 import type { RunInfo } from "./types";
 
@@ -34,6 +35,8 @@ export default function App() {
   const narrow = useNarrow();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [paneView, setPaneView] = useState<{ key: string; view: PaneView } | null>(null);
+  /** The cell whose run just ended: its new receipt slides up into the pane. */
+  const [printFor, setPrintFor] = useState<string | null>(null);
   /** Set by a keyboard open; the pane focuses the slip once it shows that receipt. */
   const [focusReceipt, setFocusReceipt] = useState(false);
   const [workspace, setWorkspace] = useState<{ target: DeployTarget; start: Start } | null>(null);
@@ -80,10 +83,18 @@ export default function App() {
   );
   // A run that ended away from the workspace shows on its cell; the selection stays.
   const { live, now } = useLiveRuns(
-    useCallback(() => {
-      refresh();
-      setEntryVersion((v) => v + 1);
-    }, [refresh]),
+    useCallback(
+      (ended: RunInfo[]) => {
+        refresh();
+        setEntryVersion((v) => v + 1);
+        // A run followed in the workspace tells its own end.
+        if (workspaceRef.current) return;
+        for (const run of ended) {
+          void notify(`${run.project} → ${run.env}`, "The run ended. Its receipt is on the release map.");
+        }
+      },
+      [refresh],
+    ),
   );
   const liveLines: Record<string, string> = {};
   for (const run of live.runs) liveLines[cellKey(run.checkout, run.env)] = liveText(run, now);
@@ -143,7 +154,9 @@ export default function App() {
         setApproved({ key: selectedKey ?? "", env: left.target.env });
       }
       if (how === "finished") {
-        // The new receipt opens in the pane, on the same cell.
+        // The new receipt opens in the pane, on the same cell, risk first.
+        setPaneView(null);
+        setPrintFor(selectedKey);
         setDrawerOpen(true);
         refresh();
       }
@@ -161,6 +174,7 @@ export default function App() {
     (r: number, col: number, next?: PaneView) => {
       if (!map) return;
       select(r, col);
+      setPrintFor(null);
       setPaneView(next ? { key: cellKey(map.rows[r].repoRoot, map.envs[col]), view: next } : null);
       setDrawerOpen(true);
       setFocusReceipt(false);
@@ -280,6 +294,7 @@ export default function App() {
           focusSlip={focusReceipt}
           onSlipFocused={() => setFocusReceipt(false)}
           opening={request.meta}
+          print={printFor === selectedKey}
           receipt={receipt}
           onView={onView}
           width={width}

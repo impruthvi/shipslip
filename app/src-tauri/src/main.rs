@@ -24,6 +24,7 @@ const QUIT: &str = "quit";
 fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(Arc::new(commands::App::from_env()))
         .menu(menu)
         .on_menu_event(|app, event| {
@@ -178,7 +179,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_grants_only_app_commands_window_event_drag_and_clipboard_write() {
+    fn capability_grants_only_app_commands_window_clipboard_write_and_notify() {
         let cap = json(include_str!("../capabilities/default.json"));
         let mut perms: Vec<&str> = cap["permissions"]
             .as_array()
@@ -217,6 +218,9 @@ mod tests {
                 "core:event:default",
                 "core:window:allow-start-dragging",
                 "core:window:default",
+                "notification:allow-is-permission-granted",
+                "notification:allow-notify",
+                "notification:allow-request-permission",
             ]
         );
         assert_eq!(cap["windows"], json(r#"["main"]"#));

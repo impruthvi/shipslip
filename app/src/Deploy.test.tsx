@@ -231,9 +231,19 @@ test("preview shows what ships; production deploys only once its name is typed",
   expect(screen.getByText("and 5 more")).toBeInTheDocument();
   const steps = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("listitem");
   expect(steps.map((s) => s.textContent)).toEqual([
+    "onphp artisan down",
+    "0git merge --ff-only bbbbbbb",
     "1composer install --no-dev",
     "2php artisan migrate --force",
     "3php artisan optimize",
+    "offphp artisan uponce every step succeeds",
+    "logwatch the Laravel log for 2 min",
+  ]);
+  const risks = within(screen.getByRole("region", { name: "Before you confirm" })).getAllByRole("listitem");
+  expect(risks.map((r) => r.textContent)).toEqual([
+    "The app is in maintenance mode from before the first step until every step succeeds. If a step fails, it stays in maintenance mode.",
+    "Step 2 changes the database (php artisan migrate --force). Shipslip cannot undo it.",
+    "A failed step stops the run. Nothing is retried or rolled back automatically.",
   ]);
 
   const deploy = screen.getByRole("button", { name: "Deploy to production" });
@@ -395,9 +405,16 @@ test("when the run ends the workspace closes, the map re-reads and the end is an
   await startRun();
   await act(async () => send(fixtures.runBatches.running));
   const reads = loadMap.mock.calls.length;
+  expect(screen.getByText(/^Step 1 of 3 · app in maintenance mode · \d/)).toBeInTheDocument();
   await act(async () => send(fixtures.runBatches.failed));
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
   expect(loadMap.mock.calls.length).toBe(reads + 1);
+  await settle();
+  // The new receipt slides up into the pane once, then later selections open plainly.
+  expect(document.querySelector(".pane-slip-print")).not.toBeNull();
+  fireEvent.click(screen.getAllByRole("gridcell").find((c) => c.getAttribute("aria-selected") === "false")!);
+  await settle();
+  expect(document.querySelector(".pane-slip-print")).toBeNull();
   expect(screen.getByTestId("announce-assertive")).toHaveTextContent("Deploy failed at step 1.");
   expect(unfollow).toHaveBeenCalled();
 });
@@ -811,6 +828,8 @@ test("run from step: pick first, then the preview strikes skipped steps", async 
   await act(async () => pending.resolve({ ...production, runPlan: { FromStep: 3 } }));
   const steps = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("listitem");
   expect(steps.filter((s) => s.classList.contains("step-skipped"))).toHaveLength(2);
+  // Step 2's migration is skipped, so it is not named as a risk.
+  expect(screen.getByRole("region", { name: "Before you confirm" })).not.toHaveTextContent("changes the database");
   expect(screen.getByText("1 step · maintenance on · log watch 2 min")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Run from step 3" })).toBeDisabled();
 });
@@ -929,8 +948,8 @@ test("a live run shows on its cell and in the sidebar, which leads back to it", 
   expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(`Deploy ${cell.label} → ${cell.env}`);
   expect(screen.getByText("Connecting to shop-prod…")).toBeInTheDocument();
 
-  // Release map leaves the run going and returns focus to the sidebar link.
-  fireEvent.click(screen.getByRole("button", { name: "Release map" }));
+  // Leave running goes back to the map and returns focus to the sidebar link.
+  fireEvent.click(screen.getByRole("button", { name: "Leave running" }));
   await settle();
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
   expect(stop).not.toHaveBeenCalled();

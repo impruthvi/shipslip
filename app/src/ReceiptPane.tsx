@@ -30,6 +30,8 @@ interface Props {
   onResize: (width: number) => void;
   /** Drawer mode: over the map instead of beside it. */
   drawer: boolean;
+  /** A run just ended here: its receipt slides up as it shows. */
+  print?: boolean;
   /** The deploy button and recovery choices, above the slip. */
   entry?: ReactNode;
 }
@@ -49,6 +51,7 @@ export function ReceiptPane({
   width,
   onResize,
   drawer,
+  print = false,
   entry,
 }: Props) {
   const drag = useRef<{ x: number; width: number } | null>(null);
@@ -113,7 +116,7 @@ export function ReceiptPane({
       {shown && (
         <div
           id="receipt-panel"
-          className={`pane-slip${opening ? " pane-slip-dim" : ""}`}
+          className={`pane-slip${opening ? " pane-slip-dim" : ""}${print ? " pane-slip-print" : ""}`}
           aria-busy={opening}
           role={tabs(next.cell).length > 1 ? "tabpanel" : undefined}
           aria-labelledby={tabs(next.cell).length > 1 ? `receipt-tab-${next.role}` : undefined}

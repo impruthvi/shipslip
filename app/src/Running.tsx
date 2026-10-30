@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Announce } from "./Announcer";
 import { deploy } from "./deployApi";
 import { StepIcon } from "./Mark";
-import { applyBatch, runRows, watching, type RunLog } from "./run";
+import { applyBatch, progressLine, runRows, watching, type RunLog } from "./run";
 import { countdown, elapsed, spoken } from "./time";
 import type { CommandError, OutputLine, ProgressStatus, RunInfo, Terminal } from "./types";
 
@@ -62,10 +62,13 @@ export function Running({
   info,
   announce,
   onEnd,
+  onLeave,
 }: {
   info: RunInfo;
   announce: Announce;
   onEnd: (terminal: Terminal) => void;
+  /** Back to the map; the run keeps going on the server and here. */
+  onLeave: () => void;
 }) {
   const [log, setLog] = useState<RunLog | null>(null);
   const [lost, setLost] = useState<CommandError | null>(null);
@@ -178,6 +181,13 @@ export function Running({
   return (
     <>
       <div className="workspace-body">
+        {state && !terminal && (
+          <p className="run-progress">
+            {[progressLine(info, state, rows), elapsed(Math.max(now, info.startedAtMs) - info.startedAtMs)]
+              .filter(Boolean)
+              .join(" · ")}
+          </p>
+        )}
         <section className="workspace-section" aria-labelledby="run-steps">
           <h2 id="run-steps" className="caps">
             Steps
@@ -267,6 +277,11 @@ export function Running({
           </span>
         )}
         {stopError && <span className="tone-bad">{stopError}</span>}
+        <div className="footer-end">
+          <button type="button" className="button" onClick={onLeave}>
+            Leave running
+          </button>
+        </div>
       </footer>
     </>
   );
