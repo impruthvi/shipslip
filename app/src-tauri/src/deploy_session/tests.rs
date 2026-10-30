@@ -1458,17 +1458,109 @@ fn no_run_starts_once_quitting_and_an_idle_app_quits_at_once() {
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Cancelled);
         assert_eq!(remote.launches.load(Ordering::SeqCst), 0);
-        let deploy = sessions
+        // No new preview takes the server lock either.
+        let error = sessions
             .prepare(root, "production".into(), RunPlan::Deploy)
             .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Cancelled);
+        assert_eq!(remote.preflight_entered.load(Ordering::SeqCst), 0);
+        assert!(!remote.held.load(Ordering::SeqCst));
+        assert!(live.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn closing_previews_on_exit_releases_an_open_previews_lock() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        assert!(!sessions.previews_open());
+        sessions
+            .prepare(root.clone(), "production".into(), RunPlan::Deploy)
+            .await
             .unwrap();
+        assert!(sessions.previews_open());
+        sessions.close_previews().await;
+        assert!(!sessions.previews_open());
+        assert_eq!(remote.released.load(Ordering::SeqCst), 1);
+        assert!(!remote.held.load(Ordering::SeqCst));
+        // The app is exiting: no new preview takes the lock again.
         let error = sessions
-            .confirm(&deploy.handle, Some("production".into()))
+            .prepare(root, "production".into(), RunPlan::Deploy)
             .await
             .unwrap_err();
         assert_eq!(error.code, ErrorCode::Cancelled);
         assert!(!remote.held.load(Ordering::SeqCst));
-        assert!(live.lock().unwrap().is_empty());
+    });
+}
+
+#[test]
+fn closing_previews_on_exit_waits_for_a_preparing_preview_to_release_its_lock() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let (release, gate) = tauri::async_runtime::channel(1);
+        *remote.preflight_gate.lock().await = Some(gate);
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        let owner = sessions.clone();
+        let request = tauri::async_runtime::spawn(async move {
+            owner
+                .prepare(root, "production".into(), RunPlan::Deploy)
+                .await
+        });
+        until(|| remote.preflight_entered.load(Ordering::SeqCst) == 1);
+        let owner = sessions.clone();
+        let closing = tauri::async_runtime::spawn(async move { owner.close_previews().await });
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert!(sessions.previews_open());
+        release.send(()).await.unwrap();
+        closing.await.unwrap();
+        assert_eq!(
+            request.await.unwrap().unwrap_err().code,
+            ErrorCode::Cancelled
+        );
+        assert_eq!(remote.released.load(Ordering::SeqCst), 1);
+        assert!(!remote.held.load(Ordering::SeqCst));
+    });
+}
+
+#[test]
+fn closing_previews_on_exit_finishes_when_a_lock_cannot_be_released() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        sessions
+            .prepare(root, "production".into(), RunPlan::Deploy)
+            .await
+            .unwrap();
+        remote.fail_release.store(true, Ordering::SeqCst);
+        sessions.close_previews().await;
+        assert!(!sessions.previews_open());
+        assert!(remote.held.load(Ordering::SeqCst));
+        assert!(sessions.current_runs().warnings[0]
+            .message
+            .contains("cleanup refused"));
+    });
+}
+
+#[test]
+fn closing_previews_on_exit_with_none_open_returns_at_once() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let remote = Arc::new(Remote::default());
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        sessions.close_previews().await;
+        assert!(!sessions.previews_open());
+        assert_eq!(remote.released.load(Ordering::SeqCst), 0);
     });
 }
 

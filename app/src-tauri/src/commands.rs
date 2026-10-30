@@ -3,12 +3,13 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use shipslip::config::default_trust_path;
 use shipslip::git::Git;
 use shipslip::receipt::{default_receipts_root, overview, ReceiptError};
 use tauri::async_runtime::spawn_blocking;
+use tauri::Manager;
 
 use crate::deploy_session::{
     CommandError, CurrentRuns, DeployEntry, DeployReview, Ending, ErrorCode, LiveRuns, OpenSsh,
@@ -110,6 +111,13 @@ impl App {
         if let Some(sessions) = &self.sessions {
             sessions.invalidate_page();
         }
+    }
+
+    /// Whether exiting now could leave a preview's server lock behind.
+    pub fn previews_open(&self) -> bool {
+        self.sessions
+            .as_ref()
+            .is_some_and(|sessions| sessions.previews_open())
     }
 
     fn load_map(&self) -> LoadResult {
@@ -475,13 +483,37 @@ pub async fn detach_and_quit(
         sessions.begin_quit();
         sessions.wait_idle().await;
     }
-    handle.exit(0);
+    exit(&handle);
     Ok(())
+}
+
+/// How long exiting waits for open previews to release their server locks.
+/// A lock left behind goes stale and `slip break-lock` clears it.
+const RELEASE_LIMIT: Duration = Duration::from_secs(5);
+
+/// Exits once every open preview has released its server lock, or after
+/// `RELEASE_LIMIT`.
+pub fn exit(handle: &tauri::AppHandle) {
+    let app = handle.state::<Arc<App>>().inner().clone();
+    let Some(sessions) = app.sessions.clone().filter(|_| app.previews_open()) else {
+        handle.exit(0);
+        return;
+    };
+    let late = handle.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(RELEASE_LIMIT);
+        late.exit(0);
+    });
+    let done = handle.clone();
+    tauri::async_runtime::spawn(async move {
+        sessions.close_previews().await;
+        done.exit(0);
+    });
 }
 
 #[tauri::command]
 pub fn quit_now(handle: tauri::AppHandle) {
-    handle.exit(0);
+    exit(&handle);
 }
 
 /// Back or closing an operation abandons all pending reviews for this page.

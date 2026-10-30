@@ -103,6 +103,14 @@ fn main() {
             api.prevent_exit();
             request_quit(app);
         }
+        // Closing the last window or a system quit with a preview open:
+        // release its server lock first.
+        RunEvent::ExitRequested {
+            code: None, api, ..
+        } if app.state::<Arc<commands::App>>().previews_open() => {
+            api.prevent_exit();
+            commands::exit(app);
+        }
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => show_main(app),
         _ => {}
@@ -124,7 +132,7 @@ fn show_main(app: &AppHandle) {
 /// The quit dialog lives in the window, so a hidden window is shown first.
 fn request_quit(app: &AppHandle) {
     if !live(app) {
-        app.exit(0);
+        commands::exit(app);
         return;
     }
     show_main(app);
