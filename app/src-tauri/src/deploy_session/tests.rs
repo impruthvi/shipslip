@@ -430,7 +430,13 @@ fn up_review_requires_confirmation_and_expires_on_reload_without_ssh() {
         approve(&sessions, &root).await;
         let review = sessions.review_up(root, "production".into()).await.unwrap();
         assert_eq!(review.operation, "up");
-        assert_eq!(review.remaining_steps, ["php artisan up"]);
+        assert_eq!(
+            review.remaining_steps,
+            [RemainingStep {
+                index: None,
+                command: "php artisan up".into()
+            }]
+        );
         assert_eq!(
             sessions
                 .confirm(&review.handle, None)
@@ -478,6 +484,9 @@ fn attach_reviews_saved_steps_and_refuses_a_changed_receipt_before_ssh() {
         assert_eq!(review.operation, "attach");
         assert_eq!(review.target_sha.as_deref(), Some(crate::fixture::NEW));
         assert_eq!(review.remaining_steps.len(), 2);
+        // Receipt step numbers (0 is the fast-forward), and the phase in words.
+        assert_eq!(review.remaining_steps[0].index, Some(0));
+        assert_eq!(review.phase, "Preview");
         assert_eq!(
             sessions
                 .confirm(&review.handle, None)
@@ -1830,8 +1839,9 @@ fn recovery_comes_from_this_checkouts_newest_receipt() {
     use serde_json::json;
     let fx = Fixture::new();
     let newest = |checkout: &str| {
-        newest_run(&fx.receipts(), "app", "production", Path::new(checkout))
-            .map(|receipt| receipt.run_id)
+        newest_runs(&fx.receipts(), "app", "production", Path::new(checkout))
+            .first()
+            .map(|receipt| receipt.run_id.clone())
     };
     assert_eq!(newest("/work/app"), None);
 
@@ -1839,8 +1849,8 @@ fn recovery_comes_from_this_checkouts_newest_receipt() {
     failed["outcome"] = json!({"FailedAtStep": {"step": 1, "partial_update": false}});
     fx.save(&failed);
     assert_eq!(newest("/work/app").as_deref(), Some("00000001-0"));
-    let receipt = newest_run(&fx.receipts(), "app", "production", Path::new("/work/app")).unwrap();
-    assert!(recovery(&receipt).is_some());
+    let runs = newest_runs(&fx.receipts(), "app", "production", Path::new("/work/app"));
+    assert!(recovery_from(&runs).is_some());
 
     // Another checkout's newer run does not hide this one's.
     let mut other = run(2, "production");

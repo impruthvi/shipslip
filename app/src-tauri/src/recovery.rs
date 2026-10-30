@@ -39,6 +39,21 @@ pub struct RecoveryView {
 
 const CHECK_FIRST: &str = "Check the server before running anything.";
 
+/// What the checkout's runs for an env left to do, newest first. A bring-up
+/// that succeeded turns maintenance off but leaves the deploy before it
+/// unfinished, so that deploy's actions stay, without bringing the app up.
+pub fn recovery_from(runs: &[Receipt]) -> Option<RecoveryView> {
+    let (newest, older) = runs.split_first()?;
+    let view = recovery(newest);
+    if view.is_some() || newest.kind != ReceiptKind::Up {
+        return view;
+    }
+    let deploy = older.iter().find(|run| run.kind != ReceiptKind::Up)?;
+    let mut view = recovery(deploy)?;
+    view.actions.retain(|action| action.op != RecoveryOp::Up);
+    (!view.actions.is_empty() || view.advice.is_some()).then_some(view)
+}
+
 /// `None` when the run left nothing to recover.
 pub fn recovery(receipt: &Receipt) -> Option<RecoveryView> {
     let env = escape_field(&receipt.target.env);
@@ -265,6 +280,59 @@ mod tests {
         .unwrap();
         assert!(ff.actions.is_empty());
         assert!(ff.advice.is_some());
+    }
+
+    fn up(outcome: Value) -> Receipt {
+        receipt(outcome, |v| {
+            v["kind"] = json!("up");
+            v["target"]["steps"] = json!([]);
+            v["steps"] = json!([]);
+        })
+    }
+
+    #[test]
+    fn a_successful_bring_up_keeps_the_failed_deploy_before_it() {
+        let failed = receipt(
+            json!({"FailedAtStep": {"step": 2, "partial_update": false}}),
+            |v| v["app_left_down"] = json!(true),
+        );
+        let view = recovery_from(&[up(json!("Succeeded")), failed.clone()]).unwrap();
+        assert!(
+            view.sentence.starts_with("Step 2 failed"),
+            "{}",
+            view.sentence
+        );
+        assert_eq!(ops(&view), [RecoveryOp::FromStep { step: 2 }]);
+
+        // Several bring-ups in a row still reach the deploy.
+        let twice = recovery_from(&[up(json!("Succeeded")), up(json!("Succeeded")), failed]);
+        assert_eq!(ops(&twice.unwrap()), [RecoveryOp::FromStep { step: 2 }]);
+    }
+
+    #[test]
+    fn a_bring_up_after_a_deploy_that_only_left_the_app_down_leaves_nothing() {
+        let stopped = receipt(json!({"StoppedInMaintenance": "Cancelled"}), |v| {
+            v["app_left_down"] = json!(true)
+        });
+        assert_eq!(recovery_from(&[up(json!("Succeeded")), stopped]), None);
+        let clean = receipt(json!("Succeeded"), |_| {});
+        assert_eq!(recovery_from(&[up(json!("Succeeded")), clean]), None);
+        assert_eq!(recovery_from(&[up(json!("Succeeded"))]), None);
+        assert_eq!(recovery_from(&[]), None);
+    }
+
+    #[test]
+    fn a_bring_up_that_did_not_finish_speaks_for_itself() {
+        let failed = receipt(
+            json!({"FailedAtStep": {"step": 2, "partial_update": false}}),
+            |_| {},
+        );
+        let view = recovery_from(&[
+            up(json!({"Unknown": {"step": 0, "reason": "connection lost"}})),
+            failed,
+        ])
+        .unwrap();
+        assert_eq!(view.sentence, "The result of php artisan up is unknown.");
     }
 
     #[test]

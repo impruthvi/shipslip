@@ -269,7 +269,8 @@ export interface RecoveryReview {
   runId: string | null;
   targetSha: string | null;
   phase: string;
-  remainingSteps: string[];
+  /** `index` is the receipt's step number; `null` for `php artisan up` on its own. */
+  remainingSteps: { index: number | null; command: string }[];
 }
 
 /** A preview the window's reload closed. Nothing ran on the server. */

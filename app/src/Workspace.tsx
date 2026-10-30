@@ -329,10 +329,20 @@ export function Workspace({
           : null;
   const production = sub?.production ?? (screen.kind === "trust" ? screen.review.production : target.production);
   const where = [target.label, target.env, alias].filter(Boolean).join(" · ");
+  const operation =
+    start.kind === "up" || start.kind === "attach"
+      ? start.kind
+      : start.kind === "follow"
+        ? start.info.operation
+        : "deploy";
   const title =
     start.kind === "trust" || screen.kind === "trust"
       ? `Review configuration · ${target.label} · ${target.env}`
-      : `Deploy ${target.label} → ${target.env}`;
+      : operation === "up"
+        ? `Bring ${target.label} → ${target.env} out of maintenance`
+        : operation === "attach"
+          ? `Attach to ${target.label} → ${target.env}`
+          : `Deploy ${target.label} → ${target.env}`;
 
   return (
     <div className="workspace">

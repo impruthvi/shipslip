@@ -971,7 +971,9 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  flex-shrink: 0;
+  /* Shrinks and scrolls when the pane is short, e.g. under a recovery block. */
+  flex-shrink: 1;
+  min-height: 96px;
   max-height: 45vh;
   overflow-y: auto;
   font-size: var(--text-13);
