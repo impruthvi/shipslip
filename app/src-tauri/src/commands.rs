@@ -1,7 +1,7 @@
 //! The commands the webview may call. Each runs its file and git work off
 //! the UI thread. The UI sends only generations, positions and ids.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -192,6 +192,35 @@ mod tests {
     }
 
     #[test]
+    fn open_config_tries_the_toml_app_then_the_text_editor() {
+        let fx = Fixture::new();
+        let path = fx.dir().join(".shipslip.toml");
+        std::fs::write(&path, "[project]\n").unwrap();
+        let tried = std::sync::Mutex::new(Vec::new());
+        let result = open_config_with(&path, |args, opened| {
+            assert_eq!(opened, path);
+            tried.lock().unwrap().push(args.join(" "));
+            !args.is_empty()
+        });
+        assert!(result.is_ok());
+        assert_eq!(*tried.lock().unwrap(), ["", "-t"]);
+
+        let error = open_config_with(&path, |_, _| false).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Local);
+        assert!(error.message.contains(".shipslip.toml"));
+    }
+
+    #[test]
+    fn open_config_refuses_a_checkout_without_a_config_and_opens_nothing() {
+        let fx = Fixture::new();
+        let error = open_config_with(&fx.dir().join(".shipslip.toml"), |_, _| {
+            panic!("nothing to open")
+        })
+        .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+    }
+
+    #[test]
     fn map_compare_and_receipt_work_together() {
         let fx = Fixture::new();
         let root = fx.dir().to_string_lossy().into_owned();
@@ -348,6 +377,50 @@ pub async fn deploy_entry(
 ) -> Result<DeployEntry, CommandError> {
     let checkout = app.selection(generation, row, &env)?;
     Ok(app.sessions()?.deploy_entry(checkout, env).await)
+}
+
+/// Opens the checkout's `.shipslip.toml` in the user's editor. A change still
+/// has to pass the trust review before any deploy uses it.
+#[tauri::command]
+pub async fn open_config(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+    env: String,
+) -> Result<(), CommandError> {
+    let checkout = app.selection(generation, row, &env)?;
+    spawn_blocking(move || {
+        open_config_with(&checkout.join(".shipslip.toml"), |args, path| {
+            std::process::Command::new("/usr/bin/open")
+                .args(args)
+                .arg(path)
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    })
+    .await
+    .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
+}
+
+/// The app set for `.toml` files, else the default text editor.
+fn open_config_with(
+    path: &Path,
+    open: impl Fn(&[&str], &Path) -> bool,
+) -> Result<(), CommandError> {
+    if !path.is_file() {
+        return Err(CommandError::new(
+            ErrorCode::NotFound,
+            "This checkout has no .shipslip.toml.",
+        ));
+    }
+    if open(&[], path) || open(&["-t"], path) {
+        Ok(())
+    } else {
+        Err(CommandError::new(
+            ErrorCode::Local,
+            format!("Couldn't open {} in an editor.", path.display()),
+        ))
+    }
 }
 
 #[tauri::command]

@@ -57,6 +57,7 @@ export const deploy: DeployBackend = {
     return fixtures.deployReview;
   },
   reviewTrust: () => later(fixtures.trustReview),
+  openConfig: () => wait(100),
   approveTrust: () => wait(300),
   reviewUp: () =>
     later({
