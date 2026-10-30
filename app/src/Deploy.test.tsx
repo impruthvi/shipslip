@@ -42,6 +42,7 @@ const cancel = vi.fn<(handle: string) => Promise<void>>();
 const stop = vi.fn<(handle: string, what: string) => Promise<void>>();
 const reviewTrust = vi.fn<(generation: number, row: number, env: string) => Promise<TrustReview>>();
 const approveTrust = vi.fn<(handle: string, typed: string) => Promise<void>>();
+const openConfig = vi.fn<(generation: number, row: number, env: string) => Promise<void>>();
 const reviewUp = vi.fn<(generation: number, row: number, env: string) => Promise<RecoveryReview>>();
 const reviewAttach = vi.fn<(generation: number, row: number, env: string) => Promise<RecoveryReview>>();
 const liveRuns = vi.fn<() => Promise<LiveRuns>>();
@@ -60,6 +61,7 @@ vi.mock("./deployApi", () => ({
     stop: (...args: [string, string]) => stop(...args),
     reviewTrust: (...args: [number, number, string]) => reviewTrust(...args),
     approveTrust: (...args: [string, string]) => approveTrust(...args),
+    openConfig: (...args: [number, number, string]) => openConfig(...args),
     reviewUp: (...args: [number, number, string]) => reviewUp(...args),
     reviewAttach: (...args: [number, number, string]) => reviewAttach(...args),
     liveRuns: () => liveRuns(),
@@ -100,6 +102,7 @@ beforeEach(() => {
   unfollow.mockReset();
   reviewTrust.mockReset();
   approveTrust.mockReset();
+  openConfig.mockReset();
   reviewUp.mockReset();
   reviewAttach.mockReset();
   liveRuns.mockReset().mockResolvedValue({ runs: [], closedPreviews: [] });
@@ -620,6 +623,37 @@ test("commands in library sentences show as code, never as markup", async () => 
   expect(code.tagName).toBe("CODE");
   expect(pane.queryByText(/`/)).toBeNull();
   expect(code.querySelector("b")).toBeNull();
+});
+
+test("Open config in More opens the selected env's config, and says why when it can't", async () => {
+  entry.mockResolvedValue(ready());
+  const cell = await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: /^More/ }));
+  openConfig.mockResolvedValue(undefined);
+  fireEvent.click(screen.getByRole("button", { name: "Open config" }));
+  await settle();
+  expect(openConfig).toHaveBeenCalledWith(1, cell.row, cell.env);
+  expect(prepare).not.toHaveBeenCalled();
+  expect(screen.queryByRole("status")).toBeNull();
+
+  openConfig.mockRejectedValue({ code: "notFound", message: "This checkout has no .shipslip.toml." });
+  fireEvent.click(screen.getByRole("button", { name: "Open config" }));
+  await settle();
+  expect(screen.getByText("This checkout has no .shipslip.toml.")).toBeInTheDocument();
+});
+
+test("the trust review can open the config in the editor without approving anything", async () => {
+  entry.mockResolvedValue(ready({ needsTrust: true }));
+  reviewTrust.mockResolvedValue(fixtures.trustReview);
+  const cell = await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Review deploy…" }));
+  await settle();
+  openConfig.mockResolvedValue(undefined);
+  fireEvent.click(screen.getByRole("button", { name: "Edit .shipslip.toml in your editor" }));
+  await settle();
+  expect(openConfig).toHaveBeenCalledWith(1, cell.row, cell.env);
+  expect(approveTrust).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Approve configuration" })).toBeDisabled();
 });
 
 const upReview: RecoveryReview = {

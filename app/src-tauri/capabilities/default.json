@@ -13,6 +13,7 @@
     "allow-compare",
     "allow-load-receipt",
     "allow-deploy-entry",
+    "allow-open-config",
     "allow-prepare-deploy",
     "allow-review-trust",
     "allow-approve-trust",

@@ -27,6 +27,8 @@ export interface DeployBackend {
   ): Promise<DeployReview>;
   /** The env's settings, each with the value approved before. */
   reviewTrust(generation: number, row: number, env: string): Promise<TrustReview>;
+  /** Opens the checkout's `.shipslip.toml` in the user's editor. */
+  openConfig(generation: number, row: number, env: string): Promise<void>;
   /** Approves exactly the reviewed settings; the env name must be typed. */
   approveTrust(handle: string, typedEnv: string): Promise<void>;
   reviewUp(generation: number, row: number, env: string): Promise<RecoveryReview>;
@@ -52,6 +54,7 @@ const tauriDeploy: DeployBackend = {
   },
   reviewTrust: (generation, row, env) =>
     invoke<TrustReview>("review_trust", { generation, row, env }),
+  openConfig: (generation, row, env) => invoke("open_config", { generation, row, env }),
   approveTrust: (handle, typedEnv) => invoke("approve_trust", { handle, typedEnv }),
   reviewUp: (generation, row, env) => invoke<RecoveryReview>("review_up", { generation, row, env }),
   reviewAttach: (generation, row, env) =>
@@ -93,6 +96,7 @@ export const deploy: DeployBackend = {
   entry: async (...args) => (await getBackend()).entry(...args),
   prepare: async (...args) => (await getBackend()).prepare(...args),
   reviewTrust: async (...args) => (await getBackend()).reviewTrust(...args),
+  openConfig: async (...args) => (await getBackend()).openConfig(...args),
   approveTrust: async (...args) => (await getBackend()).approveTrust(...args),
   reviewUp: async (...args) => (await getBackend()).reviewUp(...args),
   reviewAttach: async (...args) => (await getBackend()).reviewAttach(...args),

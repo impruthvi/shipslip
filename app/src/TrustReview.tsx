@@ -66,6 +66,7 @@ export function TrustReview({
   onBack,
   onApprove,
   onReviewAgain,
+  onEdit,
 }: {
   review: Review;
   busy: TrustBusy;
@@ -74,8 +75,18 @@ export function TrustReview({
   onBack: () => void;
   onApprove: (typedEnv: string) => void;
   onReviewAgain: () => void;
+  /** Opens `.shipslip.toml` in the editor; a saved change needs a new review.
+   * Rejects with a `CommandError`. */
+  onEdit: () => Promise<void>;
 }) {
   const [typed, setTyped] = useState("");
+  const [editError, setEditError] = useState<string | null>(null);
+  const edit = () => {
+    setEditError(null);
+    onEdit().catch((error: unknown) =>
+      setEditError(error && typeof error === "object" && "message" in error ? String(error.message) : String(error)),
+    );
+  };
   const [showUnchanged, setShowUnchanged] = useState(false);
   const changed = review.settings.filter((row) => row.changed);
   const unchanged = review.settings.filter((row) => !row.changed);
@@ -117,6 +128,16 @@ export function TrustReview({
                 </li>
               ))}
             </ul>
+          )}
+          <p>
+            <button type="button" className="more-button" onClick={edit}>
+              Edit .shipslip.toml in your editor
+            </button>
+          </p>
+          {editError && (
+            <p className="muted" role="status">
+              {editError}
+            </p>
           )}
         </section>
         {changedAgain && (

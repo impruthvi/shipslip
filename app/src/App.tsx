@@ -15,6 +15,7 @@ import { useSeen } from "./useSeen";
 import { useLiveRuns } from "./useLiveRuns";
 import { useSelection } from "./useSelection";
 import { Workspace, type DeployTarget, type Leave, type Start } from "./Workspace";
+import { deploy } from "./deployApi";
 import type { RunInfo } from "./types";
 
 const cellKey = (repoRoot: string, env: string) => `${repoRoot}\n${env}`;
@@ -312,6 +313,11 @@ export default function App() {
               entry={entry}
               notice={notice}
               onChoose={onChoose}
+              onOpenConfig={() =>
+                loaded && selected
+                  ? deploy.openConfig(loaded.generation, selected.row, selected.env)
+                  : Promise.resolve()
+              }
               buttonRef={entryButton}
             />
           }

@@ -256,6 +256,10 @@ export function Workspace({
       (error: unknown) => refuse(error),
     );
   };
+  const editConfig = () => {
+    const { generation, row, env } = props.current.target;
+    return deploy.openConfig(generation, row, env);
+  };
   /** The refusal's way forward, if it has one. */
   const refusalAction = (error: CommandError, retry: RunPlan | null) => {
     if (error.blockedKind === "lockHeld" && retry !== null) {
@@ -425,6 +429,7 @@ export function Workspace({
           onBack={back}
           onApprove={approve}
           onReviewAgain={loadTrust}
+          onEdit={editConfig}
         />
       )}
       {screen.kind === "pick" && (

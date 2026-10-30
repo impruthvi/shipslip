@@ -58,15 +58,25 @@ export function DeployEntryBar({
   entry,
   notice,
   onChoose,
+  onOpenConfig,
   buttonRef,
 }: {
   entry: DeployEntry | null;
   /** A pencil line: an approval, or a preview a reload closed. */
   notice?: string | null;
   onChoose: (choice: EntryChoice) => void;
+  /** Opens `.shipslip.toml`; rejects with a `CommandError`. */
+  onOpenConfig: () => Promise<void>;
   buttonRef?: Ref<HTMLButtonElement>;
 }) {
   const [menu, setMenu] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const openConfig = () => {
+    setConfigError(null);
+    onOpenConfig().catch((error: unknown) =>
+      setConfigError(error && typeof error === "object" && "message" in error ? String(error.message) : String(error)),
+    );
+  };
   if (!entry || entry.kind === "hidden") return null;
   const reason =
     entry.kind === "unavailable"
@@ -110,7 +120,7 @@ export function DeployEntryBar({
         >
           Review deploy…
         </button>
-        {ready && ready.steps.length > 0 && (
+        {ready && (
           <button
             type="button"
             className="button"
@@ -123,21 +133,33 @@ export function DeployEntryBar({
         )}
       </div>
       {ready && menu && (
-        <div id="deploy-entry-more" className="deploy-entry-more" role="group" aria-label="More ways to run">
-          <button type="button" className="button" onClick={() => onChoose({ kind: "rerun" })}>
-            Rerun…
-          </button>
-          <button
-            type="button"
-            className="button"
-            onClick={() => {
-              const from = recovery?.actions.find((a) => a.kind === "fromStep");
-              onChoose({ kind: "fromStep", step: from?.kind === "fromStep" ? from.step : 1 });
-            }}
-          >
-            Run from step…
+        <div id="deploy-entry-more" className="deploy-entry-more" role="group" aria-label="More">
+          {ready.steps.length > 0 && (
+            <>
+              <button type="button" className="button" onClick={() => onChoose({ kind: "rerun" })}>
+                Rerun…
+              </button>
+              <button
+                type="button"
+                className="button"
+                onClick={() => {
+                  const from = recovery?.actions.find((a) => a.kind === "fromStep");
+                  onChoose({ kind: "fromStep", step: from?.kind === "fromStep" ? from.step : 1 });
+                }}
+              >
+                Run from step…
+              </button>
+            </>
+          )}
+          <button type="button" className="button" onClick={openConfig}>
+            Open config
           </button>
         </div>
+      )}
+      {configError && (
+        <p className="deploy-entry-reason muted" role="status">
+          {configError}
+        </p>
       )}
       {reason && (
         <p id="deploy-entry-reason" className="deploy-entry-reason muted">

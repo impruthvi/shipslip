@@ -5,6 +5,7 @@ fn main() {
             "compare",
             "load_receipt",
             "deploy_entry",
+            "open_config",
             "prepare_deploy",
             "review_trust",
             "approve_trust",
