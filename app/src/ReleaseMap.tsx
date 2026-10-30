@@ -99,7 +99,11 @@ export function ReleaseMap({
             ))}
           </div>
           {map.rows.map((row, r) => (
-            <div className={`grid-row${row.pathMissing ? " row-gone" : ""}`} role="row" key={row.repoRoot}>
+            <div
+              className={`grid-row${row.pathMissing ? " row-gone" : ""}${selected?.row === r ? " grid-row-open" : ""}`}
+              role="row"
+              key={row.repoRoot}
+            >
               <div className="grid-app" role="rowheader">
                 <div className="app-name">{row.label}</div>
                 <div className="mono muted app-path" title={row.repoRoot}>
@@ -139,6 +143,7 @@ export function ReleaseMap({
                         compareLine={compareLine}
                         onOpen={onSelect && ((view) => onSelect(r, col, view))}
                         live={liveLine}
+                        expanded={selected?.row === r}
                       />
                     )}
                   </div>

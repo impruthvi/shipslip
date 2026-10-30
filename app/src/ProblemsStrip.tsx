@@ -34,7 +34,9 @@ export function ProblemsStrip({ problems, onSelect }: Props) {
           const cell = problem.cells[0];
           return (
             <div className="banner-item" key={index}>
-              <span className="mono banner-detail">{problem.message}</span>
+              <span className="mono banner-detail" title={problem.message}>
+                {problem.message}
+              </span>
               {cell && onSelect && (
                 <button type="button" className="link" onClick={() => onSelect(cell.row, cell.col)}>
                   Select cell

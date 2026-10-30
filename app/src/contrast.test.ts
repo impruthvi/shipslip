@@ -37,6 +37,8 @@ const pairs: [text: string, background: string][] = [
   ["text", "surface"],
   ["text", "surface-raised"],
   ["text", "selection"],
+  ["text", "surface-alt"],
+  ["accent", "selection"],
   ["text-muted", "surface"],
   ["text-muted", "surface-alt"],
   ["text-muted", "surface-raised"],

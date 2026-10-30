@@ -1,6 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, test } from "vitest";
 import * as fixtures from "./fixtures.gen";
+import { Flap, status } from "./Cell";
 import { ReleaseMap } from "./ReleaseMap";
 import type { MapView } from "./types";
 
@@ -9,8 +10,15 @@ const map: MapView = (() => {
   return fixtures.map.map;
 })();
 
+/** A cell in the selected row, which shows every line under its board line. */
 function cell(repoRoot: string, env: string) {
-  render(<ReleaseMap map={map} />);
+  const row = map.rows.findIndex((r) => r.repoRoot === repoRoot);
+  const col = map.envs.indexOf(env);
+  render(<ReleaseMap map={map} selected={{ repoRoot, env, row, col }} />);
+  return find(repoRoot, env);
+}
+
+function find(repoRoot: string, env: string) {
   const row = screen
     .getAllByRole("row")
     .find((r) => within(r).queryByTitle(repoRoot) !== null);
@@ -24,7 +32,7 @@ describe("cells", () => {
     expect(within(c).getByRole("img", { name: "recorded code" })).toBeInTheDocument();
     expect(c).toHaveTextContent("bbbbbbb");
     expect(c).toHaveTextContent("2d ago");
-    expect(within(c).getByText("Succeeded")).toHaveClass("tone-good");
+    expect(within(c).getByText("Succeeded")).toHaveClass("flap");
     expect(c).toHaveTextContent("production1:/var/www/shop");
   });
 
@@ -99,5 +107,59 @@ describe("cells", () => {
     for (const name of ["recorded code", "deploy incomplete", "observed after a failed step", "not known", "no code recorded"]) {
       expect(within(key).getByRole("img", { name })).toBeInTheDocument();
     }
+  });
+});
+
+describe("board status word", () => {
+  const at = (repoRoot: string, env: string) => {
+    const found = map.rows.find((r) => r.repoRoot === repoRoot)?.cells[map.envs.indexOf(env)];
+    if (found?.kind !== "present") throw new Error("fixture");
+    return found;
+  };
+
+  test.each([
+    ["/Users/you/code/api", "production", "Last failed", "bad"],
+    ["/Users/you/code/api", "staging", "Failed", "bad"],
+    ["/Users/you/code/billing", "production", "Check", "attention"],
+    ["/Users/you/code/billing", "staging", "Incomplete", "bad"],
+    ["/Users/you/code/blog", "production", "Not known", "attention"],
+    ["/Users/you/code/blog", "staging", "No code", "muted"],
+    ["/Users/you/code/shop", "production", "Succeeded", "ink"],
+    ["/Users/you/code/shop", "staging", "New errors", "bad"],
+  ])("%s %s reads %s", (repoRoot, env, word, tone) => {
+    expect(status(at(repoRoot, env))).toEqual({ word, tone });
+  });
+
+  test("a newer failed attempt outranks the older success it sits on", () => {
+    const api = at("/Users/you/code/api", "production");
+    expect(api.outcome?.tone).toBe("good");
+    expect(status(api).word).toBe("Last failed");
+  });
+
+  test("a run going now reads Running whatever came before", () => {
+    expect(status(at("/Users/you/code/blog", "production"), "Deploying… 4s")).toEqual({
+      word: "Running",
+      tone: "running",
+    });
+  });
+
+  test("rows other than the selected one keep to the board line", () => {
+    render(<ReleaseMap map={map} />);
+    const c = find("/Users/you/code/shop", "staging");
+    expect(c).toHaveTextContent("New errors");
+    expect(c).toHaveTextContent("aaaaaaa");
+    expect(c).not.toHaveTextContent("2 new error groups after this run");
+    expect(c.getAttribute("aria-label")).toContain("2 new error groups after this run");
+  });
+});
+
+describe("flap", () => {
+  test("turns only when its word changes", () => {
+    const view = render(<Flap status={{ word: "Succeeded", tone: "ink" }} />);
+    expect(screen.getByText("Succeeded")).not.toHaveClass("flap-turn");
+    view.rerender(<Flap status={{ word: "Succeeded", tone: "ink" }} />);
+    expect(screen.getByText("Succeeded")).not.toHaveClass("flap-turn");
+    view.rerender(<Flap status={{ word: "Running", tone: "running" }} />);
+    expect(screen.getByText("Running")).toHaveClass("flap", "flap-running", "flap-turn");
   });
 });

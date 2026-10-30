@@ -85,6 +85,7 @@ export function ReceiptPane({
       style={{ width }}
       aria-label="Receipt"
     >
+      {!drawer && <div className="pane-drag" data-tauri-drag-region />}
       <div
         className="pane-handle"
         role="separator"

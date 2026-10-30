@@ -53,7 +53,7 @@ function tabStops(): HTMLElement[] {
 
 const name = (el: HTMLElement) => el.getAttribute("aria-label") ?? el.textContent?.trim() ?? "";
 
-test("Tab goes picker → problems → grid (one stop) → footer → receipt", async () => {
+test("Tab goes sidebar → problems → picker → grid (one stop) → receipt", async () => {
   render(<App />);
   await settle();
   const stops = tabStops();
@@ -61,7 +61,9 @@ test("Tab goes picker → problems → grid (one stop) → footer → receipt", 
   expect(gridStops).toHaveLength(1);
   expect(gridStops[0]).toHaveAttribute("aria-selected", "true");
   const order = stops.map((el) =>
-    el.id === "compare-pair"
+    el.classList.contains("side-item")
+      ? "sidebar"
+      : el.id === "compare-pair"
       ? "picker"
       : el.closest("[aria-label=Problems]")
         ? "problems"
@@ -73,7 +75,7 @@ test("Tab goes picker → problems → grid (one stop) → footer → receipt", 
               ? "receipt"
               : `other: ${name(el)}`,
   );
-  expect([...new Set(order)]).toEqual(["picker", "problems", "grid", "receipt"]);
+  expect([...new Set(order)]).toEqual(["sidebar", "problems", "picker", "grid", "receipt"]);
   for (const button of within(screen.getByRole("grid")).queryAllByRole("button")) {
     expect(button).toHaveAttribute("tabindex", "-1");
   }

@@ -1,4 +1,3 @@
-import { ProblemsStrip } from "./ProblemsStrip";
 import { ReleaseMap } from "./ReleaseMap";
 import type { PaneView } from "./slipTarget";
 import type { Selection } from "./selection";
@@ -13,8 +12,6 @@ interface Props {
   onSelect: (row: number, col: number, view?: PaneView) => void;
   /** Keyboard open from the grid: select and move focus to the receipt. */
   onEnter: (row: number, col: number) => void;
-  /** "Select cell" in the problems strip: select and focus the cell. */
-  onProblem: (row: number, col: number) => void;
   onCellFocus: () => void;
   compare: Compare | null;
   /** Outcome lines of cells with a run going now, by `repoRoot\nenv`. */
@@ -27,7 +24,6 @@ export function MapArea({
   selected,
   onSelect,
   onEnter,
-  onProblem,
   onCellFocus,
   compare,
   live,
@@ -68,7 +64,6 @@ export function MapArea({
       }
       return (
         <>
-          <ProblemsStrip problems={map.problems} onSelect={onProblem} />
           {map.screen === "noneReadable" ? (
             <p className="placeholder">No readable receipts</p>
           ) : (

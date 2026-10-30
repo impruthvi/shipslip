@@ -884,7 +884,7 @@ test("a preview closed by a reload is noted on its cell", async () => {
   ).toBeInTheDocument();
 });
 
-test("a live run shows on its cell and in the toolbar, which leads back to it", async () => {
+test("a live run shows on its cell and in the sidebar, which leads back to it", async () => {
   const first = render(<App />);
   await settle();
   const cell = selectedCell();
@@ -895,24 +895,26 @@ test("a live run shows on its cell and in the toolbar, which leads back to it", 
   const grid = within(screen.getByRole("grid", { name: "Release map" }));
   expect(grid.getByText(/^Deploying… 2m 1\ds$/)).toBeInTheDocument();
   expect(grid.getByRole("img", { name: "running now" })).toBeInTheDocument();
-  const link = screen.getByRole("button", { name: `1 deploy running · ${cell.label} → ${cell.env}` });
+  const sidebar = () => within(screen.getByRole("navigation"));
+  expect(grid.getByText("Running")).toHaveClass("flap");
+  const link = sidebar().getByRole("button", { name: new RegExp(`^${cell.label} → ${cell.env} 2m 1\\ds$`) });
 
   fireEvent.click(link);
   await settle();
   expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(`Deploy ${cell.label} → ${cell.env}`);
   expect(screen.getByText("Connecting to shop-prod…")).toBeInTheDocument();
 
-  // Release map leaves the run going and returns focus to the toolbar link.
+  // Release map leaves the run going and returns focus to the sidebar link.
   fireEvent.click(screen.getByRole("button", { name: "Release map" }));
   await settle();
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
   expect(stop).not.toHaveBeenCalled();
   expect(cancel).not.toHaveBeenCalled();
   expect(unfollow).toHaveBeenCalled();
-  expect(screen.getByRole("button", { name: /^1 deploy running/ })).toHaveFocus();
+  expect(sidebar().getByRole("button", { name: new RegExp(`^${cell.label} → ${cell.env}`) })).toHaveFocus();
 });
 
-test("several live runs share one toolbar menu", async () => {
+test("several live runs each get a sidebar line", async () => {
   const first = render(<App />);
   await settle();
   const cell = selectedCell();
@@ -923,9 +925,9 @@ test("several live runs share one toolbar menu", async () => {
   });
   render(<App />);
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: /^2 deploys running/ }));
-  expect(screen.getByRole("button", { name: `${cell.label} → ${cell.env}` })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "other → staging" })).toBeInTheDocument();
+  const sidebar = within(screen.getByRole("navigation"));
+  expect(sidebar.getByRole("button", { name: new RegExp(`^${cell.label} → ${cell.env} `) })).toBeInTheDocument();
+  expect(sidebar.getByRole("button", { name: /^other → staging / })).toBeInTheDocument();
 });
 
 test("a run that ends in the background re-reads the map and the entry", async () => {
@@ -936,14 +938,16 @@ test("a run that ends in the background re-reads the map and the entry", async (
     const cell = selectedCell();
     liveRuns.mockResolvedValue({ runs: [liveRun(cell, 1000)], closedPreviews: [] });
     await act(async () => vi.advanceTimersByTimeAsync(2000));
-    expect(screen.getByRole("button", { name: /^1 deploy running/ })).toBeInTheDocument();
+    const runs = () => within(screen.getByRole("region", { name: "Deploys running" }));
+    expect(runs().getByRole("button", { name: new RegExp(`^${cell.label} → ${cell.env} `) })).toBeInTheDocument();
     const reads = loadMap.mock.calls.length;
     const asks = entry.mock.calls.length;
     liveRuns.mockResolvedValue({ runs: [], closedPreviews: [] });
     await act(async () => vi.advanceTimersByTimeAsync(2000));
     expect(loadMap.mock.calls.length).toBe(reads + 1);
     expect(entry.mock.calls.length).toBeGreaterThan(asks);
-    expect(screen.queryByRole("button", { name: /deploy running/ })).not.toBeInTheDocument();
+    expect(runs().queryByRole("button")).not.toBeInTheDocument();
+    expect(runs().getByText("None started here")).toBeInTheDocument();
   } finally {
     vi.useRealTimers();
   }

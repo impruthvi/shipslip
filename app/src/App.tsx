@@ -3,10 +3,10 @@ import { useAnnouncer } from "./Announcer";
 import { ComparePicker } from "./ComparePicker";
 import { liveText } from "./Cell";
 import { DeployEntryBar, useDeployEntry, type EntryChoice } from "./DeployEntry";
-import { Footer } from "./Footer";
 import { MapArea } from "./MapArea";
 import { useNarrow, usePaneWidth } from "./pane";
 import { ReceiptPane, type SlipMeta } from "./ReceiptPane";
+import { Sidebar } from "./Sidebar";
 import { target, type PaneView } from "./slipTarget";
 import { useCompare } from "./useCompare";
 import { useReceipt, type Request } from "./useReceipt";
@@ -45,7 +45,6 @@ export default function App() {
   /** Asks "Review deploy…" again after approvals and runs. */
   const [entryVersion, setEntryVersion] = useState(0);
   const [approved, setApproved] = useState<{ key: string; env: string } | null>(null);
-  const [runsMenu, setRunsMenu] = useState(false);
   const { announce, regions } = useAnnouncer();
   const selectedRef = useRef(selected);
   const narrowRef = useRef(narrow);
@@ -118,7 +117,6 @@ export default function App() {
   };
   /** The toolbar's way back to a run: its cell is selected, then its run shown. */
   const follow = (run: RunInfo) => {
-    setRunsMenu(false);
     const r = map?.rows.findIndex((x) => x.repoRoot === run.checkout) ?? -1;
     const col = map?.envs.indexOf(run.env) ?? -1;
     if (map && r >= 0 && col >= 0 && map.rows[r].cells[col].kind === "present") select(r, col);
@@ -213,46 +211,31 @@ export default function App() {
   useSeen(shown?.opened.kind === "receipt" ? shown.opened.runId : null);
   return (
     <div className="window">
+      <Sidebar
+        state={state}
+        onRetry={refresh}
+        runs={live.runs}
+        busy={workspace !== null}
+        now={now}
+        onFollow={follow}
+        runsButton={runsButton}
+        onProblem={onProblem}
+        live={liveLines}
+      />
       <main className="main">
-        <header className="toolbar">
-          <span className="wordmark">Shipslip</span>
+        <header className="toolbar" data-tauri-drag-region>
+          {!workspace && (
+            <>
+              <h1 className="toolbar-title" data-tauri-drag-region>
+                Release map
+              </h1>
+              <p className="toolbar-subtitle muted" data-tauri-drag-region>
+                Last recorded code on each app and environment. Deploys started here show live.
+              </p>
+            </>
+          )}
           {map?.screen === "map" && !workspace && (
             <ComparePicker envs={map.envs} pair={pair} onChange={setPair} />
-          )}
-          {!workspace && live.runs.length === 1 && (
-            <button
-              type="button"
-              ref={runsButton}
-              className="toolbar-button"
-              onClick={() => follow(live.runs[0])}
-            >
-              1 deploy running · {live.runs[0].project} → {live.runs[0].env}
-            </button>
-          )}
-          {!workspace && live.runs.length > 1 && (
-            <div className="runs-menu">
-              <button
-                type="button"
-                ref={runsButton}
-                className="toolbar-button"
-                aria-expanded={runsMenu}
-                aria-controls="runs-menu-list"
-                onClick={() => setRunsMenu(!runsMenu)}
-              >
-                {live.runs.length} deploys running <span aria-hidden>▾</span>
-              </button>
-              {runsMenu && (
-                <ul id="runs-menu-list" className="runs-menu-list">
-                  {live.runs.map((run) => (
-                    <li key={run.handle}>
-                      <button type="button" className="toolbar-button" onClick={() => follow(run)}>
-                        {run.project} → {run.env}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
           )}
           {narrow && request && !workspace && (
             <button
@@ -274,12 +257,6 @@ export default function App() {
           />
         ) : (
           <>
-            <div className="title">
-              <h1>Release map</h1>
-              <p className="muted">
-                Last recorded code on each app and environment. Deploys started here show live.
-              </p>
-            </div>
             <div className="map-area">
               <MapArea
                 state={state}
@@ -287,13 +264,11 @@ export default function App() {
                 selected={selected}
                 onSelect={onSelect}
                 onEnter={onEnter}
-                onProblem={onProblem}
                 onCellFocus={onCellFocus}
                 compare={pair ? { pair, lines } : null}
                 live={liveLines}
               />
             </div>
-            <Footer state={state} onRetry={refresh} />
           </>
         )}
       </main>

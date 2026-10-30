@@ -108,7 +108,7 @@ test("launch selects the first cell that needs attention; clicks and problems se
   expect(selected()).toHaveLength(1);
   expect(selected()[0]).toHaveTextContent("fffffff");
 
-  const blogStaging = screen.getByText(/^no deploy receipt on this Mac$/i).closest('[role="gridcell"]')!;
+  const blogStaging = screen.getByRole("gridcell", { name: /^blog, staging, no deploy receipt on this Mac/ });
   fireEvent.click(blogStaging);
   expect(selected()).toEqual([blogStaging]);
   expect(JSON.parse(localStorage.getItem("shipslip.selection")!)).toEqual({
@@ -120,7 +120,11 @@ test("launch selects the first cell that needs attention; clicks and problems se
   expect(selected()[0]).toHaveTextContent("ddddddd");
 
   const absent = screen.getAllByRole("gridcell").find((c) => c.childElementCount === 0)!;
+  fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: /^blog · production/ }));
+  expect(selected()[0]).toHaveAccessibleName(/^blog, production/);
+  expect(selected()[0]).toHaveFocus();
+
   fireEvent.click(absent);
-  expect(selected()[0]).toHaveTextContent("ddddddd");
+  expect(selected()[0]).toHaveAccessibleName(/^blog, production/);
   expect(absent).not.toHaveAttribute("aria-selected");
 });

@@ -178,7 +178,7 @@ mod tests {
     }
 
     #[test]
-    fn capability_grants_only_app_commands_window_event_and_clipboard_write() {
+    fn capability_grants_only_app_commands_window_event_drag_and_clipboard_write() {
         let cap = json(include_str!("../capabilities/default.json"));
         let mut perms: Vec<&str> = cap["permissions"]
             .as_array()
@@ -215,6 +215,7 @@ mod tests {
                 "allow-unsubscribe-run",
                 "clipboard-manager:allow-write-text",
                 "core:event:default",
+                "core:window:allow-start-dragging",
                 "core:window:default",
             ]
         );
@@ -251,7 +252,12 @@ mod tests {
         let conf = json(include_str!("../tauri.conf.json"));
         let window = &conf["app"]["windows"][0];
         assert_eq!(window["label"], "main");
-        assert!(window["theme"].is_null(), "the window follows macOS light/dark");
+        assert!(
+            window["theme"].is_null(),
+            "the window follows macOS light/dark"
+        );
+        assert_eq!(window["titleBarStyle"], "Overlay");
+        assert_eq!(window["hiddenTitle"], true);
         assert_eq!(window["minWidth"], 1024);
         assert_eq!(window["minHeight"], 680);
     }
