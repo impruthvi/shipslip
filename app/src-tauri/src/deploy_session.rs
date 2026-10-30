@@ -535,6 +535,8 @@ struct Registry<T: Transport> {
     live: bool,
     quitting: bool,
     idle: Vec<tauri::async_runtime::Sender<()>>,
+    /// Told once no preview is preparing or open.
+    previews_closed: Vec<tauri::async_runtime::Sender<()>>,
 }
 
 pub struct Sessions<C: Connector> {
@@ -574,6 +576,7 @@ impl<C: Connector> Sessions<C> {
                 live: false,
                 quitting: false,
                 idle: Vec::new(),
+                previews_closed: Vec::new(),
             }),
             live_observer: OnceLock::new(),
             finish_observer: OnceLock::new(),
@@ -802,6 +805,33 @@ impl<C: Connector> Sessions<C> {
                 let _ = waiter.try_send(());
             }
         }
+        if !has_previews(state) {
+            for waiter in state.previews_closed.drain(..) {
+                let _ = waiter.try_send(());
+            }
+        }
+    }
+
+    /// Whether a preview is preparing or open, so a server lock may be held.
+    pub fn previews_open(&self) -> bool {
+        has_previews(&self.registry())
+    }
+
+    /// Closes every preview and resolves once each has released its server
+    /// lock or failed to. No new preview starts: the app is about to exit.
+    pub async fn close_previews(self: &Arc<Self>) {
+        self.registry().quitting = true;
+        self.invalidate_page();
+        let mut closed = {
+            let mut state = self.registry();
+            if !has_previews(&state) {
+                return;
+            }
+            let (sender, receiver) = tauri::async_runtime::channel(1);
+            state.previews_closed.push(sender);
+            receiver
+        };
+        closed.recv().await;
     }
 
     pub fn quit_runs(&self) -> Vec<QuitRun> {
@@ -1496,6 +1526,9 @@ impl<C: Connector> Sessions<C> {
             if state.page != page {
                 return Err(cancelled());
             }
+            if state.quitting {
+                return Err(quitting());
+            }
             if state.slots.contains_key(&key) {
                 return Err(busy());
             }
@@ -1620,6 +1653,14 @@ fn interrupt(control: &ExecutionHandle, stage: Stage) {
         Interrupt::SkipWatch | Interrupt::StopWatch => control.cancel_watch(),
         Interrupt::Wait | Interrupt::Quit => {}
     }
+}
+
+// Preparing also covers a confirmation in flight, which may still hold the lock.
+fn has_previews<T: Transport>(state: &Registry<T>) -> bool {
+    state
+        .slots
+        .values()
+        .any(|slot| matches!(slot.phase, Phase::Preparing | Phase::Ready(_)))
 }
 
 fn quitting() -> CommandError {
