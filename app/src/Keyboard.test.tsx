@@ -194,17 +194,17 @@ test("Select cell in the problems strip selects and focuses that cell", async ()
   expect(billingProd).toHaveFocus();
 });
 
-test("the latest attempt and the unreadable receipt are reachable from the receipt", async () => {
+test("the recorded code and the unreadable receipt are reachable from the receipt", async () => {
   render(<App />);
   await settle();
   const pane = screen.getByRole("complementary", { name: "Receipt" });
-  fireEvent.click(within(pane).getByRole("button", { name: "Open the latest attempt" }));
+  fireEvent.click(within(pane).getByRole("tab", { name: "Recorded code" }));
   await settle();
-  expect(within(pane).getByText(/^Latest attempt/)).toBeInTheDocument();
+  expect(within(pane).getByText("Receipt behind the recorded code")).toBeInTheDocument();
 
   fireEvent.click(cell("/Users/you/code/billing", "production"));
   await settle();
-  fireEvent.click(within(pane).getByRole("button", { name: "Open the newer receipt that could not be read" }));
+  fireEvent.click(within(pane).getByRole("tab", { name: "Unreadable newer" }));
   await settle();
   expect(within(pane).getByText("Can't read this receipt.")).toBeInTheDocument();
 });

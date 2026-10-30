@@ -37,12 +37,12 @@ export default function App() {
   /** Set by a keyboard open; the pane focuses the slip once it shows that receipt. */
   const [focusReceipt, setFocusReceipt] = useState(false);
   const [workspace, setWorkspace] = useState<{ target: DeployTarget; start: Start } | null>(null);
-  /** Leaving the workspace returns focus to "Review deploy…", or to the
-   * toolbar's run link when a run keeps going. */
+  /** Leaving the workspace returns focus to the deploy button, or to the
+   * sidebar's run link when a run keeps going. */
   const [focusEntry, setFocusEntry] = useState<"entry" | "runs" | null>(null);
   const entryButton = useRef<HTMLButtonElement>(null);
   const runsButton = useRef<HTMLButtonElement>(null);
-  /** Asks "Review deploy…" again after approvals and runs. */
+  /** Asks for the deploy entry again after approvals and runs. */
   const [entryVersion, setEntryVersion] = useState(0);
   const [approved, setApproved] = useState<{ key: string; env: string } | null>(null);
   const { announce, regions } = useAnnouncer();
@@ -56,9 +56,11 @@ export default function App() {
   }, [selected, narrow, workspace]);
 
   const selectedKey = selected ? cellKey(selected.repoRoot, selected.env) : null;
-  const view = paneView?.key === selectedKey ? paneView.view : "code";
   const row = selected && map ? map.rows[selected.row] : undefined;
   const cell = selected ? row?.cells[selected.col] : undefined;
+  // Latest risk first: a failed last attempt opens before the older success.
+  const riskFirst: PaneView = cell?.kind === "present" && cell.lastAttempt?.outcome.tone === "bad" ? "last" : "code";
+  const view = paneView?.key === selectedKey ? paneView.view : riskFirst;
   let request: Request<SlipMeta> | null = null;
   if (loaded && selected && row && cell?.kind === "present") {
     const opens = target(cell, view);
@@ -156,10 +158,10 @@ export default function App() {
   }, [focusEntry, entry, live]);
 
   const onSelect = useCallback(
-    (r: number, col: number, next: PaneView = "code") => {
+    (r: number, col: number, next?: PaneView) => {
       if (!map) return;
       select(r, col);
-      setPaneView({ key: cellKey(map.rows[r].repoRoot, map.envs[col]), view: next });
+      setPaneView(next ? { key: cellKey(map.rows[r].repoRoot, map.envs[col]), view: next } : null);
       setDrawerOpen(true);
       setFocusReceipt(false);
     },
@@ -286,6 +288,7 @@ export default function App() {
           entry={
             <DeployEntryBar
               entry={entry}
+              target={{ label: request.meta.label, env: request.meta.env }}
               notice={notice}
               onChoose={onChoose}
               onOpenConfig={() =>
