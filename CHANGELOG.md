@@ -6,6 +6,35 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-31
+
+### Added
+
+- Receipts record when each recipe step and each maintenance down/up command
+  was sent and when this Mac saw it end, by this Mac's clock. `slip receipts
+  show`, the Markdown receipt and live deploy output show how long each one
+  took (`in 12s`). A step or maintenance command whose end was not seen (lost
+  connection, detach, or a result first seen by a later `slip attach`) shows
+  `started <time>, end not known`; a duration is never guessed. Older receipts
+  read as before, and receipt versions are unchanged.
+- Library: `StepTimes`, `ReceiptStep::times()`, and
+  `maintenance_down_times()` / `maintenance_up_times()` on the receipt;
+  `config::trust_settings()` returns each trusted setting with its previous
+  and proposed value (`trust_changes()` now formats from it, so `slip trust`
+  prints the same).
+- Desktop app (local build): preview, run and follow a deploy from the
+  release map over your own ssh, with trust review, refusal screens, recovery
+  actions (bring the app up, run from step, attach) and a Dock signal when a
+  run ends. The app was redesigned: sidebar, one-line board, receipt
+  inspector, step times, and light and dark mode following macOS.
+
+### Changed
+
+- Library: `DeployEvent::StepFinished` and `DeployEvent::MaintenanceFinished`
+  carry `times: StepTimes`, the values the receipt journal saved.
+- An Up run detached before `php artisan up` was sent now records the step
+  as not started, with no start time.
+
 ## [0.9.1] - 2026-10-26
 
 ### Changed
@@ -490,6 +519,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.10.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.10.0
 [0.9.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.9.1
 [0.9.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.9.0
 [0.8.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.8.0
