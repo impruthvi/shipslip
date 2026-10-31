@@ -10,7 +10,8 @@ use shipslip::receipt::{
     ReceiptKind, ReceiptStatus,
 };
 use shipslip::records::{
-    self, failed_step_options, NextStep, Part, ReceiptQueryError, ReceiptRecord, StepKind, StepRow,
+    self, failed_step_options, NextStep, Part, ReceiptList, ReceiptListRow, ReceiptQueryError,
+    ReceiptRecord, StepKind, StepRow,
 };
 use shipslip::{DeployOutcome, WatchStatus};
 
@@ -24,6 +25,7 @@ pub(super) enum Args {
     List {
         env: Option<String>,
         all: bool,
+        json: bool,
     },
     Show {
         id: String,
@@ -72,9 +74,11 @@ impl Args {
         }
         let mut env = None;
         let mut all = false;
+        let mut json = false;
         for arg in args {
             match arg.as_str() {
                 "--all" => all = true,
+                "--json" => json = true,
                 flag if flag.starts_with('-') => {
                     return Err(invalid_input(format!("unknown receipts option {flag}")).into())
                 }
@@ -86,7 +90,7 @@ impl Args {
                 value => env = Some(value.to_string()),
             }
         }
-        Ok(Self::List { env, all })
+        Ok(Self::List { env, all, json })
     }
 }
 
@@ -97,10 +101,32 @@ pub(super) fn run(
 ) -> Result<ExitCode, Box<dyn Error>> {
     let project = config.project_name();
     match args {
-        Args::List { env, all } => {
-            let listing =
-                receipt::list(root, project, env.as_deref(), (!all).then_some(LIST_LIMIT))?;
-            print!("{}", render_list(project, env.as_deref(), &listing));
+        Args::List { env, all, json } => {
+            let listing = match records::receipts(
+                root,
+                project,
+                env.as_deref(),
+                (!all).then_some(LIST_LIMIT),
+                None,
+            ) {
+                Ok(listing) => listing,
+                Err(error) => {
+                    let text_error = show_error(project, "", &error);
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&records::versioned_error(error))?
+                        );
+                        return Ok(super::error_exit_code(text_error.as_ref()));
+                    }
+                    return Err(text_error);
+                }
+            };
+            if json {
+                println!("{}", serde_json::to_string(&records::versioned(listing))?);
+            } else {
+                print!("{}", render_list(project, env.as_deref(), &listing));
+            }
         }
         Args::Show {
             id,
@@ -151,7 +177,7 @@ fn show_error(project: &str, id: &str, error: &ReceiptQueryError) -> Box<dyn Err
     }
 }
 
-fn render_list(project: &str, env: Option<&str>, listing: &receipt::Listing) -> String {
+fn render_list(project: &str, env: Option<&str>, listing: &ReceiptList) -> String {
     let mut out = String::new();
     let scope = match env {
         Some(env) => format!("{} in {}", escape_field(project), escape_field(env)),
@@ -173,57 +199,58 @@ fn render_list(project: &str, env: Option<&str>, listing: &receipt::Listing) -> 
     ]];
     for listed in &listing.rows {
         rows.push(match listed {
-            Listed::Receipt { id, receipt, .. } => {
-                let badge = receipt.badge();
-                let mut outcome = badge.outcome.headline();
-                for flag in &badge.flags {
+            ReceiptListRow::Receipt { id, receipt, .. } => {
+                let mut outcome = receipt.outcome.headline();
+                for flag in &receipt.flags {
                     outcome.push_str("  ");
                     outcome.push_str(&flag.text());
                 }
                 [
-                    id.clone(),
+                    id.field(),
                     local_time(receipt.started_at_ms, false),
-                    escape_field(&receipt.target.env),
+                    receipt.env.field(),
                     match receipt.kind {
-                        ReceiptKind::Up => format!("brought up at {}", short(&receipt.target_sha)),
+                        ReceiptKind::Up => {
+                            format!("brought up at {}", short(receipt.target_sha.raw()))
+                        }
                         ReceiptKind::Deploy => format!(
                             "{} → {}",
-                            short(&receipt.from_sha),
-                            short(&receipt.target_sha)
+                            short(receipt.from_sha.raw()),
+                            short(receipt.target_sha.raw())
                         ),
                     },
                     escape_field(&outcome),
                 ]
             }
-            Listed::Newer {
+            ReceiptListRow::Newer {
                 id,
                 env,
                 started_at_ms,
                 version,
                 ..
             } => [
-                id.clone(),
+                id.field(),
                 started_at_ms
                     .map(|ms| local_time(ms, false))
                     .unwrap_or_default(),
-                escape_field(env),
+                env.field(),
                 String::new(),
                 format!("needs a newer slip (receipt schema v{version})"),
             ],
-            Listed::Unreadable {
+            ReceiptListRow::Unreadable {
                 id,
                 env,
                 started_at_ms,
                 reason,
                 ..
             } => [
-                escape_field(id),
+                id.field(),
                 started_at_ms
                     .map(|ms| local_time(ms, false))
                     .unwrap_or_default(),
-                escape_field(env),
+                env.field(),
                 String::new(),
-                format!("unreadable: {}", escape_field(reason)),
+                format!("unreadable: {}", reason.field()),
             ],
         });
     }

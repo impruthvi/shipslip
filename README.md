@@ -432,10 +432,17 @@ List and read receipts without contacting the server:
 ```sh
 slip receipts                 # newest 20 for this project; --all lists every one
 slip receipts staging         # one environment
+slip receipts --json          # a versioned JSON list; also accepts ENV and --all
 slip receipts show 18dab54b   # one run, by the ID shown in the list
 slip receipts show 18dab54b --md
 slip receipts show 18dab54b --json
 ```
+
+`receipts --json` prints `{"schema":1,"rows":[...],"older":0}`. Rows carry a
+`state` of `receipt`, `newer`, or `unreadable`, so a damaged file does not hide
+the rest of the list. Readable rows include the short unique ID, local path,
+run kind, typed outcome and flags, and FROM/TARGET commits. `older` counts
+receipts beyond the default limit of 20; `--all` removes that limit.
 
 `show --json` prints the full record with `"schema": 1`. Times are absolute
 milliseconds; an unobserved step end and its duration are `null`. Receipt text

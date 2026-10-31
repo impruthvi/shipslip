@@ -1890,6 +1890,87 @@ fn stop_reaches_only_a_run_that_is_running() {
 }
 
 #[test]
+fn deploy_entry_preserves_recovery_from_saved_receipts_and_unreadable_barriers() {
+    use crate::fixture::run;
+    use crate::recovery::{RecoveryAction, RecoveryOp};
+    use serde_json::json;
+
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        approve(&sessions, &root).await;
+
+        let mut failed = run(1, "production");
+        failed["project"] = json!("example");
+        failed["repo_root"] = json!(root);
+        failed["target"]["steps"] = json!(["true"]);
+        failed["steps"][1]["command"] = json!("true");
+        failed["steps"][1]["status"] = json!("Failed");
+        failed["steps"][1]["exit_code"] = json!(1);
+        failed["outcome"] = json!({"FailedAtStep": {"step": 1, "partial_update": false}});
+        failed["app_left_down"] = json!(true);
+        fx.save(&failed);
+
+        let expected = DeployEntry::Ready {
+            production: true,
+            needs_trust: false,
+            steps: vec!["true".into()],
+            recovery: Some(RecoveryView {
+                run_id: "00000001-0".into(),
+                sentence: "Step 1 failed (exit 1): true".into(),
+                advice: None,
+                actions: vec![
+                    RecoveryAction {
+                        op: RecoveryOp::Up,
+                        command: "slip up production".into(),
+                    },
+                    RecoveryAction {
+                        op: RecoveryOp::FromStep { step: 1 },
+                        command: "slip from-step production 1".into(),
+                    },
+                ],
+            }),
+        };
+        assert_eq!(
+            sessions
+                .deploy_entry(root.clone(), "production".into())
+                .await,
+            expected
+        );
+
+        let mut other = run(2, "production");
+        other["project"] = json!("example");
+        other["repo_root"] = json!("/another/checkout");
+        fx.save(&other);
+        assert_eq!(
+            sessions
+                .deploy_entry(root.clone(), "production".into())
+                .await,
+            expected
+        );
+
+        let dir = fx.receipts().join("example/production");
+        let blocker = dir.join("3000-00000003-0.json");
+        for contents in ["{", r#"{"version":99}"#] {
+            std::fs::write(&blocker, contents).unwrap();
+            assert_eq!(
+                sessions
+                    .deploy_entry(root.clone(), "production".into())
+                    .await,
+                DeployEntry::Ready {
+                    production: true,
+                    needs_trust: false,
+                    steps: vec!["true".into()],
+                    recovery: None,
+                }
+            );
+        }
+        assert_eq!(sessions.connector.0.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
 fn recovery_comes_from_this_checkouts_newest_receipt() {
     use crate::fixture::run;
     use serde_json::json;
@@ -1897,7 +1978,7 @@ fn recovery_comes_from_this_checkouts_newest_receipt() {
     let newest = |checkout: &str| {
         newest_runs(&fx.receipts(), "app", "production", Path::new(checkout))
             .first()
-            .map(|receipt| receipt.run_id.clone())
+            .map(|receipt| receipt.run_id.raw().to_owned())
     };
     assert_eq!(newest("/work/app"), None);
 

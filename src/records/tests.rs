@@ -79,6 +79,128 @@ fn json_carries_the_schema_number() {
 }
 
 #[test]
+fn receipt_list_is_empty_when_no_runs_are_recorded() {
+    let root = TempRoot::new();
+    assert_eq!(
+        to_json(versioned(
+            receipts(&root.0, "app", None, None, None).unwrap()
+        )),
+        json!({"schema": 1, "rows": [], "older": 0})
+    );
+}
+
+#[test]
+fn receipt_list_reports_an_unreadable_directory_as_a_typed_error() {
+    let root = TempRoot::new();
+    std::fs::write(root.0.join("not-a-directory"), "x").unwrap();
+    let error = receipts(&root.0.join("not-a-directory"), "app", None, None, None).unwrap_err();
+    let error = to_json(versioned_error(error));
+    assert_eq!(error["schema"], 1);
+    assert_eq!(error["error"]["kind"], "unreadable");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not-a-directory"));
+}
+
+#[test]
+fn receipt_list_filters_environment_and_limits_the_newest_files() {
+    let root = TempRoot::new();
+    for (id, time, env) in [
+        ("aaaa0001-0", 1000, "staging"),
+        ("aaaa0002-0", 2000, "production"),
+        ("aaaa0003-0", 3000, "staging"),
+    ] {
+        write_receipt(&root.0, &receipt_json(id, time, env));
+    }
+    let list = |env, limit| to_json(receipts(&root.0, "app", env, limit, None).unwrap());
+    let latest = list(Some("staging"), Some(1));
+    assert_eq!(latest["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(latest["rows"][0]["id"], "aaaa0003");
+    assert_eq!(latest["older"], 1);
+    let all = list(None, None);
+    assert_eq!(all["rows"].as_array().unwrap().len(), 3);
+    assert_eq!(all["rows"][1]["receipt"]["env"], "production");
+    assert_eq!(all["older"], 0);
+    assert_eq!(list(None, Some(0)), json!({"rows": [], "older": 3}));
+    assert_eq!(list(Some("missing"), None), json!({"rows": [], "older": 0}));
+}
+
+#[test]
+fn receipt_list_rows_carry_typed_outcomes_flags_run_kinds_and_raw_commits() {
+    let root = TempRoot::new();
+    let mut deploy = deploy();
+    deploy["run_plan"] = json!({"FromStep": 2});
+    deploy["outcome"] = json!({"Unknown": {"step": 2, "reason": "lost"}});
+    deploy["app_left_down"] = json!(true);
+    deploy["from_sha"] = json!("a\u{1b}[2J");
+    write_receipt(&root.0, &deploy);
+    write_receipt(&root.0, &up_json("bbbb0002-0", 2000));
+    let list = to_json(receipts(&root.0, "app", None, None, None).unwrap());
+    let deploy = &list["rows"][1]["receipt"];
+    assert_eq!(
+        deploy["outcome"],
+        json!({"kind": "unknown", "step": 2, "unfinished": false})
+    );
+    assert!(deploy["flags"]
+        .as_array()
+        .unwrap()
+        .contains(&json!({"kind": "app_left_down"})));
+    assert_eq!(deploy["run_plan"], json!({"FromStep": 2}));
+    assert_eq!(deploy["from_sha"], "a\u{1b}[2J");
+    assert_eq!(
+        deploy["target_sha"],
+        "2222222222222222222222222222222222222222"
+    );
+    assert_eq!(list["rows"][0]["receipt"]["kind"], "up");
+    assert_eq!(list["rows"][1]["receipt"]["kind"], "deploy");
+}
+
+#[test]
+fn receipt_list_checkout_filter_preserves_the_search_window_and_unreadable_barrier() {
+    let root = TempRoot::new();
+    write_receipt(&root.0, &deploy());
+    let mut other = receipt_json("bbbb0002-0", 2000, "staging");
+    other["repo_root"] = json!("/other");
+    write_receipt(&root.0, &other);
+    let checkout = Some(std::path::Path::new("/repo"));
+    let list = to_json(receipts(&root.0, "app", Some("staging"), None, checkout).unwrap());
+    assert_eq!(list["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(list["rows"][0]["receipt"]["run_id"], "aaaa0001-0");
+    let bounded = to_json(receipts(&root.0, "app", None, Some(1), checkout).unwrap());
+    assert_eq!(bounded, json!({"rows": [], "older": 1}));
+    let broken = write_receipt(&root.0, &receipt_json("cccc0003-0", 3000, "staging"));
+    std::fs::write(&broken, "{").unwrap();
+    let blocked = to_json(receipts(&root.0, "app", None, None, checkout).unwrap());
+    assert_eq!(blocked["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(blocked["rows"][0]["state"], "unreadable");
+    std::fs::write(broken, r#"{"version":99}"#).unwrap();
+    let blocked = to_json(receipts(&root.0, "app", None, None, checkout).unwrap());
+    assert_eq!(blocked["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(blocked["rows"][0]["state"], "newer");
+}
+
+#[test]
+fn receipt_list_keeps_unreadable_entries_and_ids_unique_across_filters() {
+    let root = TempRoot::new();
+    write_receipt(&root.0, &receipt_json("aaaaaaaa1-0", 1000, "staging"));
+    let newer = write_receipt(&root.0, &receipt_json("aaaaaaaa2-0", 2000, "production"));
+    std::fs::write(newer, r#"{"version":99}"#).unwrap();
+    let broken = write_receipt(&root.0, &receipt_json("bbbbbbbb-0", 3000, "staging"));
+    std::fs::write(broken, "{").unwrap();
+    let list = to_json(receipts(&root.0, "app", None, None, None).unwrap());
+    assert_eq!(list["rows"].as_array().unwrap().len(), 3);
+    assert_eq!(list["rows"][0]["state"], "unreadable");
+    assert!(list["rows"][0]["reason"].as_str().unwrap().contains("EOF"));
+    assert_eq!(list["rows"][1]["state"], "newer");
+    assert_eq!(list["rows"][1]["version"], 99);
+    assert_eq!(list["rows"][1]["id"], "aaaaaaaa2");
+    assert_eq!(list["rows"][2]["id"], "aaaaaaaa1");
+    let filtered = to_json(receipts(&root.0, "app", Some("staging"), None, None).unwrap());
+    assert_eq!(filtered["rows"][1]["id"], "aaaaaaaa1");
+}
+
+#[test]
 fn deploy_rows_wrap_the_steps_in_maintenance_down_and_up() {
     let receipt = query(deploy());
     let mut migrate = row(

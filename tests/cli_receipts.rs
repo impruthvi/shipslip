@@ -71,12 +71,103 @@ steps = ["php artisan optimize"]
             .output()
             .unwrap()
     }
+
+    fn list(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_slip"))
+            .arg("receipts")
+            .args(args)
+            .current_dir(self.0.join("app"))
+            .env("HOME", self.0.join("home"))
+            .env("TZ", "UTC")
+            .env_remove("SHIPSLIP_CONFIG")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn receipt_list_json_stdout_is_versioned_for_default_and_all_environment_forms() {
+    let fixture = Fixture::new();
+    for args in [vec!["--json"], vec!["staging", "--all", "--json"]] {
+        let output = fixture.list(&args);
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"schema": 1, "rows": [], "older": 0})
+        );
+    }
+    fixture.save("aabbccdd-0", &json!({"version": 99}));
+    for args in [vec!["--json"], vec!["staging", "--all", "--json"]] {
+        let output = fixture.list(&args);
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let list: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(list["schema"], 1);
+        assert_eq!(list["rows"][0]["state"], "newer");
+        assert_eq!(list["rows"][0]["id"], "aabbccdd");
+    }
+}
+
+#[test]
+fn receipt_list_json_errors_match_text_exit_codes() {
+    let fixture = Fixture::new();
+    let root = fixture
+        .receipts()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    fs::create_dir_all(root.parent().unwrap()).unwrap();
+    fs::write(&root, "not a directory").unwrap();
+    let text = fixture.list(&[]);
+    let output = fixture.list(&["--json"]);
+    assert_eq!(text.status.code(), Some(1), "{text:?}");
+    assert_eq!(output.status.code(), text.status.code(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["schema"], 1);
+    assert_eq!(error["error"]["kind"], "unreadable");
+}
+
+#[test]
+fn receipt_list_json_applies_the_default_limit_and_all_environment_filter() {
+    let fixture = Fixture::new();
+    for index in 0..21 {
+        fixture.save(&format!("{index:08x}-0"), &json!({"version": 99}));
+    }
+    let other = fixture.receipts().parent().unwrap().join("production");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("2000-ffffffff-0.json"), r#"{"version":99}"#).unwrap();
+
+    let output = fixture.list(&["--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let list: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(list["schema"], 1);
+    assert_eq!(list["rows"].as_array().unwrap().len(), 20);
+    assert_eq!(list["rows"][0]["env"], "production");
+    assert_eq!(list["older"], 2);
+
+    let output = fixture.list(&["staging", "--all", "--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let list: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(list["schema"], 1);
+    assert_eq!(list["rows"].as_array().unwrap().len(), 21);
+    assert!(list["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["env"] == "staging"));
+    assert_eq!(list["older"], 0);
 }
 
 #[test]
@@ -117,7 +208,7 @@ fn receipt_json_errors_match_text_exit_codes() {
 }
 
 #[test]
-fn receipt_json_stdout_is_a_versioned_record_with_unknown_outcome_and_raw_text() {
+fn receipt_json_and_terminal_list_preserve_the_unknown_run_fixture() {
     let fixture = Fixture::new();
     let config = shipslip::config::LoadedConfig::load(&fixture.0.join("app"), None).unwrap();
     fixture.save(
@@ -152,5 +243,17 @@ fn receipt_json_stdout_is_a_versioned_record_with_unknown_outcome_and_raw_text()
             "exit_code": null, "started_at_ms": 1500, "finished_at_ms": null, "duration_ms": null,
             "output": ["\u{1b}[31m`<b>`\u{7}"]
         })
+    );
+    let output = fixture.list(&[]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        concat!(
+            "Receipts for app, newest first\n\n",
+            "ID        STARTED (UTC)     ENV      FROM → TARGET                OUTCOME\n",
+            "aabbccdd  1970-01-01 00:00  staging  aaaaaaaaaaaa → bbbbbbbbbbbb  Unknown at step 1  ⓘ log not recorded  ⓘ smoke not recorded\n",
+            "\nShow one: slip receipts show ID [--md]\n",
+        )
     );
 }

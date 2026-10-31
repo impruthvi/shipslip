@@ -12,6 +12,7 @@ use shipslip::config::{self, LoadedConfig, TrustSnapshot, TrustStatus, TrustedTa
 use shipslip::interrupt::{on_interrupt, Interrupt, Stage};
 use shipslip::logs::escape_field;
 use shipslip::receipt::{self, ReceiptJournal, ReceiptStatus, ReceiptStepStatus};
+use shipslip::records::{self, ReceiptListRow, ReceiptSummary};
 use shipslip::transport::ConnectFailure;
 use shipslip::transport::{SshTransport, Transport, TransportError};
 use shipslip::{
@@ -367,22 +368,24 @@ fn newest_runs(
     project: &str,
     env: &str,
     checkout: &Path,
-) -> Vec<receipt::Receipt> {
-    let Ok(listing) = receipt::list(receipts_root, project, Some(env), Some(NEWEST_RUNS)) else {
+) -> Vec<ReceiptSummary> {
+    let Ok(listing) = records::receipts(
+        receipts_root,
+        project,
+        Some(env),
+        Some(NEWEST_RUNS),
+        Some(checkout),
+    ) else {
         return Vec::new();
     };
-    let checkout = checkout.to_string_lossy();
-    let mut runs = Vec::new();
-    for row in listing.rows {
-        match row {
-            receipt::Listed::Receipt { receipt, .. } if receipt.repo_root == checkout => {
-                runs.push(*receipt)
-            }
-            receipt::Listed::Receipt { .. } => {}
-            _ => break,
-        }
-    }
-    runs
+    listing
+        .rows
+        .into_iter()
+        .filter_map(|row| match row {
+            ReceiptListRow::Receipt { receipt, .. } => Some(*receipt),
+            _ => None,
+        })
+        .collect()
 }
 
 /// What a preview is waiting on, sent as each phase starts.
@@ -2019,7 +2022,11 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
     open_receipt.status = ReceiptStatus::InProgress;
     views.insert(
         "recoveries",
-        to_value([recovery(&failed_receipt), recovery(&open_receipt)]).unwrap(),
+        to_value([
+            recovery(&ReceiptSummary::from(&failed_receipt)),
+            recovery(&ReceiptSummary::from(&open_receipt)),
+        ])
+        .unwrap(),
     );
     views.insert(
         "liveRuns",
