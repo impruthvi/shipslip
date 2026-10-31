@@ -246,7 +246,7 @@ export default function App() {
               Release map
             </h1>
             <p className="toolbar-subtitle muted" data-tauri-drag-region>
-              Last recorded code on each app and environment. Deploys started here show live.
+              What this Mac recorded for each app and environment
             </p>
             {map?.screen === "map" && (
               <ComparePicker envs={map.envs} pair={pair} onChange={setPair} />

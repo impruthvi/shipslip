@@ -327,14 +327,12 @@ button {
 
 .side-why {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  overflow: hidden;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 2px 6px;
   padding-left: 18px;
   font-size: var(--text-11);
   line-height: 14px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
 
 .side-item-static {
@@ -363,8 +361,7 @@ button.side-item:hover {
 }
 
 .side-why-text {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
 .sidebar .flap {
@@ -605,7 +602,8 @@ button.side-item:hover {
   padding-top: 9px;
 }
 
-.grid-row-open .grid-app {
+.grid-row-open .grid-app,
+.grid-row-twin .grid-app {
   flex-direction: column;
   gap: 2px;
 }
@@ -755,9 +753,7 @@ button.side-item:hover {
   );
 }
 
-.cell-empty {
-  border: 1px dashed var(--color-rule);
-}
+
 
 .cell-head {
   height: 20px;
@@ -2038,6 +2034,10 @@ button.side-item:hover {
 
 .menu {
   position: relative;
+}
+
+.menu-chevron {
+  margin-left: 2px;
 }
 
 .menu-list {

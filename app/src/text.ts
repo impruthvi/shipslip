@@ -15,6 +15,26 @@ export function lowerFirst(text: string): string {
 }
 
 /** `/Users/ana/code/shop` → `~/code/shop`, then the middle elided past `max`. */
+/** The end of a path, which is what tells two checkouts apart. */
+export function tailPath(path: string, max = 22): string {
+  const home = path.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
+  if (home.length <= max) return home;
+  const parts = home.split("/");
+  let tail = parts[parts.length - 1];
+  if (tail.length + 2 > max) return `…${tail.slice(tail.length - max + 1)}`;
+  // Whole folder names only, so the cut never lands mid-name.
+  for (let i = parts.length - 2; i > 0 && `…/${parts[i]}/${tail}`.length <= max; i--) {
+    tail = `${parts[i]}/${tail}`;
+  }
+  return `…/${tail}`;
+}
+
+/** The folder a checkout sits in. */
+export function parentDir(path: string): string {
+  const cut = path.replace(/\/+$/, "").lastIndexOf("/");
+  return cut > 0 ? path.slice(0, cut) : path;
+}
+
 export function shortPath(path: string, max = 22): string {
   const home = path.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
   if (home.length <= max) {

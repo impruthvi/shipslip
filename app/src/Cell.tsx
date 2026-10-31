@@ -68,7 +68,11 @@ export function reason(cell: EnvCellView, live?: string): { text: string; classN
   if (flag) return { text: flag.text, className: "sentence" };
   const state = stateLine(cell);
   // "Succeeded" under a "Succeeded" status word says nothing new.
-  if (state) return state.text === status(cell).word ? null : state;
+  // Success stays quiet ink: a green line would pull the eye to the healthy cell.
+  if (state) {
+    if (state.text === status(cell).word) return null;
+    return state.className === "tone-good" ? { ...state, className: "muted" } : state;
+  }
   return cell.words ? { text: cell.words, className: "muted sentence" } : null;
 }
 

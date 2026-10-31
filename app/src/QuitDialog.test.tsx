@@ -69,10 +69,10 @@ test("a run that already finished just quits", async () => {
   expect(screen.queryByRole("alertdialog")).toBeNull();
 });
 
-test("names every live run when more than one would be cut short", async () => {
+test("names every run when more than one would be cut short", async () => {
   status.mockResolvedValue(quitRuns);
   render(<QuitDialog />);
   await ask();
-  expect(screen.getByRole("alertdialog", { name: "Quit while 2 runs are live?" }));
+  expect(screen.getByRole("alertdialog", { name: "Quit while 2 runs are going?" }));
   for (const run of quitRuns) expect(screen.getByText(run.detach));
 });

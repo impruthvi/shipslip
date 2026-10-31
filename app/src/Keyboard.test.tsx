@@ -175,10 +175,10 @@ test("⌘I closing the drawer from inside it puts focus back on the cell", async
   expect(shop).toHaveFocus();
 });
 
-test("Select cell in the problems strip selects and focuses that cell", async () => {
+test("Select in the problems strip selects and focuses that cell", async () => {
   render(<App />);
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Select cell" }));
+  fireEvent.click(screen.getByRole("button", { name: "Select billing · production" }));
   const billingProd = cell("/Users/you/code/billing", "production");
   expect(billingProd).toHaveAttribute("aria-selected", "true");
   expect(billingProd).toHaveFocus();

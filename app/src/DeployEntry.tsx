@@ -115,7 +115,10 @@ function Menu({ items }: { items: MenuItem[] }) {
         aria-controls={open ? "deploy-entry-more" : undefined}
         onClick={() => setOpen(!open)}
       >
-        More <span aria-hidden>▾</span>
+        More
+        <svg className="menu-chevron" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
+          <path d="M1.5 3 L4 5.5 L6.5 3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
       </button>
       {open && (
         <div id="deploy-entry-more" className="menu-list" role="menu" aria-label="More" ref={list} onKeyDown={onKeyDown}>

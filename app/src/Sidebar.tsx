@@ -3,7 +3,7 @@ import { Flap, reason, status, type StatusTone } from "./Cell";
 import { Footer } from "./Footer";
 import { Mark } from "./Mark";
 import { ProblemsStrip } from "./ProblemsStrip";
-import { shortPath } from "./text";
+import { parentDir, tailPath } from "./text";
 import { elapsed } from "./time";
 import type { RunInfo } from "./types";
 import type { MapState } from "./useReleaseMap";
@@ -119,7 +119,7 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
                       <Flap status={said} />{" "}
                       <span className="side-why-text muted">
                         {env}
-                        {twin(row.label) && ` · ${shortPath(row.repoRoot)}`}
+                        {twin(row.label) && ` · in ${tailPath(parentDir(row.repoRoot), 18)}`}
                       </span>
                     </span>
                   </Item>
@@ -129,7 +129,13 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
           )}
         </section>
       )}
-      {map && !busy && <ProblemsStrip problems={map.problems} onSelect={onProblem} />}
+      {map && !busy && (
+        <ProblemsStrip
+          problems={map.problems}
+          onSelect={onProblem}
+          cellName={(row, col) => `${map.rows[row]?.label} · ${map.envs[col]}`}
+        />
+      )}
       <Footer state={state} onRetry={onRetry} />
     </nav>
   );

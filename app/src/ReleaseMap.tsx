@@ -6,7 +6,7 @@ import { first, move, type Pos } from "./gridKeys";
 import { Legend } from "./Legend";
 import type { PaneView } from "./slipTarget";
 import type { Selection } from "./selection";
-import { shortPath } from "./text";
+import { parentDir, shortPath, tailPath } from "./text";
 import type { MapView } from "./types";
 
 export interface Compare {
@@ -57,6 +57,8 @@ export function ReleaseMap({
   const grid = useRef<HTMLDivElement>(null);
   const [focusKey, setFocusKey] = useState<FocusKey | null>(null);
   const active = resolve(map, focusKey, selected);
+  const labels = map.rows.map((row) => row.label);
+  const twin = (label: string) => labels.indexOf(label) !== labels.lastIndexOf(label);
 
   const focusCell = ({ row, col }: Pos) => {
     grid.current?.querySelector<HTMLElement>(`[data-row="${row}"][data-col="${col}"]`)?.focus();
@@ -108,14 +110,15 @@ export function ReleaseMap({
           </div>
           {map.rows.map((row, r) => (
             <div
-              className={`grid-row${row.pathMissing ? " row-gone" : ""}${selected?.row === r ? " grid-row-open" : ""}`}
+              className={`grid-row${row.pathMissing ? " row-gone" : ""}${selected?.row === r ? " grid-row-open" : ""}${twin(row.label) ? " grid-row-twin" : ""}`}
               role="row"
               key={row.repoRoot}
             >
               <div className="grid-app" role="rowheader">
                 <div className="app-name">{row.label}</div>
                 <div className="mono muted app-path" title={row.repoRoot}>
-                  {shortPath(row.repoRoot)}
+                  {/* Same-named apps differ by the folder they sit in. */}
+                  {twin(row.label) ? `in ${tailPath(parentDir(row.repoRoot))}` : shortPath(row.repoRoot)}
                 </div>
                 {row.pathMissing && <div className="muted app-gone">checkout not found</div>}
               </div>

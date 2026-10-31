@@ -82,8 +82,14 @@ describe("cells", () => {
   test("a checkout that is gone says so under its path", () => {
     render(<ReleaseMap map={map} selected={{ repoRoot: "/Users/you/tmp/shop-copy", env: "staging", row: 3, col: 1 }} />);
     const header = screen.getByTitle("/Users/you/tmp/shop-copy").closest('[role="rowheader"]');
-    expect(header).toHaveTextContent("~/tmp/shop-copy");
     expect(header).toHaveTextContent("checkout not found");
+  });
+
+  test("same-named apps show the folder that tells them apart", () => {
+    render(<ReleaseMap map={map} />);
+    expect(screen.getByTitle("/Users/you/tmp/shop-copy")).toHaveTextContent("in ~/tmp");
+    expect(screen.getByTitle("/Users/you/code/shop")).toHaveTextContent("in ~/code");
+    expect(screen.getByTitle("/Users/you/code/api")).toHaveTextContent("~/code/api");
   });
 
   test("the key names every mark", () => {

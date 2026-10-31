@@ -116,7 +116,7 @@ test("launch selects the first cell that needs attention; clicks and problems se
     env: "staging",
   });
 
-  fireEvent.click(within(screen.getByLabelText("Problems")).getByRole("button", { name: "Select cell" }));
+  fireEvent.click(within(screen.getByLabelText("Problems")).getByRole("button", { name: "Select billing · production" }));
   expect(selected()[0]).toHaveTextContent("ddddddd");
 
   const absent = screen.getAllByRole("gridcell").find((c) => c.getAttribute("aria-label")?.endsWith(", none"))!;

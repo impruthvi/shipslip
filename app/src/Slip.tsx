@@ -8,6 +8,7 @@ import type {
   FlagView,
   GroupView,
   Guidance,
+  OutcomeView,
   ReceiptView,
   StepView,
   Tone,
@@ -18,6 +19,12 @@ import type { Opened } from "./useReceipt";
 const toneClass: Record<Tone, string> = { good: "tone-good", bad: "tone-bad", neutral: "" };
 
 const COMMITS_SHOWN = 5;
+
+/** Red only for a step that failed; a stop or a lost result is amber. */
+function outcomeClass(outcome: OutcomeView): string {
+  if (outcome.tone === "bad" && outcome.kind !== "failed") return "tone-attention";
+  return toneClass[outcome.tone];
+}
 
 
 interface Props {
@@ -191,7 +198,7 @@ function Facts({ receipt }: { receipt: ReceiptView }) {
     <section className="slip-section">
       <dl className="facts">
         <Fact name="Outcome">
-          <span className={`slip-outcome ${toneClass[receipt.outcome.tone]}`}>
+          <span className={`slip-outcome ${outcomeClass(receipt.outcome)}`}>
             {receipt.outcome.text}
           </span>
         </Fact>
