@@ -84,11 +84,127 @@ steps = ["php artisan optimize"]
             .output()
             .unwrap()
     }
+
+    fn status(&self, args: &[&str]) -> Output {
+        Command::new(env!("CARGO_BIN_EXE_slip"))
+            .arg("status")
+            .args(args)
+            .current_dir(self.0.join("app"))
+            .env("HOME", self.0.join("home"))
+            .env_remove("SHIPSLIP_CONFIG")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap()
+    }
 }
 
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn status_json_stdout_is_versioned_without_records() {
+    let fixture = Fixture::new();
+    let output = fixture.status(&["--json"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"schema": 1, "repos": [], "problems": []})
+    );
+}
+
+#[test]
+fn status_json_errors_match_text_exit_codes() {
+    let fixture = Fixture::new();
+    let root = fixture.receipts().ancestors().nth(2).unwrap().to_path_buf();
+    fs::create_dir_all(root.parent().unwrap()).unwrap();
+    fs::write(&root, "not a directory").unwrap();
+    let text = fixture.status(&[]);
+    let output = fixture.status(&["--json"]);
+    assert_eq!(text.status.code(), Some(1));
+    assert_eq!(output.status.code(), text.status.code());
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["schema"], 1);
+    assert_eq!(error["error"]["kind"], "unreadable");
+}
+
+#[test]
+fn status_json_reports_path_errors_before_reading_records() {
+    let output = Command::new(env!("CARGO_BIN_EXE_slip"))
+        .args(["status", "--json"])
+        .env_remove("HOME")
+        .env_remove("SHIPSLIP_CONFIG")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(error["schema"], 1);
+    assert_eq!(error["error"]["kind"], "unreadable");
+    assert!(error["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("HOME is not set"));
+}
+
+#[test]
+fn status_json_argument_errors_preserve_the_text_exit_code() {
+    let fixture = Fixture::new();
+    for args in [vec!["--bogus"], vec!["--compare", "staging", "production"]] {
+        let text = fixture.status(&args);
+        let mut json_args = args;
+        json_args.insert(0, "--json");
+        let output = fixture.status(&json_args);
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(error["schema"], 1);
+        assert_eq!(error["error"]["kind"], "invalid_input");
+        if json_args.contains(&"--bogus") {
+            assert_eq!(output.status.code(), text.status.code());
+        }
+    }
+}
+
+#[test]
+fn status_json_rejects_inherited_or_explicit_config_as_versioned_errors() {
+    let fixture = Fixture::new();
+    for explicit in [false, true] {
+        let invoke = |json: bool| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_slip"));
+            if explicit {
+                command.args(["--config", "project.toml"]);
+            } else {
+                command.env("SHIPSLIP_CONFIG", "project.toml");
+            }
+            command.arg("status");
+            if json {
+                command.arg("--json");
+            }
+            command
+                .current_dir(fixture.0.join("app"))
+                .env("HOME", fixture.0.join("home"))
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let text = invoke(false);
+        let output = invoke(true);
+        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(output.status.code(), text.status.code());
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(error["schema"], 1);
+        assert_eq!(error["error"]["kind"], "invalid_input");
+        assert!(error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("omit --config"));
     }
 }
 

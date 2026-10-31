@@ -12,7 +12,8 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 use shipslip::git::Comparison;
-use shipslip::receipt::{overview, ReceiptError};
+use shipslip::receipt::ReceiptError;
+use shipslip::records::status as overview;
 
 use shipslip::records::receipt_at as read;
 
@@ -257,7 +258,7 @@ fn build() -> (Fixtures, Vec<String>) {
     let unreadable_root = || {
         Err(ReceiptError::Invalid(format!(
             "receipts root `{HOME}/Library/Application Support/Shipslip/receipts`: Permission denied (os error 13)"
-        )))
+        )).into())
     };
     let failed = AppState::default().load_map(|| NOW, unreadable_root);
     let coalesced = LoadResult::Coalesced;

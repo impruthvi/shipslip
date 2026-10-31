@@ -16,208 +16,16 @@ use super::{
 };
 use super::{ReceiptStepStatus, ReceiptSummary};
 use crate::git::{Comparison, Git};
-use crate::records::{Badge, Flag, NextSteps};
+use crate::records::{Flag, Untrusted};
 use crate::{DeployOutcome, RunPlan};
 
 /// Receipts of one cell read before it settles on "no code change".
 pub const WALK_LIMIT: usize = 20;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Overview {
-    pub repos: Vec<RepoRow>,
-    /// Files or directories that could not be read; the rest is still shown.
-    pub problems: Vec<Problem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepoRow {
-    pub repo_root: String,
-    /// `None` for a checkout known only from the trust store.
-    pub project: Option<String>,
-    pub label: String,
-    /// The checkout is no longer on disk.
-    pub path_missing: bool,
-    pub envs: Vec<EnvCell>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EnvCell {
-    pub env: String,
-    /// An approval record exists. It does not mean the current config is
-    /// still trusted, which is never checked here.
-    pub approved: bool,
-    /// `ssh_alias:path` from the approval record.
-    pub approved_target: Option<String>,
-    pub code: CodeState,
-    /// The newest readable run of any kind.
-    pub last_attempt: Option<AttemptSummary>,
-    /// The run that decided `code`, when one did. It can be older than
-    /// `last_attempt`.
-    pub code_run: Option<AttemptSummary>,
-    pub stale_hint: Option<StaleHint>,
-    /// `ssh_alias:path` of the newest readable run.
-    pub target: Option<String>,
-    /// Another checkout ran on the same `ssh_alias:path` after this cell's
-    /// last run, so its code may have replaced this one.
-    pub newer_elsewhere: Option<NewerElsewhere>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NewerElsewhere {
-    pub repo_root: String,
-    pub env: String,
-    pub run_id: String,
-    pub started_at_ms: u128,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CodeState {
-    /// From the receipt's own facts.
-    Recorded {
-        sha: String,
-        /// The run finished and succeeded.
-        complete: bool,
-        evidence: Evidence,
-        run_id: String,
-        at_ms: u128,
-    },
-    /// The server HEAD read after a failed or unknown step.
-    Observed {
-        sha: String,
-        dirty: Option<bool>,
-        /// The commit the run was deploying.
-        expected: String,
-        run_id: String,
-        /// How that run ended, if it did.
-        outcome: Option<DeployOutcome>,
-        at_ms: u128,
-    },
-    /// The code may have changed, but nothing recorded says to what.
-    NotKnown {
-        run_id: Option<String>,
-        reason: NotKnownReason,
-    },
-    NeverDeployed,
-    /// None of this many runs on the current target changed the code.
-    NoCodeChangeInLast {
-        records: usize,
-    },
-    /// Runs exist only for an older `ssh_alias:path`.
-    TargetChanged {
-        run_id: String,
-        target: String,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Evidence {
-    /// The fast-forward step succeeded.
-    FastForward,
-    /// A rerun or from-step run checked that the target was checked out.
-    CheckedOutAtStart,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NotKnownReason {
-    /// The fast-forward started but did not end `Ok`.
-    StepZero(ReceiptStepStatus),
-    /// A deploy receipt without a fast-forward step.
-    NoStepZero,
-    /// None of the cell's receipts could be read.
-    Unreadable,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttemptSummary {
-    pub run_id: String,
-    pub started_at_ms: u128,
-    pub kind: ReceiptKind,
-    pub run_plan: RunPlan,
-    pub badge: Badge,
-    pub next_steps: NextSteps,
-    /// The receipt file.
-    pub path: PathBuf,
-}
-
-impl AttemptSummary {
-    fn of(receipt: &Receipt, path: &Path) -> Self {
-        Self {
-            run_id: receipt.run_id.clone(),
-            started_at_ms: receipt.started_at_ms,
-            kind: receipt.kind,
-            run_plan: receipt.run_plan,
-            badge: receipt.badge(),
-            next_steps: receipt.next_steps(),
-            path: path.to_path_buf(),
-        }
-    }
-
-    fn needs_attention(&self) -> bool {
-        self.badge.outcome.needs_attention() || self.badge.flags.iter().any(|flag| flag.is_bad())
-    }
-}
-
-impl EnvCell {
-    /// The approved target, when the newest receipt was for another one.
-    pub fn target_moved(&self) -> Option<&str> {
-        let approved = self.approved_target.as_deref()?;
-        (self.target.as_deref()? != approved).then_some(approved)
-    }
-
-    /// Whether the cell shows something the user should look at: a run
-    /// that did not succeed, code that is not known or not complete, a
-    /// record that may be out of date, or new errors after a run.
-    pub fn needs_attention(&self) -> bool {
-        let code = match &self.code {
-            CodeState::Recorded { complete, .. } => !complete,
-            CodeState::Observed { .. } | CodeState::NotKnown { .. } => true,
-            CodeState::NeverDeployed
-            | CodeState::NoCodeChangeInLast { .. }
-            | CodeState::TargetChanged { .. } => false,
-        };
-        code || self.stale_hint.is_some()
-            || self.newer_elsewhere.is_some()
-            || self.target_moved().is_some()
-            || self
-                .code_run
-                .iter()
-                .chain(&self.last_attempt)
-                .any(AttemptSummary::needs_attention)
-    }
-}
-
-/// A receipt newer than the one that decided the cell could not be read, so
-/// the cell may be out of date.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StaleHint {
-    /// One of this checkout's receipts.
-    NewestUnreadable { path: PathBuf },
-    /// A file in the same directory whose checkout cannot be told.
-    UnattributedNewer { path: PathBuf },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Problem {
-    pub path: PathBuf,
-    pub message: String,
-    pub kind: ProblemKind,
-    /// The cells this problem may make out of date. Empty when it cannot
-    /// be tied to any, e.g. for the trust store.
-    pub cells: Vec<CellRef>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProblemKind {
-    Trust,
-    ProjectDir,
-    Receipt,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CellRef {
-    pub repo_root: String,
-    pub env: String,
-}
+pub use crate::records::{
+    AttemptSummary, CellRef, CodeState, EnvCell, Evidence, NewerElsewhere, NotKnownReason, Problem,
+    ProblemKind, RepoRow, StaleHint, Status as Overview,
+};
 
 /// Where a problem was found, to work out the cells it touches.
 struct Scope {
@@ -234,7 +42,7 @@ impl Problem {
         };
         Self {
             path,
-            message: error.to_string(),
+            message: error.to_string().into(),
             kind,
             cells: Vec::new(),
         }
@@ -344,7 +152,7 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
         Err(error) => problems.push((
             Problem {
                 path: trust_path.to_path_buf(),
-                message: error.to_string(),
+                message: error.to_string().into(),
                 kind: ProblemKind::Trust,
                 cells: Vec::new(),
             },
@@ -369,7 +177,7 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
                 for dir in dirs {
                     let refs = readers.entry((dir, key.clone())).or_default();
                     let cell_ref = CellRef {
-                        repo_root: repo_root.clone(),
+                        repo_root: repo_root.clone().into(),
                         env: built.env.clone(),
                     };
                     if !refs.contains(&cell_ref) {
@@ -387,9 +195,9 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
             });
             RepoRow {
                 path_missing: !Path::new(&repo_root).is_dir(),
-                project: row.project,
-                label,
-                repo_root,
+                project: row.project.map(Into::into),
+                label: label.into(),
+                repo_root: repo_root.into(),
                 envs,
             }
         })
@@ -432,7 +240,7 @@ fn last_deploy(cell: &EnvCell) -> Option<&AttemptSummary> {
 }
 
 fn mark_newer_elsewhere(repos: &mut [RepoRow]) {
-    let mut runs: BTreeMap<String, Vec<NewerElsewhere>> = BTreeMap::new();
+    let mut runs: BTreeMap<Untrusted, Vec<NewerElsewhere>> = BTreeMap::new();
     for row in repos.iter() {
         for cell in &row.envs {
             if let (Some(target), Some(attempt)) = (&cell.target, last_deploy(cell)) {
@@ -518,14 +326,18 @@ fn build_cell(
             .map(|(_, path)| StaleHint::UnattributedNewer { path: path.clone() });
     }
     EnvCell {
-        env: walk.env.or(cell.raw_env).unwrap_or_else(|| key.to_string()),
+        env: walk
+            .env
+            .or(cell.raw_env)
+            .unwrap_or_else(|| key.to_string())
+            .into(),
         approved: cell.approved,
-        approved_target: cell.approved_target,
+        approved_target: cell.approved_target.map(Into::into),
         code: walk.code,
         last_attempt: walk.last_attempt,
         code_run: walk.code_run,
         stale_hint,
-        target: walk.target,
+        target: walk.target.map(Into::into),
         newer_elsewhere: None,
     }
 }
@@ -615,8 +427,8 @@ fn walk(owns: &[Own]) -> Walk {
     }
     result.code = match (current, first_on_target) {
         (Some((alias, path)), Some(run_id)) if saw_other_target => CodeState::TargetChanged {
-            run_id,
-            target: format!("{alias}:{path}"),
+            run_id: run_id.into(),
+            target: format!("{alias}:{path}").into(),
         },
         (Some(_), _) => CodeState::NoCodeChangeInLast { records: counted },
         (None, _) if unreadable > 0 => CodeState::NotKnown {
@@ -634,22 +446,22 @@ fn code_of(receipt: &Receipt) -> Option<CodeState> {
     if receipt.kind == ReceiptKind::Up {
         return None;
     }
-    let run_id = receipt.run_id.clone();
+    let run_id = Untrusted::new(receipt.run_id.clone());
     let at_ms = receipt.finished_at_ms.unwrap_or(receipt.started_at_ms);
     if let Some(head) = &receipt.server_head_at_end {
         return Some(CodeState::Observed {
-            sha: head.clone(),
+            sha: head.clone().into(),
             dirty: receipt.tree_dirty,
-            expected: receipt.target_sha.clone(),
+            expected: receipt.target_sha.clone().into(),
             run_id,
-            outcome: receipt.outcome.clone(),
+            outcome: receipt.outcome.as_ref().map(|_| receipt.badge().outcome),
             at_ms,
         });
     }
     let complete =
         receipt.status == ReceiptStatus::Final && receipt.outcome == Some(DeployOutcome::Succeeded);
     let recorded = |evidence| CodeState::Recorded {
-        sha: receipt.target_sha.clone(),
+        sha: receipt.target_sha.clone().into(),
         complete,
         evidence,
         run_id: run_id.clone(),
@@ -724,31 +536,31 @@ pub fn compare_envs_with(
         let Some(cell) = row
             .envs
             .iter()
-            .find(|cell| safe_component(&cell.env) == safe_component(name))
+            .find(|cell| safe_component(cell.env.raw()) == safe_component(name))
         else {
             return unavailable(format!("no {name} environment"));
         };
         match &cell.code {
             CodeState::Recorded { sha, complete, .. } => {
                 if !complete {
-                    notes.push((cell.env.clone(), Qualifier::DeployIncomplete));
+                    notes.push((cell.env.raw().to_string(), Qualifier::DeployIncomplete));
                 }
                 shas.push(sha.clone());
             }
             CodeState::Observed { sha, dirty, .. } => {
                 if *dirty == Some(true) {
-                    notes.push((cell.env.clone(), Qualifier::TreeDirty));
+                    notes.push((cell.env.raw().to_string(), Qualifier::TreeDirty));
                 }
                 shas.push(sha.clone());
             }
-            _ => return unavailable(format!("no recorded code on {}", cell.env)),
+            _ => return unavailable(format!("no recorded code on {}", cell.env.raw())),
         }
     }
     if row.path_missing {
         return unavailable("checkout not found".into());
     }
     EnvComparison {
-        result: compare(Path::new(&row.repo_root), &shas[0], &shas[1]),
+        result: compare(Path::new(row.repo_root.raw()), shas[0].raw(), shas[1].raw()),
         notes,
     }
 }

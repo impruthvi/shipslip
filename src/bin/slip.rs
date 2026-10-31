@@ -68,8 +68,19 @@ fn main() -> ExitCode {
 }
 
 async fn main_async(local_tokens: LocalTokens) -> ExitCode {
-    let json = setup::json_requested(&std::env::args().skip(1).collect::<Vec<_>>());
-    finish_run(run(local_tokens).await, json)
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let doctor_json = setup::json_requested(&args);
+    match run(local_tokens).await {
+        Err(error) if status::json_requested(&args) => {
+            let code = error_exit_code(error.as_ref());
+            println!(
+                "{}",
+                status::render_error_json(&error.to_string(), code == ExitCode::from(2))
+            );
+            code
+        }
+        result => finish_run(result, doctor_json),
+    }
 }
 
 fn finish_run(result: Result<ExitCode, Box<dyn Error>>, doctor_json: bool) -> ExitCode {
@@ -121,9 +132,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         Action::Publish(args) => return publish::run(args).await,
         Action::Doctor(args) => return setup::run(args).await,
         Action::Setup(args) => return setup::run_setup(args).await,
-        Action::Status(args) => {
-            return status::run(&default_receipts_root()?, &default_trust_path()?, args)
-        }
+        Action::Status(args) => return status::run(args),
         action => action,
     };
     let config = LoadedConfig::load(&std::env::current_dir()?, command.config.as_deref())?;
@@ -1049,7 +1058,7 @@ fn print_help() {
          \x20 slip [--config FILE] logs ENV [ID|ROW] [OPTIONS]\n\
          \x20 slip [--config FILE] receipts [ENV] [--all] [--json]\n\
          \x20 slip [--config FILE] receipts show ID [--json | --md [--with-details]]\n\
-         \x20 slip status [--compare ENV ENV]\n\
+         \x20 slip status [--json | --compare ENV ENV]\n\
          \x20 slip --version\n\n\
          Commands:\n\
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\

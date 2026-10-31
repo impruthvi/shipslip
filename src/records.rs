@@ -10,6 +10,7 @@ mod next_steps;
 mod outcome;
 mod receipt;
 mod receipts;
+mod status;
 mod steps;
 
 pub use crate::receipt::markdown::render as markdown;
@@ -20,6 +21,10 @@ pub use receipt::{
     Watch,
 };
 pub use receipts::{receipts, ReceiptList, ReceiptListRow, ReceiptSummary};
+pub use status::{
+    status, AttemptSummary, CellRef, CodeState, EnvCell, Evidence, Mark, NewerElsewhere,
+    NotKnownReason, Problem, ProblemKind, RepoRow, StaleHint, Status,
+};
 pub use steps::{StepKind, StepRow, StepState};
 
 /// The JSON schema number. Within one number fields are only added.
@@ -37,7 +42,7 @@ pub const SCHEMA: u32 = 1;
 /// let text = shipslip::records::Untrusted::new("\u{1b}[2J");
 /// assert_eq!(text.field(), "\\x1b[2J");
 /// ```
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Untrusted(String);
 
 impl Untrusted {

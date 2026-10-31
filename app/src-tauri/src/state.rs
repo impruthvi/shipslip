@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde::Serialize;
 use shipslip::config::LoadedConfig;
 use shipslip::git::{Comparison, Git};
-use shipslip::receipt::{compare_envs_with, CodeState, EnvCell, Overview, ReceiptError};
+use shipslip::receipt::compare_envs_with;
+use shipslip::records::{CodeState, EnvCell, ReceiptQueryError, Status as Overview};
 
 use shipslip::records::receipt_at;
 
@@ -126,10 +127,10 @@ impl AppState {
             .repos
             .get(row)
             .ok_or(SelectionError::NotFound)?;
-        if !repo.envs.iter().any(|cell| cell.env == env) {
+        if !repo.envs.iter().any(|cell| cell.env.raw() == env) {
             return Err(SelectionError::NotFound);
         }
-        Ok(PathBuf::from(&repo.repo_root))
+        Ok(PathBuf::from(repo.repo_root.raw()))
     }
 
     /// Reads the map unless a read is already running; then that read runs
@@ -137,7 +138,7 @@ impl AppState {
     pub fn load_map(
         &self,
         now_ms: impl Fn() -> u128,
-        read_overview: impl Fn() -> Result<Overview, ReceiptError>,
+        read_overview: impl Fn() -> Result<Overview, ReceiptQueryError>,
     ) -> LoadResult {
         {
             let mut inner = self.inner();
@@ -288,14 +289,14 @@ impl Drop for ReleaseOnPanic<'_> {
 /// adds nothing; the env's entry explains why when there is a cell.
 pub fn with_configured_envs(mut overview: Overview) -> Overview {
     for repo in overview.repos.iter_mut().filter(|repo| !repo.path_missing) {
-        let Ok(config) = LoadedConfig::load(Path::new(&repo.repo_root), None) else {
+        let Ok(config) = LoadedConfig::load(Path::new(repo.repo_root.raw()), None) else {
             continue;
         };
-        if config.repo_root() != Path::new(&repo.repo_root) {
+        if config.repo_root() != Path::new(repo.repo_root.raw()) {
             continue;
         }
         for env in config.environment_names() {
-            if repo.envs.iter().any(|cell| cell.env == env) {
+            if repo.envs.iter().any(|cell| cell.env.raw() == env) {
                 continue;
             }
             repo.envs.push(EnvCell {
@@ -324,7 +325,8 @@ mod tests {
     use std::fs;
 
     use serde_json::json;
-    use shipslip::receipt::overview;
+    use shipslip::receipt::ReceiptError;
+    use shipslip::records::status as overview;
 
     use super::*;
     use crate::fixture::{run, Fixture};
@@ -386,7 +388,7 @@ mod tests {
         fx.save(&receipt);
 
         let shown = with_configured_envs(overview(&fx.receipts(), &fx.trust()).unwrap());
-        let envs: Vec<_> = shown.repos[0].envs.iter().map(|c| c.env.as_str()).collect();
+        let envs: Vec<_> = shown.repos[0].envs.iter().map(|c| c.env.raw()).collect();
         assert_eq!(envs, ["production", "staging"]);
         let staging = &shown.repos[0].envs[1];
         assert_eq!(staging.code, CodeState::NeverDeployed);
@@ -401,7 +403,7 @@ mod tests {
 
     const NOW: u128 = 1_000_000;
 
-    fn reader(fx: &Fixture) -> impl Fn() -> Result<Overview, ReceiptError> + '_ {
+    fn reader(fx: &Fixture) -> impl Fn() -> Result<Overview, ReceiptQueryError> + '_ {
         || overview(&fx.receipts(), &fx.trust())
     }
 
@@ -435,7 +437,7 @@ mod tests {
     #[test]
     fn failed_load_keeps_and_returns_the_shown_map() {
         let state = AppState::default();
-        let fail = || Err(ReceiptError::Invalid("root \u{1b}gone".into()));
+        let fail = || Err(ReceiptError::Invalid("root \u{1b}gone".into()).into());
         match state.load_map(|| NOW, fail) {
             LoadResult::Failed { message, current } => {
                 assert!(current.is_none());

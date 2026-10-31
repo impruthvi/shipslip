@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::git::{Comparison, Git};
-use crate::records::{Outcome, OutcomeKind, Part};
+use crate::records::{Badge, NextSteps, Outcome, OutcomeKind, Part};
 
 const OLD: &str = "1111111111111111111111111111111111111111";
 const NEW: &str = "2222222222222222222222222222222222222222";
@@ -118,11 +118,11 @@ fn cell<'a>(overview: &'a Overview, repo_root: &str, env: &str) -> &'a EnvCell {
     overview
         .repos
         .iter()
-        .find(|row| row.repo_root == repo_root)
+        .find(|row| row.repo_root.raw() == repo_root)
         .unwrap_or_else(|| panic!("no row for {repo_root}"))
         .envs
         .iter()
-        .find(|cell| cell.env == env)
+        .find(|cell| cell.env.raw() == env)
         .unwrap_or_else(|| panic!("no {env} cell for {repo_root}"))
 }
 
@@ -131,7 +131,7 @@ fn recorded(sha: &str, complete: bool, evidence: Evidence, n: u64) -> CodeState 
         sha: sha.into(),
         complete,
         evidence,
-        run_id: format!("{n:08x}-0"),
+        run_id: format!("{n:08x}-0").into(),
         at_ms: 1000 * u128::from(n) + 500,
     }
 }
@@ -153,9 +153,12 @@ fn fast_forward_status_decides_the_code() {
         staging.code,
         recorded(OTHER, false, Evidence::FastForward, 2)
     );
-    assert_eq!(staging.target.as_deref(), Some("web1:/srv/app"));
+    assert_eq!(
+        staging.target.as_ref().map(Untrusted::raw),
+        Some("web1:/srv/app")
+    );
     let last = staging.last_attempt.as_ref().unwrap();
-    assert_eq!(last.run_id, "00000002-0");
+    assert_eq!(last.run_id.raw(), "00000002-0");
     assert_eq!(
         last.next_steps.steps[0].0,
         [Part::Text(
@@ -183,7 +186,7 @@ fn runs_that_changed_nothing_keep_the_older_code() {
     let staging = cell(&overview, "/work/app", "staging");
     assert_eq!(staging.code, recorded(NEW, true, Evidence::FastForward, 1));
     let last = staging.last_attempt.as_ref().unwrap();
-    assert_eq!(last.run_id, "00000003-0");
+    assert_eq!(last.run_id.raw(), "00000003-0");
 }
 
 #[test]
@@ -332,9 +335,12 @@ fn a_fast_forward_that_did_not_end_ok_is_not_known_unless_observed() {
             dirty: Some(true),
             expected: OTHER.into(),
             run_id: "00000002-0".into(),
-            outcome: Some(DeployOutcome::FailedAtStep {
-                step: 0,
-                partial_update: false,
+            outcome: Some(Outcome {
+                kind: OutcomeKind::FailedAtStep {
+                    step: 0,
+                    partial_update: false,
+                },
+                unfinished: false
             }),
             at_ms: 2500,
         }
@@ -370,9 +376,12 @@ fn an_observed_head_wins_over_a_successful_fast_forward() {
             dirty: Some(false),
             expected: NEW.into(),
             run_id: "00000001-0".into(),
-            outcome: Some(DeployOutcome::FailedAtStep {
-                step: 2,
-                partial_update: false,
+            outcome: Some(Outcome {
+                kind: OutcomeKind::FailedAtStep {
+                    step: 2,
+                    partial_update: false,
+                },
+                unfinished: false
             }),
             at_ms: 1500,
         }
@@ -450,7 +459,10 @@ fn a_new_target_never_inherits_the_old_targets_code() {
             target: "web2:/srv/app".into(),
         }
     );
-    assert_eq!(staging.target.as_deref(), Some("web2:/srv/app"));
+    assert_eq!(
+        staging.target.as_ref().map(Untrusted::raw),
+        Some("web2:/srv/app")
+    );
 }
 
 #[test]
@@ -468,7 +480,10 @@ fn an_approved_target_change_warns_until_a_run_uses_it() {
     let overview = fixture.overview();
     let staging = cell(&overview, "/work/app", "staging");
     assert_eq!(staging.code, recorded(NEW, true, Evidence::FastForward, 1));
-    assert_eq!(staging.target.as_deref(), Some("web1:/srv/app"));
+    assert_eq!(
+        staging.target.as_ref().map(Untrusted::raw),
+        Some("web1:/srv/app")
+    );
     assert_eq!(staging.target_moved(), Some("web1:/srv/app-staging"));
     assert_eq!(
         target_moved_text(staging).as_deref(),
@@ -599,20 +614,20 @@ fn trust_only_checkouts_and_encoded_env_names_join_one_cell() {
     let app = overview
         .repos
         .iter()
-        .find(|row| row.repo_root == "/work/app")
+        .find(|row| row.repo_root.raw() == "/work/app")
         .unwrap();
     assert_eq!(app.envs.len(), 1);
-    assert_eq!(app.envs[0].env, "prod.eu");
+    assert_eq!(app.envs[0].env.raw(), "prod.eu");
     assert!(app.envs[0].approved);
     assert!(matches!(app.envs[0].code, CodeState::Recorded { .. }));
 
     let blog = overview
         .repos
         .iter()
-        .find(|row| row.repo_root == "/work/blog")
+        .find(|row| row.repo_root.raw() == "/work/blog")
         .unwrap();
     assert_eq!(blog.project, None);
-    assert_eq!(blog.label, "blog");
+    assert_eq!(blog.label.raw(), "blog");
     assert_eq!(blog.envs[0].code, CodeState::NeverDeployed);
     assert!(blog.envs[0].approved && blog.envs[0].last_attempt.is_none());
 }
@@ -681,7 +696,7 @@ fn legacy_signature_history_is_not_a_project() {
     let envs: Vec<_> = overview.repos[0]
         .envs
         .iter()
-        .map(|cell| cell.env.as_str())
+        .map(|cell| cell.env.raw())
         .collect();
     assert_eq!(envs, ["production"]);
 }
@@ -721,7 +736,7 @@ fn comparisons_carry_each_sides_caveat_and_refuse_unknown_code() {
         newer_elsewhere: None,
     };
     let mut row = RepoRow {
-        repo_root: fixture.0.to_string_lossy().into_owned(),
+        repo_root: fixture.0.to_string_lossy().into_owned().into(),
         project: Some("app".into()),
         label: "app".into(),
         path_missing: false,
@@ -814,7 +829,7 @@ fn an_up_from_another_checkout_does_not_flag_the_code_as_out_of_date() {
         cell(&overview, "/old/app", "staging")
             .newer_elsewhere
             .as_ref()
-            .map(|other| other.run_id.as_str()),
+            .map(|other| other.run_id.raw()),
         Some("00000002-0")
     );
 }
@@ -879,9 +894,12 @@ fn every_code_state() -> Vec<EnvCell> {
                 dirty: Some(true),
                 expected: OLD.into(),
                 run_id: "00000002-0".into(),
-                outcome: Some(DeployOutcome::FailedAtStep {
-                    step: 2,
-                    partial_update: false,
+                outcome: Some(Outcome {
+                    kind: OutcomeKind::FailedAtStep {
+                        step: 2,
+                        partial_update: false,
+                    },
+                    unfinished: false,
                 }),
                 at_ms: 2500,
             },
@@ -1035,11 +1053,11 @@ fn the_run_that_decided_the_code_is_kept_beside_the_last_attempt() {
     let staging = cell(&overview, "/work/app", "staging");
     let code_run = staging.code_run.as_ref().unwrap();
     assert_eq!(
-        (code_run.run_id.as_str(), &code_run.path),
+        (code_run.run_id.raw(), &code_run.path),
         ("00000001-0", &first)
     );
     let last = staging.last_attempt.as_ref().unwrap();
-    assert_eq!((last.run_id.as_str(), &last.path), ("00000002-0", &stopped));
+    assert_eq!((last.run_id.raw(), &last.path), ("00000002-0", &stopped));
     assert!(staging.needs_attention());
 }
 

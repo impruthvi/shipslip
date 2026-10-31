@@ -10,10 +10,12 @@ use shipslip::git::Comparison;
 use shipslip::logs::escape_field;
 use shipslip::receipt::{
     age, code_text, comparison_text, newer_elsewhere_text, short_sha, stale_hint_text,
-    target_moved_text, AttemptSummary, EnvCell, EnvComparison, Mark, Overview, ProblemKind,
-    ReceiptError, RepoRow, StaleHint,
+    target_moved_text, EnvComparison,
 };
-use shipslip::records::{self, copy_is_safe, Badge, Flag, NextSteps, Part};
+use shipslip::records::{
+    self, copy_is_safe, AttemptSummary, Badge, EnvCell, Flag, Mark, NextSteps, Part, ProblemKind,
+    ReceiptQueryError, RepoRow, StaleHint, Status as Overview, Untrusted,
+};
 use shipslip::transport::ConnectFailure;
 
 /// The app shows 7 characters of a commit; the CLI shows 12.
@@ -212,8 +214,11 @@ pub struct CellPos {
 }
 
 /// The message for a receipts root that cannot be read at all.
-pub fn load_error(error: &ReceiptError) -> String {
-    escape_field(&error.to_string())
+pub fn load_error(error: &ReceiptQueryError) -> String {
+    match error {
+        ReceiptQueryError::Unreadable { message } => message.field(),
+        _ => escape_field(&format!("{error:?}")),
+    }
 }
 
 /// Every env any checkout has, sorted; one grid column each.
@@ -221,7 +226,7 @@ pub fn columns(overview: &Overview) -> Vec<&str> {
     overview
         .repos
         .iter()
-        .flat_map(|row| row.envs.iter().map(|cell| cell.env.as_str()))
+        .flat_map(|row| row.envs.iter().map(|cell| cell.env.raw()))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -263,7 +268,7 @@ pub fn map(overview: &Overview, now_ms: u128, locators: &mut Locators) -> MapVie
                 ProblemKind::ProjectDir => ProblemKindView::ProjectDir,
                 ProblemKind::Receipt => ProblemKindView::Receipt,
             },
-            message: escape_field(&problem.message),
+            message: problem.message.field(),
             path: escape_field(&problem.path.to_string_lossy()),
             cells: problem
                 .cells
@@ -273,7 +278,7 @@ pub fn map(overview: &Overview, now_ms: u128, locators: &mut Locators) -> MapVie
                         .repos
                         .iter()
                         .position(|row| row.repo_root == cell.repo_root)?;
-                    let col = columns.iter().position(|env| *env == cell.env)?;
+                    let col = columns.iter().position(|env| *env == cell.env.raw())?;
                     Some(CellPos { row, col })
                 })
                 .collect(),
@@ -289,15 +294,17 @@ pub fn map(overview: &Overview, now_ms: u128, locators: &mut Locators) -> MapVie
 
 fn row_view(row: &RepoRow, columns: &[&str], now_ms: u128, locators: &mut Locators) -> RowView {
     RowView {
-        label: escape_field(&row.label),
-        repo_root: escape_field(&row.repo_root),
+        label: row.label.field(),
+        repo_root: row.repo_root.field(),
         path_missing: row.path_missing,
         cells: columns
             .iter()
-            .map(|env| match row.envs.iter().find(|cell| cell.env == *env) {
-                Some(cell) => CellView::Present(Box::new(cell_view(cell, now_ms, locators))),
-                None => CellView::Absent,
-            })
+            .map(
+                |env| match row.envs.iter().find(|cell| cell.env.raw() == *env) {
+                    Some(cell) => CellView::Present(Box::new(cell_view(cell, now_ms, locators))),
+                    None => CellView::Absent,
+                },
+            )
             .collect(),
     }
 }
@@ -340,7 +347,7 @@ fn cell_view(cell: &EnvCell, now_ms: u128, locators: &mut Locators) -> EnvCellVi
             .as_ref()
             .map(|run| flags(&run.badge))
             .unwrap_or_default(),
-        target: cell.target.as_deref().map(escape_field),
+        target: cell.target.as_ref().map(Untrusted::field),
         target_moved: target_moved_text(cell),
         needs_attention: cell.needs_attention(),
         receipt: opened.map(|run| locators.id(&run.path)),
@@ -548,7 +555,7 @@ mod tests {
     use std::fs;
 
     use serde_json::{json, Value};
-    use shipslip::receipt::overview;
+    use shipslip::records::status as overview;
 
     use super::*;
     use crate::fixture::{run, Fixture, NEW};
@@ -838,7 +845,8 @@ mod tests {
 
     #[test]
     fn load_error_is_escaped() {
-        let error = ReceiptError::Invalid("bad \u{1b}]0;title\u{7}".into());
+        let error =
+            shipslip::receipt::ReceiptError::Invalid("bad \u{1b}]0;title\u{7}".into()).into();
         assert!(!load_error(&error).contains('\u{1b}'));
     }
 }

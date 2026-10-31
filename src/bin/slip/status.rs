@@ -1,6 +1,6 @@
 use std::error::Error;
 use std::fmt::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use super::receipts::next_step_text;
@@ -8,34 +8,95 @@ use shipslip::git::Git;
 use shipslip::logs::escape_field;
 use shipslip::receipt::{
     self, age, comparison_text, newer_elsewhere_text, sentence, short_id, stale_hint_text,
-    target_moved_text, EnvComparison, Overview, ReceiptKind, RepoRow, StaleHint,
+    target_moved_text, EnvComparison, ReceiptKind,
 };
 
 use super::invalid_input;
+use shipslip::records::{self, ReceiptQueryError, RepoRow, StaleHint, Status as Overview};
+
+pub(super) fn json_requested(args: &[String]) -> bool {
+    let args = match args {
+        [flag, _, rest @ ..] if flag == "--config" => rest,
+        args => args,
+    };
+    args.first().map(String::as_str) == Some("status")
+        && args[1..].iter().any(|arg| arg == "--json")
+}
+
+pub(super) fn render_error_json(message: &str, invalid: bool) -> String {
+    #[derive(serde::Serialize)]
+    struct Error {
+        kind: &'static str,
+        message: records::Untrusted,
+    }
+
+    serde_json::to_string(&records::versioned_error(Error {
+        kind: if invalid {
+            "invalid_input"
+        } else {
+            "unreadable"
+        },
+        message: message.into(),
+    }))
+    .expect("status error output contains only JSON-safe fields")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Args {
     pub compare: Option<(String, String)>,
+    pub json: bool,
 }
 
 impl Args {
     pub(super) fn parse(args: &[String]) -> Result<Self, Box<dyn Error>> {
         match args {
-            [] => Ok(Self { compare: None }),
-            [flag, a, b] if flag == "--compare" && a != b => Ok(Self {
-                compare: Some((a.clone(), b.clone())),
+            [] => Ok(Self {
+                compare: None,
+                json: false,
             }),
-            _ => Err(invalid_input("usage: slip status [--compare ENV ENV]").into()),
+            [flag] if flag == "--json" => Ok(Self {
+                compare: None,
+                json: true,
+            }),
+            [flag, a, b] if flag == "--compare" && a != b && a != "--json" && b != "--json" => {
+                Ok(Self {
+                    compare: Some((a.clone(), b.clone())),
+                    json: false,
+                })
+            }
+            _ => Err(invalid_input("usage: slip status [--json | --compare ENV ENV]").into()),
         }
     }
 }
 
-pub(super) fn run(
-    receipts_root: &Path,
-    trust_path: &Path,
-    args: Args,
-) -> Result<ExitCode, Box<dyn Error>> {
-    let overview = receipt::overview(receipts_root, trust_path)?;
+pub(super) fn run(args: Args) -> Result<ExitCode, Box<dyn Error>> {
+    let read = || {
+        let root = receipt::default_receipts_root()?;
+        let trust = shipslip::config::default_trust_path().map_err(|error| {
+            ReceiptQueryError::Unreadable {
+                message: error.to_string().into(),
+            }
+        })?;
+        records::status(&root, &trust)
+    };
+    let overview = match read() {
+        Ok(status) => status,
+        Err(error) if args.json => {
+            println!(
+                "{}",
+                serde_json::to_string(&records::versioned_error(error))?
+            );
+            return Ok(ExitCode::from(1));
+        }
+        Err(ReceiptQueryError::Unreadable { message }) => {
+            return Err(std::io::Error::other(message.raw().to_string()).into());
+        }
+        Err(error) => return Err(std::io::Error::other(format!("{error:?}")).into()),
+    };
+    if args.json {
+        println!("{}", serde_json::to_string(&records::versioned(overview))?);
+        return Ok(ExitCode::SUCCESS);
+    }
     let git = Git::new(PathBuf::from("git"));
     let compare = args.compare.as_ref().map(|(a, b)| (a.as_str(), b.as_str()));
     print!(
@@ -64,12 +125,7 @@ fn render(
         );
     }
     for row in &overview.repos {
-        let _ = write!(
-            out,
-            "\n{}  {}",
-            escape_field(&row.label),
-            escape_field(&row.repo_root)
-        );
+        let _ = write!(out, "\n{}  {}", row.label.field(), row.repo_root.field());
         out.push_str(if row.path_missing {
             "  (checkout not found)\n"
         } else {
@@ -78,11 +134,11 @@ fn render(
         let width = row
             .envs
             .iter()
-            .map(|cell| escape_field(&cell.env).chars().count())
+            .map(|cell| cell.env.field().chars().count())
             .max()
             .unwrap_or(0);
         for cell in &row.envs {
-            let env = escape_field(&cell.env);
+            let env = cell.env.field();
             let pad = " ".repeat(width + 4);
             let _ = writeln!(out, "  {env:<width$}  {}", sentence(cell, now_ms));
             if let Some(attempt) = &cell.last_attempt {
@@ -91,7 +147,7 @@ fn render(
                 let mut line = if brought_up {
                     format!(
                         "app brought up {} ({})",
-                        short_id(&attempt.run_id),
+                        short_id(attempt.run_id.raw()),
                         age(now_ms, attempt.started_at_ms)
                     )
                 } else {
@@ -102,7 +158,7 @@ fn render(
                         } else {
                             "run"
                         },
-                        short_id(&attempt.run_id),
+                        short_id(attempt.run_id.raw()),
                         age(now_ms, attempt.started_at_ms),
                         badge.outcome.headline()
                     )
@@ -117,7 +173,7 @@ fn render(
                 }
             }
             if let Some(target) = &cell.target {
-                let _ = writeln!(out, "{pad}on {}", escape_field(target));
+                let _ = writeln!(out, "{pad}on {}", target.field());
             }
             if let Some(line) = target_moved_text(cell) {
                 let _ = writeln!(out, "{pad}⚠ {line}");
@@ -142,7 +198,7 @@ fn render(
         let _ = writeln!(out, "\n{} vs {}:", escape_field(a), escape_field(b));
         let mut any = false;
         for row in &overview.repos {
-            let has = |name: &str| row.envs.iter().any(|cell| cell.env == name);
+            let has = |name: &str| row.envs.iter().any(|cell| cell.env.raw() == name);
             if !has(a) || !has(b) {
                 continue;
             }
@@ -150,7 +206,7 @@ fn render(
             let _ = writeln!(
                 out,
                 "  {}  {}",
-                escape_field(&row.label),
+                row.label.field(),
                 comparison_text(a, b, &compare_envs(row, a, b))
             );
         }
@@ -166,7 +222,7 @@ fn render(
     if !overview.problems.is_empty() {
         out.push_str("\nCould not read:\n");
         for problem in &overview.problems {
-            let _ = writeln!(out, "  {}", escape_field(&problem.message));
+            let _ = writeln!(out, "  {}", problem.message.field());
         }
     }
     out

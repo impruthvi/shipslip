@@ -109,12 +109,12 @@ fn library_reads_fixture_receipts() {
     let fx = Fixture::new();
     fx.approve("/work/app", "staging");
     fx.save(&run(1, "staging"));
-    let overview = shipslip::receipt::overview(&fx.receipts(), &fx.trust()).unwrap();
+    let overview = shipslip::records::status(&fx.receipts(), &fx.trust()).unwrap();
     assert!(overview.problems.is_empty(), "{:?}", overview.problems);
     let cell = &overview.repos[0].envs[0];
-    assert_eq!((cell.env.as_str(), cell.approved), ("staging", true));
+    assert_eq!((cell.env.raw(), cell.approved), ("staging", true));
     assert!(matches!(
         &cell.code,
-        shipslip::receipt::CodeState::Recorded { sha, .. } if sha == NEW
+        shipslip::receipt::CodeState::Recorded { sha, .. } if sha.raw() == NEW
     ));
 }

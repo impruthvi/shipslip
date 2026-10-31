@@ -9,21 +9,9 @@ use super::{CodeState, EnvCell, EnvComparison, Evidence, NotKnownReason, Qualifi
 use crate::git::Comparison;
 use crate::logs::escape_field;
 use crate::receipt::{ReceiptStepStatus, MIN_ID_LEN};
-use crate::DeployOutcome;
+use crate::records::OutcomeKind;
 
-/// The shape that tells cell states apart without color.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mark {
-    /// The run recorded the code and finished.
-    Recorded,
-    /// The code moved but the run did not finish.
-    Incomplete,
-    /// The server HEAD was read after a failed or unknown step.
-    Observed,
-    NotKnown,
-    /// No code recorded for this cell.
-    NoCode,
-}
+pub use crate::records::Mark;
 
 /// A cell's code fact in parts, so a front-end can lay it out on several
 /// lines. [`sentence`] joins the same parts for one-line output.
@@ -42,9 +30,12 @@ pub struct CodeText {
 }
 
 pub fn code_text(cell: &EnvCell) -> CodeText {
-    let text = |mark, sha: Option<&String>, at_ms, words: &str, evidence: Vec<String>| CodeText {
-        mark,
-        sha: sha.map(|sha| escape_field(sha)),
+    let text = |sha: Option<&crate::records::Untrusted>,
+                at_ms,
+                words: &str,
+                evidence: Vec<String>| CodeText {
+        mark: cell.mark(),
+        sha: sha.map(|sha| sha.field()),
         at_ms,
         words: escape_field(words),
         evidence: evidence.iter().map(|item| escape_field(item)).collect(),
@@ -64,12 +55,7 @@ pub fn code_text(cell: &EnvCell) -> CodeText {
             if *evidence == Evidence::CheckedOutAtStart {
                 facts.push("checked out at start".into());
             }
-            let mark = if *complete {
-                Mark::Recorded
-            } else {
-                Mark::Incomplete
-            };
-            text(mark, Some(sha), Some(*at_ms), "", facts)
+            text(Some(sha), Some(*at_ms), "", facts)
         }
         CodeState::Observed {
             sha,
@@ -79,27 +65,27 @@ pub fn code_text(cell: &EnvCell) -> CodeText {
             outcome,
             at_ms,
         } => {
-            let mut after = format!("after run {}", short_id(run_id));
-            match outcome {
-                Some(DeployOutcome::FailedAtStep { step, .. }) => {
+            let mut after = format!("after run {}", short_id(run_id.raw()));
+            match outcome.map(|outcome| outcome.kind) {
+                Some(OutcomeKind::FailedAtStep { step, .. }) => {
                     let _ = write!(after, " failed at step {step}");
                 }
-                Some(DeployOutcome::StoppedAfterStep { step, .. }) => {
+                Some(OutcomeKind::StoppedAfterStep { step, .. }) => {
                     let _ = write!(after, " stopped after step {step}");
                 }
-                Some(DeployOutcome::Unknown { step, .. }) => {
+                Some(OutcomeKind::Unknown { step, .. }) => {
                     let _ = write!(after, " lost track of step {step}");
                 }
                 _ => {}
             }
             let mut facts = vec![after];
-            if !sha.eq_ignore_ascii_case(expected) {
-                facts.push(format!("expected {}", short_sha(expected, 12)));
+            if !sha.raw().eq_ignore_ascii_case(expected.raw()) {
+                facts.push(format!("expected {}", short_sha(expected.raw(), 12)));
             }
             if *dirty == Some(true) {
                 facts.push("tree dirty".into());
             }
-            text(Mark::Observed, Some(sha), Some(*at_ms), "observed", facts)
+            text(Some(sha), Some(*at_ms), "observed", facts)
         }
         CodeState::NotKnown { run_id, reason } => {
             let why = match reason {
@@ -113,10 +99,10 @@ pub fn code_text(cell: &EnvCell) -> CodeText {
             };
             let mut facts = Vec::new();
             if let Some(run_id) = run_id {
-                facts.push(format!("after run {}", short_id(run_id)));
+                facts.push(format!("after run {}", short_id(run_id.raw())));
             }
             facts.push(why.into());
-            text(Mark::NotKnown, None, None, "server code not known", facts)
+            text(None, None, "server code not known", facts)
         }
         CodeState::NeverDeployed => {
             let facts = if cell.approved {
@@ -124,34 +110,22 @@ pub fn code_text(cell: &EnvCell) -> CodeText {
             } else {
                 Vec::new()
             };
-            text(
-                Mark::NoCode,
-                None,
-                None,
-                "no deploy receipt on this Mac",
-                facts,
-            )
+            text(None, None, "no deploy receipt on this Mac", facts)
         }
-        CodeState::NoCodeChangeInLast { records: 1 } => text(
-            Mark::NoCode,
-            None,
-            None,
-            "no code change in the last run",
-            Vec::new(),
-        ),
+        CodeState::NoCodeChangeInLast { records: 1 } => {
+            text(None, None, "no code change in the last run", Vec::new())
+        }
         CodeState::NoCodeChangeInLast { records } => text(
-            Mark::NoCode,
             None,
             None,
             &format!("no code change in the last {records} runs"),
             Vec::new(),
         ),
         CodeState::TargetChanged { run_id, target } => text(
-            Mark::NoCode,
             None,
             None,
-            &format!("no code recorded for {target}"),
-            vec![format!("target changed in run {}", short_id(run_id))],
+            &format!("no code recorded for {}", target.raw()),
+            vec![format!("target changed in run {}", short_id(run_id.raw()))],
         ),
     }
 }
@@ -247,10 +221,10 @@ pub fn newer_elsewhere_text(cell: &EnvCell, now_ms: u128) -> Option<String> {
     let other = cell.newer_elsewhere.as_ref()?;
     Some(escape_field(&format!(
         "a newer run ({}, {}) from {} ({}) used this server; this may be out of date",
-        short_id(&other.run_id),
+        short_id(other.run_id.raw()),
         age(now_ms, other.started_at_ms),
-        other.repo_root,
-        other.env
+        other.repo_root.raw(),
+        other.env.raw()
     )))
 }
 
