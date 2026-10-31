@@ -190,6 +190,8 @@ pub enum DeployEvent {
         phase: MaintenancePhase,
         status: StepStatus,
         exit_code: Option<i32>,
+        /// What the receipt journal recorded for this phase.
+        times: StepTimes,
     },
     /// Maintenance down may have started and maintenance up did not succeed.
     /// The app may still be down. Sent before the final event.

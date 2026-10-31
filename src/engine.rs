@@ -613,11 +613,17 @@ async fn run_up<T: Transport>(
                 }
                 Err(reason) => return End::Interrupted { index: 0, reason },
             }
-            if let Err(error) = journal.begin_maintenance(MaintenancePhase::Up) {
+        }
+        let started_at_ms = if mode == FollowMode::Launch {
+            let sent_at_ms = now_ms();
+            if let Err(error) = journal.begin_maintenance(MaintenancePhase::Up, sent_at_ms) {
                 return End::RunError(format!("could not save the receipt: {error}"));
             }
-        }
-        let followed = maintenance(
+            Some(sent_at_ms)
+        } else {
+            journal.snapshot().maintenance_up_started_at_ms
+        };
+        let (followed, times) = maintenance(
             &*transport,
             &preview,
             MaintenancePhase::Up,
@@ -627,11 +633,18 @@ async fn run_up<T: Transport>(
             true,
             mode,
             Some(&journal),
+            started_at_ms,
         )
         .await;
-        if let Followed::Done(result) = &followed {
-            let (status, code) = result_status(result);
-            if let Err(error) = journal.finish_maintenance(MaintenancePhase::Up, status, code) {
+        let result = match &followed {
+            Followed::Done(result) => Some(result_status(result)),
+            Followed::NotLaunched => Some((StepStatus::NotStarted, None)),
+            Followed::Detached => None,
+        };
+        if let Some((status, code)) = result {
+            if let Err(error) =
+                journal.finish_maintenance(MaintenancePhase::Up, status, code, times)
+            {
                 return End::RunError(format!("could not save the receipt: {error}"));
             }
         }
@@ -1681,7 +1694,9 @@ async fn run_steps_locked<T: Transport>(
             if preview.target.maintenance
                 && !resume.is_some_and(|receipt| receipt.maintenance_down_done)
             {
-                if !active_down {
+                let down_started_at_ms = if active_down {
+                    resume.and_then(|receipt| receipt.maintenance_down_started_at_ms)
+                } else {
                     if stop.load(Ordering::SeqCst) || *detach.borrow() {
                         return End::Finished(stopped_before_plan(
                             index,
@@ -1690,16 +1705,20 @@ async fn run_steps_locked<T: Transport>(
                             StopReason::Requested,
                         ));
                     }
+                    let sent_at_ms = now_ms();
                     if let Some(journal) = journal {
-                        if let Err(error) = journal.begin_maintenance(MaintenancePhase::Down) {
+                        if let Err(error) =
+                            journal.begin_maintenance(MaintenancePhase::Down, sent_at_ms)
+                        {
                             return End::Finished(DeployOutcome::AbortedBeforeChanges(
                                 AbortReason::JournalFailed(error.to_string()),
                             ));
                         }
                     }
-                }
+                    Some(sent_at_ms)
+                };
                 *app_down = true;
-                let down = maintenance(
+                let (down, down_times) = maintenance(
                     transport,
                     preview,
                     MaintenancePhase::Down,
@@ -1713,6 +1732,7 @@ async fn run_steps_locked<T: Transport>(
                         FollowMode::Launch
                     },
                     journal,
+                    down_started_at_ms,
                 )
                 .await;
                 let down = match down {
@@ -1725,6 +1745,7 @@ async fn run_steps_locked<T: Transport>(
                                 MaintenancePhase::Down,
                                 StepStatus::NotStarted,
                                 None,
+                                StepTimes::default(),
                             ) {
                                 return End::RunError(format!(
                                     "could not save maintenance down result: {error}"
@@ -1745,9 +1766,12 @@ async fn run_steps_locked<T: Transport>(
                 if let (Some(journal), Some(result)) = (journal, down.as_ref()) {
                     if !matches!(result, StepResult::Interrupted(_)) {
                         let (status, code) = result_status(result);
-                        if let Err(error) =
-                            journal.finish_maintenance(MaintenancePhase::Down, status, code)
-                        {
+                        if let Err(error) = journal.finish_maintenance(
+                            MaintenancePhase::Down,
+                            status,
+                            code,
+                            down_times,
+                        ) {
                             return End::RunError(format!(
                                 "could not save maintenance down result: {error}"
                             ));
@@ -1923,19 +1947,7 @@ async fn run_steps_locked<T: Transport>(
             }
             StepResult::Interrupted(reason) => return End::Interrupted { index, reason },
         };
-        let times = match status {
-            StepStatus::NotStarted => StepTimes::default(),
-            StepStatus::Ok | StepStatus::Failed if !active_step => StepTimes {
-                started_at_ms,
-                finished_at_ms: Some(now_ms()),
-            },
-            // Unknown, or a result first seen by a later attach: no end this
-            // Mac saw.
-            _ => StepTimes {
-                started_at_ms,
-                finished_at_ms: None,
-            },
-        };
+        let times = seen_times(&status, !active_step, started_at_ms);
         if let Some(journal) = journal {
             if let Some(DeployEvent::ServerState { head, tree_dirty }) = &server_state {
                 if let Err(error) = journal.server_state(head.clone(), *tree_dirty) {
@@ -1967,7 +1979,9 @@ async fn run_steps_locked<T: Transport>(
             }
         }
         let active_up = resume.is_some_and(|receipt| receipt.phase == ReceiptPhase::MaintenanceUp);
-        if !active_up {
+        let up_started_at_ms = if active_up {
+            resume.and_then(|receipt| receipt.maintenance_up_started_at_ms)
+        } else {
             match lock_owned(transport, path, &preview.run_id).await {
                 Ok(true) => {}
                 Ok(false) => {
@@ -1983,13 +1997,15 @@ async fn run_steps_locked<T: Transport>(
                     };
                 }
             }
+            let sent_at_ms = now_ms();
             if let Some(journal) = journal {
-                if let Err(error) = journal.begin_maintenance(MaintenancePhase::Up) {
+                if let Err(error) = journal.begin_maintenance(MaintenancePhase::Up, sent_at_ms) {
                     return End::RunError(format!("could not save maintenance up start: {error}"));
                 }
             }
-        }
-        let up = maintenance(
+            Some(sent_at_ms)
+        };
+        let (up, up_times) = maintenance(
             transport,
             preview,
             MaintenancePhase::Up,
@@ -2003,6 +2019,7 @@ async fn run_steps_locked<T: Transport>(
                 FollowMode::Launch
             },
             journal,
+            up_started_at_ms,
         )
         .await;
         // Not detachable, so it always ends with a result.
@@ -2013,7 +2030,9 @@ async fn run_steps_locked<T: Transport>(
         if let (Some(journal), Some(result)) = (journal, up.as_ref()) {
             if !matches!(result, StepResult::Interrupted(_)) {
                 let (status, code) = result_status(result);
-                if let Err(error) = journal.finish_maintenance(MaintenancePhase::Up, status, code) {
+                if let Err(error) =
+                    journal.finish_maintenance(MaintenancePhase::Up, status, code, up_times)
+                {
                     return End::RunError(format!("could not save maintenance up result: {error}"));
                 }
             }
@@ -2130,7 +2149,8 @@ async fn maintenance<T: Transport>(
     detachable: bool,
     mode: FollowMode,
     journal: Option<&ReceiptJournal>,
-) -> Followed {
+    started_at_ms: Option<u128>,
+) -> (Followed, StepTimes) {
     let (key, command) = match phase {
         MaintenancePhase::Down => ("maintenance-down", "php artisan down"),
         MaintenancePhase::Up => ("maintenance-up", "php artisan up"),
@@ -2155,12 +2175,31 @@ async fn maintenance<T: Transport>(
         Followed::Detached => (StepStatus::Unknown, None),
         Followed::NotLaunched => (StepStatus::NotStarted, None),
     };
+    let times = seen_times(&status, mode == FollowMode::Launch, started_at_ms);
     let _ = events.send(DeployEvent::MaintenanceFinished {
         phase,
         status,
         exit_code,
+        times,
     });
-    followed
+    (followed, times)
+}
+
+/// What this Mac saw of a step or maintenance phase: an end only for an ok
+/// or failed result this run launched and saw, nothing if it never started.
+fn seen_times(status: &StepStatus, launched: bool, started_at_ms: Option<u128>) -> StepTimes {
+    match status {
+        StepStatus::NotStarted => StepTimes::default(),
+        StepStatus::Ok | StepStatus::Failed if launched => StepTimes {
+            started_at_ms,
+            finished_at_ms: Some(now_ms()),
+        },
+        // Unknown, or a result first seen by a later attach.
+        _ => StepTimes {
+            started_at_ms,
+            finished_at_ms: None,
+        },
+    }
 }
 
 fn result_status(result: &StepResult) -> (StepStatus, Option<i32>) {
@@ -2906,7 +2945,9 @@ mod tests {
     async fn collect(rx: RunEvents) -> Vec<DeployEvent> {
         let mut out = collect_timed(rx).await;
         for event in &mut out {
-            if let DeployEvent::StepFinished { times, .. } = event {
+            if let DeployEvent::StepFinished { times, .. }
+            | DeployEvent::MaintenanceFinished { times, .. } = event
+            {
                 *times = StepTimes::default();
             }
         }
@@ -3395,6 +3436,7 @@ mod tests {
             phase: MaintenancePhase::Up,
             status: StepStatus::Failed,
             exit_code: Some(7),
+            times: StepTimes::default(),
         }));
         assert!(events.contains(&DeployEvent::AppLeftDown));
         assert_eq!(
@@ -3824,6 +3866,7 @@ mod tests {
             phase: MaintenancePhase::Up,
             status: StepStatus::Unknown,
             exit_code: None,
+            times: StepTimes::default(),
         }));
         assert!(events.contains(&DeployEvent::AppLeftDown));
         assert!(matches!(
@@ -4006,9 +4049,16 @@ mod tests {
         let dir = TempReceipts::new();
         let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
         journal.confirm().unwrap();
-        journal.begin_maintenance(MaintenancePhase::Down).unwrap();
         journal
-            .finish_maintenance(MaintenancePhase::Down, StepStatus::Ok, Some(0))
+            .begin_maintenance(MaintenancePhase::Down, now_ms())
+            .unwrap();
+        journal
+            .finish_maintenance(
+                MaintenancePhase::Down,
+                StepStatus::Ok,
+                Some(0),
+                StepTimes::default(),
+            )
             .unwrap();
         // Shipslip exited before step 1 was launched.
         journal.begin_step(1, now_ms()).unwrap();
@@ -5595,6 +5645,267 @@ mod tests {
         assert_eq!(receipt.outcome, Some(DeployOutcome::Succeeded));
         assert_eq!(receipt.steps[0].status, ReceiptStepStatus::Skipped);
         assert_step_times(&receipt, &events, &[2, 3]);
+    }
+
+    fn maintenance_finished_times(events: &[DeployEvent], wanted: MaintenancePhase) -> StepTimes {
+        events
+            .iter()
+            .find_map(|event| match event {
+                DeployEvent::MaintenanceFinished { phase, times, .. } if *phase == wanted => {
+                    Some(*times)
+                }
+                _ => None,
+            })
+            .expect("maintenance finished")
+    }
+
+    /// Both times inside the run, and the event carries what the receipt saved.
+    fn assert_seen(receipt: &Receipt, times: StepTimes, sent: StepTimes) {
+        let (Some(start), Some(end)) = (times.started_at_ms, times.finished_at_ms) else {
+            panic!("missing times: {times:?}");
+        };
+        let run_end = receipt.finished_at_ms.expect("run finished");
+        assert!(receipt.started_at_ms <= start && start <= end && end <= run_end);
+        assert_eq!(sent, times);
+    }
+
+    #[tokio::test]
+    async fn deploy_times_maintenance_down_and_up() {
+        let fake = Arc::new(
+            preflight()
+                .on("php artisan down", &[], 0)
+                .on("git merge --ff-only", &[], 0)
+                .on("deploy command", &[], 0)
+                .on("php artisan up", &[], 0),
+        );
+        let preview = prepare(
+            &trusted(maintenance_target(false, &["deploy command"])),
+            &*fake,
+        )
+        .await
+        .unwrap();
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, _handle) = execute_recorded(preview, confirmation, fake, journal.clone()).unwrap();
+        let events = collect_timed(rx).await;
+        let receipt = journal.snapshot();
+        assert_eq!(receipt.outcome, Some(DeployOutcome::Succeeded));
+        let down = receipt.maintenance_down_times();
+        let up = receipt.maintenance_up_times();
+        assert_seen(
+            &receipt,
+            down,
+            maintenance_finished_times(&events, MaintenancePhase::Down),
+        );
+        assert_seen(
+            &receipt,
+            up,
+            maintenance_finished_times(&events, MaintenancePhase::Up),
+        );
+        assert!(down.finished_at_ms <= receipt.steps[0].started_at_ms);
+        assert!(receipt.steps[1].finished_at_ms <= up.started_at_ms);
+    }
+
+    #[tokio::test]
+    async fn maintenance_down_that_never_started_has_no_times() {
+        let fake = Arc::new(preflight().launch("php artisan down", Launch::Unreachable));
+        let preview = prepare(&trusted(maintenance_target(false, &[])), &*fake)
+            .await
+            .unwrap();
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, _handle) = execute_recorded(preview, confirmation, fake, journal.clone()).unwrap();
+        let events = collect_timed(rx).await;
+        let receipt = journal.snapshot();
+        assert_eq!(
+            receipt.maintenance_down_status,
+            Some(StepStatus::NotStarted)
+        );
+        assert_eq!(receipt.maintenance_down_times(), StepTimes::default());
+        assert_eq!(
+            maintenance_finished_times(&events, MaintenancePhase::Down),
+            StepTimes::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn detached_maintenance_down_keeps_its_start_and_attach_sees_no_end() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(
+            preflight()
+                .gated("php artisan down", gate.clone())
+                .on("git merge --ff-only", &[], 0)
+                .on("php artisan up", &[], 0),
+        );
+        let preview = prepare(&trusted(maintenance_target(false, &[])), &*fake)
+            .await
+            .unwrap();
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let path = journal.path().to_path_buf();
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, handle) =
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
+        while fake.launched("php artisan down") == 0 {
+            tokio::task::yield_now().await;
+        }
+        handle.detach();
+        let events = collect_timed(rx).await;
+        assert_eq!(events.last(), Some(&DeployEvent::Detached { index: 0 }));
+        let sent_at = journal.snapshot().maintenance_down_started_at_ms;
+        assert!(sent_at.is_some());
+        let detached = StepTimes {
+            started_at_ms: sent_at,
+            finished_at_ms: None,
+        };
+        assert_eq!(journal.snapshot().maintenance_down_times(), detached);
+        assert_eq!(
+            maintenance_finished_times(&events, MaintenancePhase::Down),
+            detached
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&journal) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached observer kept the receipt claim");
+        drop(journal);
+
+        let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (events, _handle) = attach(
+            &trusted(resumed.snapshot().target),
+            resumed.clone(),
+            fake.clone(),
+        )
+        .unwrap();
+        gate.notify_one();
+        let events = collect_timed(events).await;
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+        assert_eq!(fake.launched("php artisan down"), 1);
+        let receipt = resumed.snapshot();
+        // Down's end was first seen by this later attach; up was sent by it.
+        assert_eq!(receipt.maintenance_down_times(), detached);
+        assert_eq!(
+            maintenance_finished_times(&events, MaintenancePhase::Down),
+            detached
+        );
+        assert_seen(
+            &receipt,
+            receipt.maintenance_up_times(),
+            maintenance_finished_times(&events, MaintenancePhase::Up),
+        );
+    }
+
+    #[tokio::test]
+    async fn up_run_times_maintenance_up_on_its_step() {
+        let fake = Arc::new(preflight().on("php artisan up", &[], 0));
+        let dir = TempReceipts::new();
+        let (events, _handle) = bring_app_up(
+            &trusted(target(false, &["deploy command"])),
+            fake.clone(),
+            &dir.0,
+        )
+        .await
+        .unwrap();
+        let events = collect_timed(events).await;
+        let receipt = crate::receipt::read(&up_receipt_path(&dir)).unwrap();
+        assert_eq!(receipt.outcome, Some(DeployOutcome::Succeeded));
+        let up = receipt.maintenance_up_times();
+        assert_seen(
+            &receipt,
+            up,
+            maintenance_finished_times(&events, MaintenancePhase::Up),
+        );
+        assert_eq!(receipt.steps[0].times(), up);
+        assert_eq!(receipt.maintenance_down_times(), StepTimes::default());
+    }
+
+    #[tokio::test]
+    async fn up_detached_before_launch_records_no_times() {
+        let fake = Arc::new(preflight().on("php artisan up", &[], 0));
+        let dir = TempReceipts::new();
+        let (events, handle) = bring_app_up(
+            &trusted(target(false, &["deploy command"])),
+            fake.clone(),
+            &dir.0,
+        )
+        .await
+        .unwrap();
+        handle.detach();
+        let events = collect_timed(events).await;
+        assert_eq!(fake.launched("php artisan up"), 0);
+        assert_eq!(
+            maintenance_finished_times(&events, MaintenancePhase::Up),
+            StepTimes::default()
+        );
+        let receipt = crate::receipt::read(&up_receipt_path(&dir)).unwrap();
+        assert_eq!(receipt.maintenance_up_times(), StepTimes::default());
+        assert_eq!(receipt.steps[0].times(), StepTimes::default());
+        assert_eq!(receipt.steps[0].status, ReceiptStepStatus::NotStarted);
+    }
+
+    #[tokio::test]
+    async fn up_attach_keeps_the_start_and_sees_no_end() {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(preflight().gated("php artisan up", gate.clone()));
+        let dir = TempReceipts::new();
+        let target = trusted(target(false, &["deploy command"]));
+        let (events, handle) = bring_app_up(&target, fake.clone(), &dir.0).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fake.launched("php artisan up") == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        handle.detach();
+        assert_eq!(
+            collect(events).await.last(),
+            Some(&DeployEvent::Detached { index: 0 })
+        );
+        let path = up_receipt_path(&dir);
+        let sent_at = crate::receipt::read(&path)
+            .unwrap()
+            .maintenance_up_started_at_ms;
+        assert!(sent_at.is_some());
+
+        let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (events, _handle) = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match attach(&target, resumed.clone(), fake.clone()) {
+                    Err(AttachError::Receipt(_)) => tokio::task::yield_now().await,
+                    result => return result.unwrap(),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        gate.notify_one();
+        let events = collect_timed(events).await;
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+        let observed = StepTimes {
+            started_at_ms: sent_at,
+            finished_at_ms: None,
+        };
+        let receipt = crate::receipt::read(&path).unwrap();
+        assert_eq!(receipt.maintenance_up_times(), observed);
+        assert_eq!(receipt.steps[0].times(), observed);
+        assert_eq!(
+            maintenance_finished_times(&events, MaintenancePhase::Up),
+            observed
+        );
     }
 
     #[tokio::test]

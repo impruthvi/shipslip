@@ -116,6 +116,30 @@ fn show_gives_a_finished_step_duration_only() {
 }
 
 #[test]
+fn show_gives_maintenance_durations_or_end_not_known() {
+    let started = 1_790_943_136_408u128;
+    let text = render_show(&receipt(|value| {
+        value["maintenance_down_status"] = json!("Ok");
+        value["maintenance_down_exit_code"] = json!(0);
+        value["maintenance_down_started_at_ms"] = json!(500);
+        value["maintenance_down_finished_at_ms"] = json!(1400);
+        value["maintenance_up_status"] = json!("Unknown");
+        value["maintenance_up_started_at_ms"] = json!(started as u64);
+    }));
+    assert!(
+        text.contains("on  Maintenance on: php artisan down (exit 0) in 900 ms\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "off  Maintenance off: php artisan up, started {}, end not known\n",
+            time_of_day(started)
+        )),
+        "{text}"
+    );
+}
+
+#[test]
 fn show_gives_a_start_without_an_end_as_end_not_known() {
     let started = 1_790_943_136_408u128;
     let text = render_show(&receipt(|value| {

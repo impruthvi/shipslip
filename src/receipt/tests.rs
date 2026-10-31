@@ -397,6 +397,69 @@ fn step_times_are_optional_and_round_trip() {
 }
 
 #[test]
+fn maintenance_times_are_optional_and_round_trip() {
+    let old = parse(receipt_json("aaaa0001-0", 1000, "staging"));
+    assert_eq!(old.maintenance_down_times(), StepTimes::default());
+    assert_eq!(old.maintenance_up_times(), StepTimes::default());
+    let saved = serde_json::to_value(&old).unwrap();
+    for field in [
+        "maintenance_down_started_at_ms",
+        "maintenance_down_finished_at_ms",
+        "maintenance_up_started_at_ms",
+        "maintenance_up_finished_at_ms",
+    ] {
+        assert!(saved.get(field).is_none(), "{field}");
+    }
+
+    let mut timed = receipt_json("aaaa0001-0", 1000, "staging");
+    timed["maintenance_down_started_at_ms"] = json!(1500);
+    timed["maintenance_down_finished_at_ms"] = json!(1900);
+    timed["maintenance_up_started_at_ms"] = json!(20_000);
+    let receipt = parse(timed.clone());
+    assert_eq!(receipt.maintenance_down_times().duration_ms(), Some(400));
+    assert_eq!(
+        receipt.maintenance_up_times(),
+        StepTimes {
+            started_at_ms: Some(20_000),
+            finished_at_ms: None,
+        }
+    );
+    assert_eq!(serde_json::to_value(&receipt).unwrap(), {
+        let mut expected = timed;
+        expected["actor"] = json!(null);
+        expected
+    });
+}
+
+#[test]
+fn markdown_shows_maintenance_durations_or_end_not_known() {
+    let old = markdown(&parse(receipt_json("aaaa0001-0", 1000, "staging")), false);
+    assert!(
+        old.contains("| Maintenance on | `php artisan down` | ✓ ok | 0 |"),
+        "{old}"
+    );
+
+    let mut timed = receipt_json("aaaa0001-0", 1000, "staging");
+    timed["maintenance_down_started_at_ms"] = json!(1500);
+    timed["maintenance_down_finished_at_ms"] = json!(3500);
+    // 2026-10-02 12:12:16Z
+    timed["maintenance_up_status"] = json!("Unknown");
+    timed["maintenance_up_exit_code"] = json!(null);
+    timed["maintenance_up_started_at_ms"] = json!(1_790_943_136_408u64);
+    let shown = markdown(&parse(timed), false);
+    assert!(
+        shown.contains("| Maintenance on | `php artisan down` | ✓ ok in 2s | 0 |"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(
+            "| Maintenance off | `php artisan up` | ? unknown, started 12:12:16Z, end not known |  |"
+        ),
+        "{shown}"
+    );
+}
+
+#[test]
 fn markdown_shows_a_finished_step_duration_only() {
     let old = markdown(&parse(receipt_json("aaaa0001-0", 1000, "staging")), false);
     assert!(
@@ -775,14 +838,24 @@ fn up_output_is_bounded_durable_and_only_exported_with_details() {
         "hash",
     )
     .unwrap();
-    journal.begin_maintenance(MaintenancePhase::Up).unwrap();
+    journal
+        .begin_maintenance(MaintenancePhase::Up, 2000)
+        .unwrap();
     for n in 0..205 {
         journal.output_line("maintenance-up", &format!("diagnostic-{n}"));
     }
     let long = "é".repeat(OUTPUT_LINE_BYTES);
     journal.output_line("maintenance-up", &long);
     journal
-        .finish_maintenance(MaintenancePhase::Up, StepStatus::Failed, Some(7))
+        .finish_maintenance(
+            MaintenancePhase::Up,
+            StepStatus::Failed,
+            Some(7),
+            StepTimes {
+                started_at_ms: Some(2000),
+                finished_at_ms: Some(5000),
+            },
+        )
         .unwrap();
     journal
         .finish(DeployOutcome::FailedAtStep {
@@ -797,6 +870,8 @@ fn up_output_is_bounded_durable_and_only_exported_with_details() {
     assert_eq!(step.output.last().unwrap().len(), OUTPUT_LINE_BYTES);
     assert_eq!(step.status, ReceiptStepStatus::Failed);
     assert_eq!(step.exit_code, Some(7));
+    assert_eq!(step.times().duration_ms(), Some(3000));
+    assert_eq!(receipt.maintenance_up_times(), step.times());
     assert!(markdown(&receipt, true).contains("diagnostic-204"));
     assert!(!markdown(&receipt, false).contains("diagnostic-204"));
     assert_eq!(

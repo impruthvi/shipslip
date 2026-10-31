@@ -2854,11 +2854,18 @@ async fn maintenance_up_failure_keeps_deploy_success_and_reports_app_down() {
     server.exec("touch ~/.shipslip-fail-up", "");
 
     let events = deploy(ssh, maintenance_target(&path, &["echo deployed"])).await;
-    assert!(events.contains(&DeployEvent::MaintenanceFinished {
-        phase: MaintenancePhase::Up,
-        status: StepStatus::Failed,
-        exit_code: Some(7),
-    }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        DeployEvent::MaintenanceFinished {
+            phase: MaintenancePhase::Up,
+            status: StepStatus::Failed,
+            exit_code: Some(7),
+            times: StepTimes {
+                started_at_ms: Some(start),
+                finished_at_ms: Some(end),
+            },
+        } if start <= end
+    )));
     assert!(events.contains(&DeployEvent::AppLeftDown));
     assert_eq!(
         events.last(),

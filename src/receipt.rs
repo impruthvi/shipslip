@@ -168,6 +168,15 @@ pub struct Receipt {
     pub maintenance_down_exit_code: Option<i32>,
     pub maintenance_up_status: Option<StepStatus>,
     pub maintenance_up_exit_code: Option<i32>,
+    /// This Mac's clock; missing in receipts written before maintenance times.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_down_started_at_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_down_finished_at_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_up_started_at_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_up_finished_at_ms: Option<u128>,
     pub app_left_down: bool,
     pub mutation_started: bool,
     pub outcome: Option<DeployOutcome>,
@@ -212,6 +221,20 @@ impl Actor {
 }
 
 impl Receipt {
+    pub fn maintenance_down_times(&self) -> StepTimes {
+        StepTimes {
+            started_at_ms: self.maintenance_down_started_at_ms,
+            finished_at_ms: self.maintenance_down_finished_at_ms,
+        }
+    }
+
+    pub fn maintenance_up_times(&self) -> StepTimes {
+        StepTimes {
+            started_at_ms: self.maintenance_up_started_at_ms,
+            finished_at_ms: self.maintenance_up_finished_at_ms,
+        }
+    }
+
     fn from_preview(project: &str, repo_root: &Path, preview: &Preview) -> Self {
         let target = preview.target().clone();
         let run_plan = preview.run_plan();
@@ -258,6 +281,10 @@ impl Receipt {
             maintenance_down_exit_code: None,
             maintenance_up_status: None,
             maintenance_up_exit_code: None,
+            maintenance_down_started_at_ms: None,
+            maintenance_down_finished_at_ms: None,
+            maintenance_up_started_at_ms: None,
+            maintenance_up_finished_at_ms: None,
             app_left_down: false,
             mutation_started: false,
             outcome: None,
@@ -316,6 +343,10 @@ impl Receipt {
             maintenance_down_exit_code: None,
             maintenance_up_status: None,
             maintenance_up_exit_code: None,
+            maintenance_down_started_at_ms: None,
+            maintenance_down_finished_at_ms: None,
+            maintenance_up_started_at_ms: None,
+            maintenance_up_finished_at_ms: None,
             // Up runs because the app may be down.
             app_left_down: true,
             mutation_started: false,
@@ -493,16 +524,29 @@ impl ReceiptJournal {
         })
     }
 
-    pub fn begin_maintenance(&self, phase: MaintenancePhase) -> Result<(), ReceiptError> {
+    pub fn begin_maintenance(
+        &self,
+        phase: MaintenancePhase,
+        started_at_ms: u128,
+    ) -> Result<(), ReceiptError> {
         self.update(|receipt| {
             receipt.phase = match phase {
                 MaintenancePhase::Down => ReceiptPhase::MaintenanceDown,
                 MaintenancePhase::Up => ReceiptPhase::MaintenanceUp,
             };
             receipt.mutation_started = true;
+            match phase {
+                MaintenancePhase::Down => {
+                    receipt.maintenance_down_started_at_ms = Some(started_at_ms);
+                }
+                MaintenancePhase::Up => {
+                    receipt.maintenance_up_started_at_ms = Some(started_at_ms);
+                }
+            }
             if receipt.kind == ReceiptKind::Up {
                 if let Some(step) = receipt.steps.first_mut() {
                     step.status = ReceiptStepStatus::Running;
+                    step.started_at_ms = Some(started_at_ms);
                 }
             }
             if phase == MaintenancePhase::Down {
@@ -516,6 +560,7 @@ impl ReceiptJournal {
         phase: MaintenancePhase,
         status: StepStatus,
         exit_code: Option<i32>,
+        times: StepTimes,
     ) -> Result<(), ReceiptError> {
         self.update(|receipt| {
             receipt.phase = ReceiptPhase::BetweenSteps;
@@ -523,6 +568,8 @@ impl ReceiptJournal {
                 MaintenancePhase::Down => {
                     receipt.maintenance_down_status = Some(status.clone());
                     receipt.maintenance_down_exit_code = exit_code;
+                    receipt.maintenance_down_started_at_ms = times.started_at_ms;
+                    receipt.maintenance_down_finished_at_ms = times.finished_at_ms;
                     receipt.maintenance_down_done = status == StepStatus::Ok;
                     receipt.app_left_down = crate::event::down_may_have_started(&status);
                 }
@@ -531,10 +578,14 @@ impl ReceiptJournal {
                         if let Some(step) = receipt.steps.first_mut() {
                             step.status = status.clone().into();
                             step.exit_code = exit_code;
+                            step.started_at_ms = times.started_at_ms;
+                            step.finished_at_ms = times.finished_at_ms;
                         }
                     }
                     receipt.maintenance_up_status = Some(status.clone());
                     receipt.maintenance_up_exit_code = exit_code;
+                    receipt.maintenance_up_started_at_ms = times.started_at_ms;
+                    receipt.maintenance_up_finished_at_ms = times.finished_at_ms;
                     receipt.maintenance_up_done = status == StepStatus::Ok;
                     receipt.app_left_down = status != StepStatus::Ok;
                 }

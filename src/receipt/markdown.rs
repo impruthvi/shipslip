@@ -10,7 +10,7 @@ use std::fmt::Write;
 
 use super::{describe_watch, format_duration, format_utc, strip_color, timing_suffix, Receipt};
 use crate::logs::{escape, escape_field};
-use crate::{SmokeResult, StepStatus};
+use crate::{SmokeResult, StepStatus, StepTimes};
 
 pub fn markdown(receipt: &Receipt, details: bool) -> String {
     let mut out = String::new();
@@ -120,6 +120,7 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
             "php artisan down",
             status,
             receipt.maintenance_down_exit_code,
+            receipt.maintenance_down_times(),
         );
     }
     for step in &receipt.steps {
@@ -129,7 +130,7 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
             step.index,
             code(&step.command),
             step.status.label(),
-            timing_suffix(step.times(), |millis| format_utc(millis)[11..].to_string()),
+            timing_suffix(step.times(), time_of_day),
             exit(step.exit_code)
         );
     }
@@ -141,6 +142,7 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
                 "php artisan up",
                 status,
                 receipt.maintenance_up_exit_code,
+                receipt.maintenance_up_times(),
             );
         }
     }
@@ -259,14 +261,20 @@ fn maintenance_row(
     command: &str,
     status: &StepStatus,
     exit_code: Option<i32>,
+    times: StepTimes,
 ) {
     let _ = writeln!(
         out,
-        "| {label} | {} | {} | {} |",
+        "| {label} | {} | {}{} | {} |",
         code(command),
         super::ReceiptStepStatus::from(status.clone()).label(),
+        timing_suffix(times, time_of_day),
         exit(exit_code)
     );
+}
+
+fn time_of_day(millis: u128) -> String {
+    format_utc(millis)[11..].to_string()
 }
 
 fn server_head(receipt: &Receipt) -> String {
