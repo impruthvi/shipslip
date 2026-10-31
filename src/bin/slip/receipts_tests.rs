@@ -33,7 +33,8 @@ fn parses_list_and_show_forms() {
         Ok(Args::Show {
             id: "18dab54b".into(),
             md: true,
-            details: true
+            details: true,
+            json: false
         })
     );
     assert_eq!(
@@ -56,6 +57,44 @@ fn parses_list_and_show_forms() {
         args(&["--json"]),
         Err("unknown receipts option --json".into())
     );
+}
+
+#[test]
+fn json_show_accepts_an_id_in_either_order_and_rejects_markdown_options() {
+    for values in [
+        ["show", "18dab54b", "--json"],
+        ["show", "--json", "18dab54b"],
+    ] {
+        assert_eq!(
+            args(&values),
+            Ok(Args::Show {
+                id: "18dab54b".into(),
+                md: false,
+                details: false,
+                json: true
+            })
+        );
+    }
+    for option in ["--md", "--with-details"] {
+        assert_eq!(
+            args(&["show", "18dab54b", "--json", option]),
+            Err("--json cannot be combined with --md or --with-details".into())
+        );
+    }
+}
+
+fn render_show(receipt: &Receipt) -> String {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let root = TempRoot::new(&format!(
+        "show-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    root.save(1000, receipt);
+    let path = root
+        .0
+        .join("app/staging")
+        .join(format!("1000-{}.json", receipt.run_id));
+    super::render_show(&records::receipt_at(&path).unwrap())
 }
 
 fn receipt(changes: impl FnOnce(&mut serde_json::Value)) -> Receipt {

@@ -1048,7 +1048,7 @@ fn print_help() {
          \x20 slip [--config FILE] up ENV\n\
          \x20 slip [--config FILE] logs ENV [ID|ROW] [OPTIONS]\n\
          \x20 slip [--config FILE] receipts [ENV] [--all]\n\
-         \x20 slip [--config FILE] receipts show ID [--md [--with-details]]\n\
+         \x20 slip [--config FILE] receipts show ID [--json | --md [--with-details]]\n\
          \x20 slip status [--compare ENV ENV]\n\
          \x20 slip --version\n\n\
          Commands:\n\
@@ -1093,6 +1093,7 @@ fn print_help() {
          \x20 --max-bytes SIZE   Window read limit, like 20m (default 12m total, 4m/channel)\n\
          \x20                    Baseline has a separate 6m total, 2m/channel limit\n\n\
          Receipts options:\n\
+         \x20 --json             With show ID: print the record as JSON\n\
          \x20 --all              List every receipt, not just the newest 20\n\
          \x20 show ID            Show one receipt by its ID (a prefix is enough)\n\
          \x20 --md               Print it as Markdown with statuses only\n\

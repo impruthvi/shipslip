@@ -1,15 +1,13 @@
 //! One receipt as the side pane shows it: the same facts as
 //! `slip receipts show`, in fields. Server text is escaped here.
 
-use std::io;
-
 use serde::Serialize;
 use shipslip::logs::escape_field;
-use shipslip::receipt::{
-    describe_smoke, describe_watch, format_duration, strip_color, Receipt, ReceiptError,
+use shipslip::receipt::{describe_watch, format_duration, strip_color};
+use shipslip::records::{
+    ReceiptQueryError, ReceiptRecord, Smoke, StepKind, StepRow, StepState, Watch,
 };
-use shipslip::records::{StepKind, StepRow, StepState};
-use shipslip::{ErrorGroup, StepTimes, WatchResult, WatchStatus};
+use shipslip::{StepTimes, WatchResult, WatchStatus};
 
 use crate::view::{flags, guidance, outcome, FlagView, Guidance, OutcomeView};
 
@@ -159,64 +157,61 @@ pub struct VariantView {
     pub message: String,
 }
 
-pub fn slip(result: Result<Receipt, ReceiptError>) -> SlipView {
+pub fn slip(result: Result<ReceiptRecord, ReceiptQueryError>) -> SlipView {
     match result {
         Ok(receipt) => SlipView::Receipt(Box::new(receipt_view(&receipt))),
-        Err(ReceiptError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-            SlipView::Missing
-        }
-        Err(ReceiptError::Version(_)) => SlipView::NewerVersion,
-        Err(error) => SlipView::Unreadable {
-            message: escape_field(&error.to_string()),
+        Err(ReceiptQueryError::Missing) => SlipView::Missing,
+        Err(ReceiptQueryError::NewerVersion { .. }) => SlipView::NewerVersion,
+        Err(ReceiptQueryError::Unreadable { message }) => SlipView::Unreadable {
+            message: message.field(),
+        },
+        Err(ReceiptQueryError::Ambiguous { ids }) => SlipView::Unreadable {
+            message: escape_field(&format!("Several receipts match: {}", ids.join(", "))),
         },
     }
 }
 
-fn receipt_view(receipt: &Receipt) -> ReceiptView {
+fn receipt_view(receipt: &ReceiptRecord) -> ReceiptView {
     let badge = receipt.badge();
     let target = &receipt.target;
-    let steps = receipt.step_rows().iter().map(step).collect();
+    let steps = receipt.steps.iter().map(step).collect();
     ReceiptView {
-        run_id: escape_field(&receipt.run_id),
+        run_id: receipt.run_id.field(),
         outcome: outcome(&badge),
         summary: receipt
-            .summary()
+            .summary
+            .as_ref()
             .filter(|_| !badge.outcome.unfinished)
             .map(|summary| summary.field()),
         flags: flags(&badge),
-        project: escape_field(&receipt.project),
-        repo_root: escape_field(&receipt.repo_root),
-        env: escape_field(&target.env),
+        project: receipt.project.field(),
+        repo_root: receipt.repo_root.field(),
+        env: target.env.field(),
         production: target.production,
-        target: escape_field(&format!("{}:{}", target.ssh_alias, target.path)),
-        branch: escape_field(&target.branch),
+        target: escape_field(&format!("{}:{}", target.ssh_alias.raw(), target.path.raw())),
+        branch: target.branch.field(),
         plan: receipt.plan_text(),
         started_at_ms: millis(receipt.started_at_ms),
         finished_at_ms: receipt.finished_at_ms.map(millis),
         duration: receipt
             .finished_at_ms
             .map(|end| format_duration(end.saturating_sub(receipt.started_at_ms))),
-        started_by: receipt.started_by().map(|who| who.field()),
-        from_sha: escape_field(&receipt.from_sha),
-        target_sha: escape_field(&receipt.target_sha),
+        started_by: receipt.started_by.as_ref().map(|who| who.field()),
+        from_sha: receipt.from_sha.field(),
+        target_sha: receipt.target_sha.field(),
         server_head: receipt.ended_in_failure().then(|| ServerHead {
-            sha: receipt.server_head_at_end.as_deref().map(escape_field),
+            sha: receipt.server_head_at_end.as_ref().map(|head| head.field()),
             dirty: receipt.tree_dirty == Some(true),
         }),
-        commits: receipt.commits.iter().map(|c| escape_field(c)).collect(),
+        commits: receipt.commits.iter().map(|c| c.field()).collect(),
         steps,
         watch: receipt
             .watch
             .as_ref()
-            .map(|watch| watch_view(watch, target.log_path())),
-        smoke: receipt.smoke.as_ref().map(describe_smoke),
-        notes: receipt
-            .last_message
-            .iter()
-            .chain(&receipt.warnings)
-            .map(|note| escape_field(note))
-            .collect(),
-        next_steps: guidance(&receipt.next_steps(), &receipt.repo_root),
+            .map(|watch| record_watch_view(watch, target.log_path.raw())),
+        smoke: receipt.smoke.as_ref().map(Smoke::text),
+        notes: receipt.notes.iter().map(|note| note.field()).collect(),
+        next_steps: guidance(&receipt.next_steps, receipt.repo_root.raw()),
     }
 }
 
@@ -255,14 +250,24 @@ fn step(row: &StepRow) -> StepView {
 }
 
 pub(crate) fn watch_view(watch: &WatchResult, default_log: &str) -> WatchView {
-    let mut groups: Vec<&ErrorGroup> = watch.new_errors.iter().collect();
+    record_watch_view(&Watch::from(watch), default_log)
+}
+
+fn record_watch_view(watch: &Watch, default_log: &str) -> WatchView {
+    let mut groups: Vec<&shipslip::records::ErrorGroup> = watch.new_errors.iter().collect();
     groups.sort_by_key(|group| std::cmp::Reverse(group.count));
     let hidden = groups.len().saturating_sub(TOP_GROUPS) as u64;
     WatchView {
         status: describe_watch(watch.status).into(),
         duration: format_duration(u128::from(watch.duration_ms)),
         lines_read: watch.observed_lines,
-        log_path: escape_field(watch.log_path.as_deref().unwrap_or(default_log)),
+        log_path: escape_field(
+            watch
+                .log_path
+                .as_ref()
+                .map(|path| path.raw())
+                .unwrap_or(default_log),
+        ),
         baseline: (watch.status != WatchStatus::NotRun)
             .then_some((watch.baseline_signatures, watch.history_signatures)),
         groups: groups
@@ -270,22 +275,22 @@ pub(crate) fn watch_view(watch: &WatchResult, default_log: &str) -> WatchView {
             .take(TOP_GROUPS)
             .map(|group| GroupView {
                 count: group.count,
-                exception: escape_field(&group.exception),
-                file: group.file.as_deref().map(escape_field),
+                exception: group.exception.field(),
+                file: group.file.as_ref().map(|file| file.field()),
                 variants: group
                     .variants
                     .iter()
                     .map(|variant| VariantView {
                         count: variant.count,
-                        location: variant.display_file_line.as_deref().map(escape_field),
-                        message: escape_field(&variant.message),
+                        location: variant.display_file_line.as_ref().map(|line| line.field()),
+                        message: variant.message.field(),
                     })
                     .collect(),
                 more_variants: group.overflow_variants,
             })
             .collect(),
         more_groups: hidden + watch.overflow_groups,
-        warnings: watch.warnings.iter().map(|w| escape_field(w)).collect(),
+        warnings: watch.warnings.iter().map(|w| w.field()).collect(),
     }
 }
 
@@ -298,7 +303,7 @@ mod tests {
     use std::fs;
 
     use serde_json::{json, Value};
-    use shipslip::receipt::read;
+    use shipslip::records::receipt_at as read;
 
     use super::*;
     use crate::fixture::{run, Fixture};
