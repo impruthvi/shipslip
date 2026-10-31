@@ -10,11 +10,11 @@ use shipslip::git::Comparison;
 use shipslip::logs::escape_field;
 use shipslip::receipt::{
     age, code_text, comparison_text, newer_elsewhere_text, short_sha, stale_hint_text,
-    target_moved_text, AttemptSummary, Badge, EnvCell, EnvComparison, Flag, Mark, Overview,
-    ProblemKind, ReceiptError, RepoRow, StaleHint,
+    target_moved_text, AttemptSummary, EnvCell, EnvComparison, Mark, Overview, ProblemKind,
+    ReceiptError, RepoRow, StaleHint,
 };
+use shipslip::records::{self, copy_is_safe, Badge, Flag, NextSteps, Part};
 use shipslip::transport::ConnectFailure;
-use shipslip::DeployOutcome;
 
 /// The app shows 7 characters of a commit; the CLI shows 12.
 const SHORT_SHA: usize = 7;
@@ -360,42 +360,28 @@ fn attempt_view(attempt: &AttemptSummary, now_ms: u128, locators: &mut Locators)
 }
 
 pub fn outcome(badge: &Badge) -> OutcomeView {
+    let outcome = badge.outcome;
+    let kind = match outcome.kind {
+        _ if outcome.unfinished => OutcomeKind::Unfinished,
+        records::OutcomeKind::Succeeded => OutcomeKind::Succeeded,
+        records::OutcomeKind::FailedAtStep { .. } => OutcomeKind::Failed,
+        records::OutcomeKind::StoppedAfterStep { .. } => OutcomeKind::Stopped,
+        records::OutcomeKind::StoppedInMaintenance => OutcomeKind::StoppedInMaintenance,
+        records::OutcomeKind::Unknown { .. } => OutcomeKind::Unknown,
+        records::OutcomeKind::CancelledBeforeChanges
+        | records::OutcomeKind::AbortedBeforeChanges
+        | records::OutcomeKind::NotRecorded => OutcomeKind::Cancelled,
+    };
     OutcomeView {
-        text: escape_field(&badge.headline()),
-        tone: tone(badge),
-        kind: outcome_kind(badge),
-    }
-}
-
-fn outcome_kind(badge: &Badge) -> OutcomeKind {
-    if badge.unfinished {
-        return OutcomeKind::Unfinished;
-    }
-    match &badge.outcome {
-        Some(DeployOutcome::Succeeded) => OutcomeKind::Succeeded,
-        Some(DeployOutcome::FailedAtStep { .. }) => OutcomeKind::Failed,
-        Some(DeployOutcome::StoppedAfterStep { .. }) => OutcomeKind::Stopped,
-        Some(DeployOutcome::StoppedInMaintenance(_)) => OutcomeKind::StoppedInMaintenance,
-        Some(DeployOutcome::Unknown { .. }) => OutcomeKind::Unknown,
-        Some(DeployOutcome::CancelledBeforeChanges | DeployOutcome::AbortedBeforeChanges(_))
-        | None => OutcomeKind::Cancelled,
-    }
-}
-
-pub fn tone(badge: &Badge) -> Tone {
-    match (&badge.outcome, badge.unfinished) {
-        (_, true)
-        | (
-            Some(
-                DeployOutcome::FailedAtStep { .. }
-                | DeployOutcome::StoppedAfterStep { .. }
-                | DeployOutcome::StoppedInMaintenance(_)
-                | DeployOutcome::Unknown { .. },
-            ),
-            false,
-        ) => Tone::Bad,
-        (Some(DeployOutcome::Succeeded), false) => Tone::Good,
-        _ => Tone::Neutral,
+        text: escape_field(&outcome.headline()),
+        tone: if outcome.needs_attention() {
+            Tone::Bad
+        } else if outcome.succeeded() {
+            Tone::Good
+        } else {
+            Tone::Neutral
+        },
+        kind,
     }
 }
 
@@ -403,23 +389,36 @@ pub fn flags(badge: &Badge) -> Vec<FlagView> {
     badge
         .flags
         .iter()
-        .map(|flag| FlagView {
-            text: escape_field(&flag.cell_text()),
-            new_errors: matches!(flag, Flag::NewErrors(_)),
-            bad: matches!(
-                flag,
-                Flag::NewErrors(_) | Flag::SmokeFailed(_) | Flag::AppLeftDown
-            ),
+        .map(|&flag| FlagView {
+            text: cell_text(flag),
+            new_errors: matches!(flag, Flag::NewErrors { .. }),
+            bad: flag.is_bad(),
             kind: match flag {
-                Flag::NewErrors(_) => FlagKind::NewErrors,
+                Flag::NewErrors { .. } => FlagKind::NewErrors,
                 Flag::LogNotFullyObserved => FlagKind::LogNotFullyObserved,
                 Flag::LogNotRecorded => FlagKind::LogNotRecorded,
-                Flag::SmokeFailed(_) => FlagKind::SmokeFailed,
+                Flag::SmokeFailed { .. } => FlagKind::SmokeFailed,
                 Flag::SmokeNotRecorded => FlagKind::SmokeNotRecorded,
                 Flag::AppLeftDown => FlagKind::AppLeftDown,
             },
         })
         .collect()
+}
+
+/// The flag in words for a cell, without the leading symbol.
+fn cell_text(flag: Flag) -> String {
+    match flag {
+        Flag::NewErrors { groups: 1 } => "1 new error group after this run".into(),
+        Flag::NewErrors { groups } => format!("{groups} new error groups after this run"),
+        Flag::LogNotFullyObserved => "log not fully observed".into(),
+        Flag::LogNotRecorded => "log not recorded".into(),
+        Flag::SmokeFailed {
+            status: Some(status),
+        } => format!("smoke {status}"),
+        Flag::SmokeFailed { status: None } => "smoke failed".into(),
+        Flag::SmokeNotRecorded => "smoke not recorded".into(),
+        Flag::AppLeftDown => "app may be in maintenance mode".into(),
+    }
 }
 
 fn millis(ms: u128) -> u64 {
@@ -454,58 +453,47 @@ pub struct Guidance {
     pub copy_withheld: bool,
 }
 
-/// Splits each next-step line at its backtick spans. A span becomes a
-/// copyable command only when it is a plain `slip` command and nothing
-/// interpolated into the line could have made it up or changed its words:
-/// a backtick or control character in the checkout path, or an env name
-/// that is not one plain word, turns every span of the receipt into text.
-pub fn guidance(lines: &[String], repo_root: &str, env: &str) -> Guidance {
-    let copyable =
-        !repo_root.contains('`') && escape_field(repo_root) == repo_root && is_plain_word(env);
+/// A receipt's next steps as spans. Commands become copyable only when the
+/// library says copying them is safe; otherwise they are text in backticks.
+pub fn guidance(next: &NextSteps, repo_root: &str) -> Guidance {
     let prefix = format!("cd {} && ", shell_quote(repo_root));
-    let spans = lines
+    let lines = next
+        .steps
         .iter()
-        .map(|line| {
-            line.split('`')
-                .enumerate()
-                .filter(|(_, part)| !part.is_empty())
-                .map(|(index, part)| {
-                    let inside = index % 2 == 1;
-                    if inside && copyable && is_slip_command(part) {
-                        Span::Command {
-                            prefix: prefix.clone(),
-                            command: part.into(),
-                            copy_text: format!("{prefix}{part}"),
-                        }
-                    } else if inside {
-                        Span::Text {
-                            text: format!("`{part}`"),
-                        }
-                    } else {
-                        Span::Text { text: part.into() }
+        .map(|step| {
+            step.0
+                .iter()
+                .filter_map(|part| match part {
+                    Part::Text(text) if text.raw().is_empty() => None,
+                    Part::Text(text) => Some(Span::Text { text: text.field() }),
+                    Part::Command(args) => {
+                        let args: Vec<String> = args.iter().map(|arg| arg.field()).collect();
+                        let command = args.join(" ");
+                        Some(if next.copy_safe {
+                            Span::Command {
+                                prefix: prefix.clone(),
+                                copy_text: format!("{prefix}{command}"),
+                                command,
+                            }
+                        } else {
+                            Span::Text {
+                                text: format!("`{command}`"),
+                            }
+                        })
                     }
                 })
                 .collect()
         })
         .collect();
+    let names_a_command = next
+        .steps
+        .iter()
+        .flat_map(|step| &step.0)
+        .any(|part| matches!(part, Part::Command(_)));
     Guidance {
-        lines: spans,
-        copy_withheld: !copyable && lines.iter().any(|line| line.contains('`')),
+        lines,
+        copy_withheld: !next.copy_safe && names_a_command,
     }
-}
-
-/// `slip <subcommand> [args]`, each arg letters, digits, `.`, `_` or `-`.
-fn is_slip_command(text: &str) -> bool {
-    let Some(rest) = text.strip_prefix("slip ") else {
-        return false;
-    };
-    let mut words = rest.split(' ');
-    let subcommand = words.next().unwrap_or_default();
-    !subcommand.is_empty()
-        && subcommand
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b == b'-')
-        && words.all(is_plain_word)
 }
 
 /// The command a refusal screen offers for an ssh connect failure, built from
@@ -530,14 +518,17 @@ pub fn refusal_command(kind: ConnectFailure, alias: &str) -> Option<Span> {
     })
 }
 
-/// `slip break-lock <env>` run in the checkout, when [`guidance`] would offer
-/// it for copying.
+/// `slip break-lock <env>` run in the checkout, when copying it is safe.
 pub fn break_lock_command(repo_root: &str, env: &str) -> Option<Span> {
-    guidance(&[format!("`slip break-lock {env}`")], repo_root, env)
-        .lines
-        .into_iter()
-        .flatten()
-        .find(|span| matches!(span, Span::Command { .. }))
+    copy_is_safe(env, repo_root).then(|| {
+        let prefix = format!("cd {} && ", shell_quote(repo_root));
+        let command = format!("slip break-lock {env}");
+        Span::Command {
+            copy_text: format!("{prefix}{command}"),
+            prefix,
+            command,
+        }
+    })
 }
 
 fn is_plain_word(text: &str) -> bool {
@@ -860,7 +851,7 @@ mod span_tests {
     use super::*;
     use crate::fixture::{run, Fixture};
 
-    fn steps(fx: &Fixture, receipt: &Value) -> Vec<String> {
+    fn steps(fx: &Fixture, receipt: &Value) -> NextSteps {
         read(&fx.save(receipt)).unwrap().next_steps()
     }
 
@@ -889,8 +880,8 @@ mod span_tests {
     #[test]
     fn unfinished_run_offers_attach_from_its_checkout() {
         let fx = Fixture::new();
-        let lines = steps(&fx, &unfinished("staging", "/work/app"));
-        let guidance = guidance(&lines, "/work/app", "staging");
+        let next = steps(&fx, &unfinished("staging", "/work/app"));
+        let guidance = guidance(&next, "/work/app");
         assert!(!guidance.copy_withheld);
         assert_eq!(
             guidance.lines[0],
@@ -919,13 +910,18 @@ mod span_tests {
         stopped["steps"][1]["status"] = json!("NotStarted");
         let mut down = run(3, "staging");
         down["app_left_down"] = json!(true);
-        let mut lines = Vec::new();
+        let mut copied = Vec::new();
+        let mut backticks_left = false;
         for receipt in [unfinished("staging", "/work/app"), failed, stopped, down] {
-            lines.extend(steps(&fx, &receipt));
+            let spans = guidance(&steps(&fx, &receipt), "/work/app");
+            copied.extend(commands(&spans).into_iter().map(String::from));
+            backticks_left |= spans.lines.iter().flatten().any(|span| match span {
+                Span::Text { text } => text.contains('`'),
+                Span::Command { .. } => false,
+            });
         }
-        let spans = guidance(&lines, "/work/app", "staging");
         assert_eq!(
-            commands(&spans),
+            copied,
             [
                 "cd '/work/app' && slip attach staging",
                 "cd '/work/app' && slip from-step staging 1",
@@ -934,20 +930,16 @@ mod span_tests {
                 "cd '/work/app' && slip up staging",
             ]
         );
-        let backticks_left = spans.lines.iter().flatten().any(|span| match span {
-            Span::Text { text } => text.contains('`'),
-            Span::Command { .. } => false,
-        });
-        assert!(!backticks_left, "{spans:?}");
+        assert!(!backticks_left);
     }
 
     #[test]
     fn checkout_path_is_single_quoted() {
         let fx = Fixture::new();
         let repo = "/work/it's app";
-        let lines = steps(&fx, &unfinished("staging", repo));
+        let next = steps(&fx, &unfinished("staging", repo));
         assert_eq!(
-            commands(&guidance(&lines, repo, "staging")),
+            commands(&guidance(&next, repo)),
             ["cd '/work/it'\\''s app' && slip attach staging"]
         );
     }
@@ -956,8 +948,8 @@ mod span_tests {
     fn backtick_in_checkout_path_makes_every_span_text() {
         let fx = Fixture::new();
         let repo = "/work/`slip deploy production`";
-        let lines = steps(&fx, &unfinished("staging", repo));
-        let spans = guidance(&lines, repo, "staging");
+        let next = steps(&fx, &unfinished("staging", repo));
+        let spans = guidance(&next, repo);
         assert!(commands(&spans).is_empty(), "{spans:?}");
     }
 
@@ -965,16 +957,16 @@ mod span_tests {
     fn control_characters_in_checkout_path_make_every_span_text() {
         let fx = Fixture::new();
         let repo = "/work/a\u{1b}]0;x\u{7}b";
-        let lines = steps(&fx, &unfinished("staging", repo));
-        assert!(commands(&guidance(&lines, repo, "staging")).is_empty());
+        let next = steps(&fx, &unfinished("staging", repo));
+        assert!(commands(&guidance(&next, repo)).is_empty());
     }
 
     #[test]
     fn env_with_shell_characters_is_never_copyable() {
         let fx = Fixture::new();
         for env in ["prod;rm", "prod$(id)", "pro duction", "prod`x`"] {
-            let lines = steps(&fx, &unfinished(env, "/work/app"));
-            let guidance = guidance(&lines, "/work/app", env);
+            let next = steps(&fx, &unfinished(env, "/work/app"));
+            let guidance = guidance(&next, "/work/app");
             assert!(guidance.copy_withheld, "{env}");
             assert!(commands(&guidance).is_empty(), "{env}");
         }
@@ -993,9 +985,28 @@ mod span_tests {
     }
 
     #[test]
-    fn lines_without_commands_withhold_nothing() {
-        let lines = vec!["The fast-forward failed. Check the server checkout.".to_string()];
-        assert!(!guidance(&lines, "/work/app", "prod;rm").copy_withheld);
+    fn steps_without_commands_withhold_nothing() {
+        let fx = Fixture::new();
+        let mut unknown = run(1, "prod;rm");
+        unknown["outcome"] = json!({"Unknown": {"step": 1, "reason": "connection lost"}});
+        unknown["steps"][1]["status"] = json!("Unknown");
+        let next = steps(&fx, &unknown);
+        assert!(!next.copy_safe);
+        assert!(!guidance(&next, "/work/app").copy_withheld);
+    }
+
+    #[test]
+    fn withheld_commands_stay_in_backticks_escaped_once() {
+        let fx = Fixture::new();
+        let next = steps(&fx, &unfinished("stag\u{1b}[2J", "/work/app"));
+        let guidance = guidance(&next, "/work/app");
+        assert!(guidance.copy_withheld);
+        assert_eq!(
+            guidance.lines[0][1],
+            Span::Text {
+                text: "`slip attach stag\\x1b[2J`".into()
+            }
+        );
     }
 
     #[test]
@@ -1066,37 +1077,32 @@ mod span_tests {
     }
 
     #[test]
-    fn receipt_text_naming_ssh_stays_text() {
-        let lines = vec![
-            "Run `ssh shop-prod` and compare the fingerprint.".to_string(),
-            "Then `ssh-add --apple-use-keychain`.".to_string(),
-        ];
-        let guidance = guidance(&lines, "/work/app", "production");
-        assert!(commands(&guidance).is_empty(), "{guidance:?}");
-    }
-
-    #[test]
-    fn only_plain_slip_commands_pass() {
-        for ok in [
-            "slip attach staging",
-            "slip from-step prod.eu 2",
-            "slip logs a_b-c",
-        ] {
-            assert!(is_slip_command(ok), "{ok}");
-        }
-        for bad in [
-            "slip",
-            "slip ",
-            "slip  attach x",
-            "slip Attach x",
-            "slip attach x ",
-            "slip attach x;y",
-            "slip attach 'x'",
-            "rm -rf /",
-            " slip attach x",
-            "slipx attach",
-        ] {
-            assert!(!is_slip_command(bad), "{bad:?}");
-        }
+    fn flags_in_cell_words() {
+        let words: Vec<String> = [
+            Flag::NewErrors { groups: 1 },
+            Flag::NewErrors { groups: 4 },
+            Flag::LogNotFullyObserved,
+            Flag::LogNotRecorded,
+            Flag::SmokeFailed { status: Some(500) },
+            Flag::SmokeFailed { status: None },
+            Flag::SmokeNotRecorded,
+            Flag::AppLeftDown,
+        ]
+        .into_iter()
+        .map(cell_text)
+        .collect();
+        assert_eq!(
+            words,
+            [
+                "1 new error group after this run",
+                "4 new error groups after this run",
+                "log not fully observed",
+                "log not recorded",
+                "smoke 500",
+                "smoke failed",
+                "smoke not recorded",
+                "app may be in maintenance mode",
+            ]
+        );
     }
 }

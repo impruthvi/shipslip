@@ -26,6 +26,7 @@ mod preflight;
 mod private_file;
 pub mod publish;
 pub mod receipt;
+pub mod records;
 mod runner;
 mod script;
 pub mod setup;

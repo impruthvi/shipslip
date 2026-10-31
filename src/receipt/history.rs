@@ -1,4 +1,4 @@
-//! Read-only views over saved receipts: listing, lookup and badges.
+//! Read-only views over saved receipts: listing and lookup.
 //!
 //! Nothing here opens a receipt's `.lock` file: probing it could make a
 //! concurrent `slip attach` fail to claim the run.
@@ -7,12 +7,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use super::{
-    io_error, read_receipt, safe_component, Receipt, ReceiptError, ReceiptKind, ReceiptStatus,
-    ReceiptStepStatus,
-};
+use super::{io_error, read_receipt, safe_component, Receipt, ReceiptError};
 use crate::logs::escape_field;
-use crate::{DeployOutcome, RunPlan, SmokeResult, WatchStatus};
+use crate::{DeployOutcome, SmokeResult, WatchStatus};
 
 /// Shortest run ID prefix shown to users.
 pub const MIN_ID_LEN: usize = 8;
@@ -240,133 +237,7 @@ fn common_prefix(a: &str, b: &str) -> usize {
     a.bytes().zip(b.bytes()).take_while(|(a, b)| a == b).count()
 }
 
-/// The dashboard summary of one run. It never reduces a run to a single
-/// "healthy" state: checks that did not finish are flagged.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Badge {
-    /// The receipt is still in progress: the run is running, was
-    /// interrupted, or crashed. `outcome` is then only the last recorded one.
-    pub unfinished: bool,
-    pub outcome: Option<DeployOutcome>,
-    pub flags: Vec<Flag>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Flag {
-    /// New error groups seen by the log watch.
-    NewErrors(u64),
-    LogNotFullyObserved,
-    LogNotRecorded,
-    SmokeFailed(Option<u16>),
-    SmokeNotRecorded,
-    AppLeftDown,
-}
-
 impl Receipt {
-    pub fn badge(&self) -> Badge {
-        let mut flags = Vec::new();
-        // Checks never apply to bringing the app up, or to a run that
-        // stopped before changing anything.
-        let checks_apply = self.kind == ReceiptKind::Deploy
-            && !matches!(
-                (self.status, &self.outcome),
-                (
-                    ReceiptStatus::Final,
-                    Some(
-                        DeployOutcome::CancelledBeforeChanges
-                            | DeployOutcome::AbortedBeforeChanges(_)
-                            | DeployOutcome::StoppedInMaintenance(_)
-                    )
-                )
-            );
-        match &self.watch {
-            None if checks_apply => flags.push(Flag::LogNotRecorded),
-            None => {}
-            Some(watch) => {
-                let groups = watch.new_errors.len() as u64 + watch.overflow_groups;
-                if groups > 0 {
-                    flags.push(Flag::NewErrors(groups));
-                }
-                match watch.status {
-                    WatchStatus::Complete | WatchStatus::NotRun => {}
-                    WatchStatus::Partial
-                    | WatchStatus::Unavailable
-                    | WatchStatus::NoLogSeen
-                    | WatchStatus::Cancelled => flags.push(Flag::LogNotFullyObserved),
-                }
-            }
-        }
-        match &self.smoke {
-            None if checks_apply => flags.push(Flag::SmokeNotRecorded),
-            None => {}
-            Some(SmokeResult::Failed { status, .. }) => flags.push(Flag::SmokeFailed(*status)),
-            Some(
-                SmokeResult::Passed { .. } | SmokeResult::NotConfigured | SmokeResult::Skipped,
-            ) => {}
-        }
-        if self.app_left_down {
-            flags.push(Flag::AppLeftDown);
-        }
-        Badge {
-            unfinished: self.status == ReceiptStatus::InProgress,
-            outcome: self.outcome.clone(),
-            flags,
-        }
-    }
-}
-
-impl Badge {
-    /// The outcome part, e.g. `Succeeded` or `Unfinished (last recorded: Succeeded)`.
-    pub fn headline(&self) -> String {
-        let outcome = self.outcome.as_ref().map(DeployOutcome::label);
-        match (self.unfinished, outcome) {
-            (false, Some(outcome)) => outcome,
-            (false, None) => "Finished without an outcome".into(),
-            (true, Some(outcome)) => format!("Unfinished (last recorded: {outcome})"),
-            (true, None) => "Unfinished".into(),
-        }
-    }
-}
-
-impl Flag {
-    pub fn text(&self) -> String {
-        match self {
-            Self::NewErrors(1) => "⚠ 1 new error group".into(),
-            Self::NewErrors(count) => format!("⚠ {count} new error groups"),
-            Self::LogNotFullyObserved => "ⓘ log not fully observed".into(),
-            Self::LogNotRecorded => "ⓘ log not recorded".into(),
-            Self::SmokeFailed(Some(status)) => format!("⚠ smoke {status}"),
-            Self::SmokeFailed(None) => "⚠ smoke failed".into(),
-            Self::SmokeNotRecorded => "ⓘ smoke not recorded".into(),
-            Self::AppLeftDown => "⛔ app may be in maintenance mode".into(),
-        }
-    }
-}
-
-impl Receipt {
-    /// Who started the run, e.g. `Ana <ana@example.com> (local user ana)`.
-    pub fn started_by(&self) -> Option<String> {
-        let actor = self.actor.as_ref()?;
-        let git = match (&actor.git_name, &actor.git_email) {
-            (Some(name), Some(email)) => Some(format!("{name} <{email}>")),
-            (Some(value), None) | (None, Some(value)) => Some(value.clone()),
-            (None, None) => None,
-        };
-        match (git, &actor.user) {
-            (Some(git), Some(user)) => Some(format!("{git} (local user {user})")),
-            (Some(git), None) => Some(git),
-            (None, Some(user)) => Some(format!("local user {user}")),
-            (None, None) => None,
-        }
-    }
-
-    /// Who started the run without contact details: the Git name, or the
-    /// local user when no name was recorded.
-    pub fn started_by_name(&self) -> Option<String> {
-        let actor = self.actor.as_ref()?;
-        actor.git_name.clone().or_else(|| actor.user.clone())
-    }
-
     /// The run ended where the server may need attention.
     pub fn ended_in_failure(&self) -> bool {
         matches!(
@@ -377,125 +248,6 @@ impl Receipt {
                     | DeployOutcome::Unknown { .. }
             )
         )
-    }
-
-    /// What the run was for, e.g. `deploy` or `rerun on the deployed commit`.
-    pub fn plan_text(&self) -> String {
-        match self.kind {
-            ReceiptKind::Deploy => describe_plan(self.run_plan),
-            ReceiptKind::Up => "bring the app up (`php artisan up`)".into(),
-        }
-    }
-
-    /// How the run ended, in one sentence with any recorded reason.
-    pub fn summary(&self) -> Option<String> {
-        let outcome = self.outcome.as_ref()?;
-        if self.kind == ReceiptKind::Deploy {
-            return Some(outcome.summary());
-        }
-        Some(match outcome {
-            DeployOutcome::Succeeded => {
-                "The app was brought up (`php artisan up` succeeded).".into()
-            }
-            DeployOutcome::FailedAtStep { .. } => format!(
-                "`php artisan up` exited with {}; the app may still be in maintenance mode.",
-                self.maintenance_up_exit_code
-                    .map_or_else(|| "an error".to_string(), |code| code.to_string())
-            ),
-            DeployOutcome::StoppedInMaintenance(reason) => format!(
-                "`php artisan up` did not run ({reason}); the app may still be in maintenance mode."
-            ),
-            DeployOutcome::Unknown { reason, .. } => {
-                format!("The result of `php artisan up` is unknown: {reason}.")
-            }
-            outcome => outcome.summary(),
-        })
-    }
-
-    /// Recovery hints built only from what the receipt recorded. Server text
-    /// is escaped, so the lines are safe to print as-is.
-    pub fn next_steps(&self) -> Vec<String> {
-        let env = escape_field(&self.target.env);
-        let mut lines = Vec::new();
-        if self.status == ReceiptStatus::InProgress {
-            lines.push(format!(
-                "The run did not finish. If no deploy is running, resume it from {} with `slip attach {env}`.",
-                escape_field(&self.repo_root)
-            ));
-        }
-        if self.kind == ReceiptKind::Up {
-            if let Some(DeployOutcome::Unknown { .. }) = &self.outcome {
-                lines.push(
-                    "Check the server before running anything again; the deploy lock was kept."
-                        .into(),
-                );
-            } else if self.app_left_down && self.status == ReceiptStatus::Final {
-                lines.push(format!(
-                    "The app may still be in maintenance mode. After checking the server, `slip up {env}` tries again."
-                ));
-            }
-            return lines;
-        }
-        match &self.outcome {
-            Some(DeployOutcome::FailedAtStep { step: 0, .. }) => lines.push(
-                "The fast-forward failed. Check the server checkout before deploying again.".into(),
-            ),
-            Some(DeployOutcome::FailedAtStep { step, .. }) => {
-                lines.push(format!("Step {step} failed and later steps did not run."));
-                lines.extend(failed_step_options(&env, *step));
-            }
-            Some(DeployOutcome::StoppedAfterStep { step, .. })
-                if *step < self.target.steps.len() =>
-            {
-                lines.push(format!(
-                    "Steps after {step} did not run. `slip from-step {env} {}` runs them on the deployed commit.",
-                    step + 1
-                ))
-            }
-            Some(DeployOutcome::StoppedInMaintenance(_)) => lines.push(
-                "No deploy steps ran, so the code on the server did not change.".into(),
-            ),
-            Some(DeployOutcome::Unknown { step, .. }) => lines.push(format!(
-                "The result of step {step} is unknown. Check the server before running anything again."
-            )),
-            _ => {}
-        }
-        let groups = self.watch.as_ref().map_or(0, |watch| {
-            watch.new_errors.len() as u64 + watch.overflow_groups
-        });
-        if groups > 0 {
-            let noun = if groups == 1 { "group" } else { "groups" };
-            lines.push(format!(
-                "The log showed {groups} new error {noun} after this run. `slip logs {env}` shows the log."
-            ));
-        }
-        if self.app_left_down {
-            lines.push(format!(
-                "The app may still be in maintenance mode. After checking the server, `slip up {env}` turns it off."
-            ));
-        }
-        lines
-    }
-}
-
-/// Retrying the same commit only helps when the cause was outside the code.
-/// `env` must already be escaped.
-pub fn failed_step_options(env: &str, step: usize) -> [String; 2] {
-    [
-        format!(
-            "If the cause was on the server (permissions, .env, database), fix it there, then `slip from-step {env} {step}` runs the remaining steps on the deployed commit."
-        ),
-        format!(
-            "If it needs a code change, push the fix and run `slip deploy {env}`."
-        ),
-    ]
-}
-
-pub fn describe_plan(plan: RunPlan) -> String {
-    match plan {
-        RunPlan::Deploy => "deploy".into(),
-        RunPlan::Rerun => "rerun on the deployed commit".into(),
-        RunPlan::FromStep(step) => format!("from step {step} on the deployed commit"),
     }
 }
 
@@ -530,18 +282,5 @@ pub fn describe_watch(status: WatchStatus) -> &'static str {
         WatchStatus::Cancelled => "cancelled",
         WatchStatus::NotRun => "not run",
         WatchStatus::NoLogSeen => "no log file seen",
-    }
-}
-
-impl ReceiptStepStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Ok => "✓ ok",
-            Self::Failed => "✗ failed",
-            Self::Unknown => "? unknown",
-            Self::NotStarted | Self::Pending => "– not run",
-            Self::Running => "? running when saved",
-            Self::Skipped => "↷ skipped",
-        }
     }
 }

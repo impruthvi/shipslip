@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::git::{Comparison, Git};
-use crate::receipt::Flag;
+use crate::records::{Outcome, OutcomeKind, Part};
 
 const OLD: &str = "1111111111111111111111111111111111111111";
 const NEW: &str = "2222222222222222222222222222222222222222";
@@ -157,8 +157,10 @@ fn fast_forward_status_decides_the_code() {
     let last = staging.last_attempt.as_ref().unwrap();
     assert_eq!(last.run_id, "00000002-0");
     assert_eq!(
-        last.next_steps[0],
-        "Step 2 failed and later steps did not run."
+        last.next_steps.steps[0].0,
+        [Part::Text(
+            "Step 2 failed and later steps did not run.".into()
+        )]
     );
     assert!(!staging.approved);
 }
@@ -249,10 +251,7 @@ fn a_successful_up_clears_the_maintenance_flag_without_changing_the_code() {
     assert_eq!(staging.code, recorded(NEW, false, Evidence::FastForward, 1));
     let code_run = staging.code_run.as_ref().unwrap();
     assert!(!code_run.badge.flags.contains(&Flag::AppLeftDown));
-    assert!(!code_run
-        .next_steps
-        .iter()
-        .any(|line| line.contains("slip up")));
+    assert!(!code_run.next_steps.steps.iter().any(|step| step.runs("up")));
     let last = staging.last_attempt.as_ref().unwrap();
     assert_eq!(last.kind, ReceiptKind::Up);
     assert!(last.badge.flags.is_empty(), "{:?}", last.badge);
@@ -295,7 +294,15 @@ fn crash_after_the_fast_forward_is_incomplete_and_unfinished() {
             at_ms: 1000,
         }
     );
-    assert!(staging.last_attempt.as_ref().unwrap().badge.unfinished);
+    assert!(
+        staging
+            .last_attempt
+            .as_ref()
+            .unwrap()
+            .badge
+            .outcome
+            .unfinished
+    );
 }
 
 #[test]
@@ -1007,36 +1014,6 @@ fn age_uses_the_largest_whole_unit() {
 }
 
 #[test]
-fn flags_in_cell_words() {
-    let words: Vec<String> = [
-        Flag::NewErrors(1),
-        Flag::NewErrors(4),
-        Flag::LogNotFullyObserved,
-        Flag::LogNotRecorded,
-        Flag::SmokeFailed(Some(500)),
-        Flag::SmokeFailed(None),
-        Flag::SmokeNotRecorded,
-        Flag::AppLeftDown,
-    ]
-    .iter()
-    .map(Flag::cell_text)
-    .collect();
-    assert_eq!(
-        words,
-        [
-            "1 new error group after this run",
-            "4 new error groups after this run",
-            "log not fully observed",
-            "log not recorded",
-            "smoke 500",
-            "smoke failed",
-            "smoke not recorded",
-            "app may be in maintenance mode",
-        ]
-    );
-}
-
-#[test]
 fn the_run_that_decided_the_code_is_kept_beside_the_last_attempt() {
     let fixture = Fixture::new();
     let first = fixture.save(&run(1, "staging"));
@@ -1103,11 +1080,13 @@ fn needs_attention_for_each_kind_of_cell() {
         kind: ReceiptKind::Deploy,
         run_plan: RunPlan::Deploy,
         badge: Badge {
-            unfinished,
-            outcome,
+            outcome: Outcome {
+                kind: outcome,
+                unfinished,
+            },
             flags,
         },
-        next_steps: vec![],
+        next_steps: NextSteps::default(),
         path: PathBuf::from("/r/1000-00000001-0.json"),
     };
     let ok = recorded(NEW, true, Evidence::FastForward, 1);
@@ -1116,23 +1095,15 @@ fn needs_attention_for_each_kind_of_cell() {
         cell.last_attempt = Some(summary);
         cell
     };
-    let succeeded = Some(DeployOutcome::Succeeded);
+    let succeeded = OutcomeKind::Succeeded;
 
     let quiet = [
         env_cell("a", ok.clone()),
         env_cell("a", CodeState::NeverDeployed),
         env_cell("a", CodeState::NoCodeChangeInLast { records: 2 }),
-        with_last(attempt(false, succeeded.clone(), vec![])),
-        with_last(attempt(
-            false,
-            succeeded.clone(),
-            vec![Flag::LogNotFullyObserved],
-        )),
-        with_last(attempt(
-            false,
-            succeeded.clone(),
-            vec![Flag::SmokeNotRecorded],
-        )),
+        with_last(attempt(false, succeeded, vec![])),
+        with_last(attempt(false, succeeded, vec![Flag::LogNotFullyObserved])),
+        with_last(attempt(false, succeeded, vec![Flag::SmokeNotRecorded])),
     ];
     for cell in &quiet {
         assert!(!cell.needs_attention(), "{cell:?}");
@@ -1150,7 +1121,11 @@ fn needs_attention_for_each_kind_of_cell() {
         started_at_ms: 2000,
     });
     let mut bad_code_run = env_cell("a", ok.clone());
-    bad_code_run.code_run = Some(attempt(false, succeeded.clone(), vec![Flag::NewErrors(1)]));
+    bad_code_run.code_run = Some(attempt(
+        false,
+        succeeded,
+        vec![Flag::NewErrors { groups: 1 }],
+    ));
     let loud = [
         env_cell("a", recorded(NEW, false, Evidence::FastForward, 1)),
         env_cell(
@@ -1163,19 +1138,19 @@ fn needs_attention_for_each_kind_of_cell() {
         stale,
         elsewhere,
         bad_code_run,
-        with_last(attempt(true, succeeded.clone(), vec![])),
+        with_last(attempt(true, succeeded, vec![])),
         with_last(attempt(
             false,
-            Some(DeployOutcome::FailedAtStep {
+            OutcomeKind::FailedAtStep {
                 step: 1,
                 partial_update: false,
-            }),
+            },
             vec![],
         )),
         with_last(attempt(
             false,
-            succeeded.clone(),
-            vec![Flag::SmokeFailed(Some(500))],
+            succeeded,
+            vec![Flag::SmokeFailed { status: Some(500) }],
         )),
         with_last(attempt(false, succeeded, vec![Flag::AppLeftDown])),
     ];

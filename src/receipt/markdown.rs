@@ -10,7 +10,8 @@ use std::fmt::Write;
 
 use super::{describe_watch, format_duration, format_utc, strip_color, timing_suffix, Receipt};
 use crate::logs::{escape, escape_field};
-use crate::{SmokeResult, StepStatus, StepTimes};
+use crate::records::StepKind;
+use crate::SmokeResult;
 
 pub fn markdown(receipt: &Receipt, details: bool) -> String {
     let mut out = String::new();
@@ -28,8 +29,8 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
         );
     }
     let outcome = match (receipt.summary(), details) {
-        (Some(summary), true) if !badge.unfinished => inline(&summary),
-        _ => inline(&badge.headline()),
+        (Some(summary), true) if !badge.outcome.unfinished => inline(summary.raw()),
+        _ => inline(&badge.outcome.headline()),
     };
     out.push_str("| | |\n|---|---|\n");
     row(&mut out, "Run", &code(&receipt.run_id));
@@ -69,14 +70,12 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
     row(
         &mut out,
         "Started by",
-        &inline(
-            &if details {
-                receipt.started_by()
-            } else {
-                receipt.started_by_name()
-            }
-            .unwrap_or_else(|| "not recorded".into()),
-        ),
+        &if details {
+            receipt.started_by()
+        } else {
+            receipt.started_by_name()
+        }
+        .map_or_else(|| "not recorded".into(), |who| inline(who.raw())),
     );
     if receipt.kind == super::ReceiptKind::Up {
         row(&mut out, "Server HEAD", &code(short(&receipt.from_sha)));
@@ -113,38 +112,20 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
     }
 
     out.push_str("\n## Steps\n\n| Step | Command | Status | Exit |\n|---|---|---|---|\n");
-    if let Some(status) = &receipt.maintenance_down_status {
-        maintenance_row(
-            &mut out,
-            "Maintenance on",
-            "php artisan down",
-            status,
-            receipt.maintenance_down_exit_code,
-            receipt.maintenance_down_times(),
-        );
-    }
-    for step in &receipt.steps {
+    for step in receipt.step_rows() {
+        let label = match step.kind {
+            StepKind::MaintenanceDown => "Maintenance on".to_string(),
+            StepKind::Step { index } => index.to_string(),
+            StepKind::MaintenanceUp => "Maintenance off".to_string(),
+        };
         let _ = writeln!(
             out,
-            "| {} | {} | {}{} | {} |",
-            step.index,
-            code(&step.command),
+            "| {label} | {} | {}{} | {} |",
+            code(step.command.raw()),
             step.status.label(),
             timing_suffix(step.times(), time_of_day),
             exit(step.exit_code)
         );
-    }
-    if receipt.kind == super::ReceiptKind::Deploy {
-        if let Some(status) = &receipt.maintenance_up_status {
-            maintenance_row(
-                &mut out,
-                "Maintenance off",
-                "php artisan up",
-                status,
-                receipt.maintenance_up_exit_code,
-                receipt.maintenance_up_times(),
-            );
-        }
     }
 
     if let Some(watch) = &receipt.watch {
@@ -253,24 +234,6 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
 
 fn row(out: &mut String, label: &str, value: &str) {
     let _ = writeln!(out, "| {label} | {value} |");
-}
-
-fn maintenance_row(
-    out: &mut String,
-    label: &str,
-    command: &str,
-    status: &StepStatus,
-    exit_code: Option<i32>,
-    times: StepTimes,
-) {
-    let _ = writeln!(
-        out,
-        "| {label} | {} | {}{} | {} |",
-        code(command),
-        super::ReceiptStepStatus::from(status.clone()).label(),
-        timing_suffix(times, time_of_day),
-        exit(exit_code)
-    );
 }
 
 fn time_of_day(millis: u128) -> String {
