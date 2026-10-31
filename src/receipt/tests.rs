@@ -407,14 +407,32 @@ fn markdown_shows_a_finished_step_duration_only() {
     let mut timed = receipt_json("aaaa0001-0", 1000, "staging");
     timed["steps"][1]["started_at_ms"] = json!(2000);
     timed["steps"][1]["finished_at_ms"] = json!(14_500);
-    timed["steps"][2]["started_at_ms"] = json!(15_000);
     let shown = markdown(&parse(timed), false);
     assert!(
         shown.contains("| 1 | `php artisan migrate --force` | ✓ ok in 12s | 0 |"),
         "{shown}"
     );
+}
+
+#[test]
+fn markdown_shows_a_start_without_an_end_as_end_not_known() {
+    let mut timed = receipt_json("aaaa0001-0", 1000, "staging");
+    // 2026-10-02 12:12:16Z
+    timed["steps"][1]["status"] = json!("Unknown");
+    timed["steps"][1]["exit_code"] = json!(null);
+    timed["steps"][1]["started_at_ms"] = json!(1_790_943_136_408u64);
+    timed["steps"][2]["started_at_ms"] = json!(1_790_943_140_000u64);
+    let shown = markdown(&parse(timed), false);
     assert!(
-        shown.contains("| 2 | `php artisan optimize` | ✓ ok | 0 |"),
+        shown.contains(
+            "| 1 | `php artisan migrate --force` | ? unknown, started 12:12:16Z, end not known |  |"
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(
+            "| 2 | `php artisan optimize` | ✓ ok, started 12:12:20Z, end not known | 0 |"
+        ),
         "{shown}"
     );
 }
