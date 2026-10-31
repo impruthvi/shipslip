@@ -1047,7 +1047,7 @@ fn print_help() {
          \x20 slip [--config FILE] break-lock ENV\n\
          \x20 slip [--config FILE] up ENV\n\
          \x20 slip [--config FILE] logs ENV [ID|ROW] [OPTIONS]\n\
-         \x20 slip [--config FILE] receipts [ENV] [--all]\n\
+         \x20 slip [--config FILE] receipts [ENV] [--all] [--json]\n\
          \x20 slip [--config FILE] receipts show ID [--json | --md [--with-details]]\n\
          \x20 slip status [--compare ENV ENV]\n\
          \x20 slip --version\n\n\

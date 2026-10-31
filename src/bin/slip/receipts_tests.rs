@@ -18,14 +18,16 @@ fn parses_list_and_show_forms() {
         args(&[]),
         Ok(Args::List {
             env: None,
-            all: false
+            all: false,
+            json: false
         })
     );
     assert_eq!(
         args(&["staging", "--all"]),
         Ok(Args::List {
             env: Some("staging".into()),
-            all: true
+            all: true,
+            json: false
         })
     );
     assert_eq!(
@@ -55,8 +57,25 @@ fn parses_list_and_show_forms() {
     );
     assert_eq!(
         args(&["--json"]),
-        Err("unknown receipts option --json".into())
+        Ok(Args::List {
+            env: None,
+            all: false,
+            json: true
+        })
     );
+    for values in [
+        ["staging", "--all", "--json"],
+        ["--json", "--all", "staging"],
+    ] {
+        assert_eq!(
+            args(&values),
+            Ok(Args::List {
+                env: Some("staging".into()),
+                all: true,
+                json: true
+            })
+        );
+    }
 }
 
 #[test]
@@ -265,7 +284,7 @@ fn up_runs_are_labelled_in_the_list() {
         ],
         older: 0,
     };
-    let text = render_list("app", None, &listing);
+    let text = render_list("app", None, &listing.into());
     let row = |id| text.lines().find(|line| line.starts_with(id)).unwrap();
     assert!(row("aaaa0002").contains("brought up at 2222222"), "{text}");
     assert!(!row("aaaa0002").contains('→'), "{text}");
@@ -293,7 +312,7 @@ fn list_rows_stay_on_one_line() {
         ],
         older: 4,
     };
-    let text = render_list("app", None, &listing);
+    let text = render_list("app", None, &listing.into());
     assert_eq!(
         text.lines().filter(|line| line.contains("forged")).count(),
         1
@@ -313,7 +332,7 @@ fn list_rows_stay_on_one_line() {
         render_list(
             "app",
             Some("staging"),
-            &receipt::Listing {
+            &ReceiptList {
                 rows: vec![],
                 older: 0
             }

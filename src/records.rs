@@ -9,6 +9,7 @@ use crate::logs::{escape, escape_field};
 mod next_steps;
 mod outcome;
 mod receipt;
+mod receipts;
 mod steps;
 
 pub use crate::receipt::markdown::render as markdown;
@@ -18,6 +19,7 @@ pub use receipt::{
     receipt, receipt_at, ErrorGroup, ErrorVariant, ReceiptQueryError, ReceiptRecord, Smoke, Target,
     Watch,
 };
+pub use receipts::{receipts, ReceiptList, ReceiptListRow, ReceiptSummary};
 pub use steps::{StepKind, StepRow, StepState};
 
 /// The JSON schema number. Within one number fields are only added.
