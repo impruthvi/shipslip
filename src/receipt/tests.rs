@@ -7,10 +7,10 @@ use super::*;
 use crate::records::{Flag, Untrusted};
 use crate::{AbortReason, WatchStatus};
 
-struct TempRoot(PathBuf);
+pub(crate) struct TempRoot(pub(crate) PathBuf);
 
 impl TempRoot {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
             "shipslip-receipt-view-{}-{}",
@@ -98,14 +98,14 @@ pub(crate) fn receipt_json(run_id: &str, started_at_ms: u64, env: &str) -> Value
 }
 
 fn write(root: &Path, env: &str, name: &str, contents: &[u8]) -> PathBuf {
-    let dir = root.join("app").join(env);
+    let dir = root.join("app").join(safe_component(env));
     fs::create_dir_all(&dir).unwrap();
     let path = dir.join(name);
     fs::write(&path, contents).unwrap();
     path
 }
 
-fn write_receipt(root: &Path, value: &Value) -> PathBuf {
+pub(crate) fn write_receipt(root: &Path, value: &Value) -> PathBuf {
     let name = format!(
         "{}-{}.json",
         value["started_at_ms"],

@@ -434,7 +434,15 @@ slip receipts                 # newest 20 for this project; --all lists every on
 slip receipts staging         # one environment
 slip receipts show 18dab54b   # one run, by the ID shown in the list
 slip receipts show 18dab54b --md
+slip receipts show 18dab54b --json
 ```
+
+`show --json` prints the full record with `"schema": 1`. Times are absolute
+milliseconds; an unobserved step end and its duration are `null`. Receipt text
+and server output remain raw JSON strings. Lookup errors print
+`{"schema":1,"error":{"kind":...}}`: `missing`, `ambiguous` (with `ids`), and
+`newer_version` (with `version`) exit 2; `unreadable` (with `message`) exits 1,
+the same as text mode. Within schema 1, fields are only added.
 
 Each row shows the outcome with flags for anything that needs a look:
 `⚠ N new error groups`, `⚠ smoke 500`, `ⓘ log not fully observed`,

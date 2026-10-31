@@ -6,10 +6,12 @@ use std::process::ExitCode;
 use shipslip::config::LoadedConfig;
 use shipslip::logs::{escape, escape_field};
 use shipslip::receipt::{
-    self, describe_smoke, describe_watch, format_duration, strip_color, timing_suffix, Found,
-    Listed, Receipt, ReceiptError, ReceiptKind, ReceiptStatus,
+    self, describe_watch, format_duration, strip_color, timing_suffix, Listed, Receipt,
+    ReceiptKind, ReceiptStatus,
 };
-use shipslip::records::{failed_step_options, NextStep, Part, StepKind, StepRow};
+use shipslip::records::{
+    self, failed_step_options, NextStep, Part, ReceiptQueryError, ReceiptRecord, StepKind, StepRow,
+};
 use shipslip::{DeployOutcome, WatchStatus};
 
 use super::invalid_input;
@@ -19,18 +21,27 @@ const LIST_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Args {
-    List { env: Option<String>, all: bool },
-    Show { id: String, md: bool, details: bool },
+    List {
+        env: Option<String>,
+        all: bool,
+    },
+    Show {
+        id: String,
+        md: bool,
+        details: bool,
+        json: bool,
+    },
 }
 
 impl Args {
     pub(super) fn parse(args: &[String]) -> Result<Self, Box<dyn Error>> {
         if args.first().map(String::as_str) == Some("show") {
             let mut id = None;
-            let (mut md, mut details) = (false, false);
+            let (mut md, mut details, mut json) = (false, false, false);
             for arg in &args[1..] {
                 match arg.as_str() {
                     "--md" => md = true,
+                    "--json" => json = true,
                     "--with-details" => details = true,
                     flag if flag.starts_with('-') => {
                         return Err(
@@ -44,10 +55,20 @@ impl Args {
                 }
             }
             let id = id.ok_or_else(|| invalid_input("receipts show requires a receipt ID"))?;
+            if json && (md || details) {
+                return Err(
+                    invalid_input("--json cannot be combined with --md or --with-details").into(),
+                );
+            }
             if details && !md {
                 return Err(invalid_input("--with-details only applies with --md").into());
             }
-            return Ok(Self::Show { id, md, details });
+            return Ok(Self::Show {
+                id,
+                md,
+                details,
+                json,
+            });
         }
         let mut env = None;
         let mut all = false;
@@ -81,41 +102,53 @@ pub(super) fn run(
                 receipt::list(root, project, env.as_deref(), (!all).then_some(LIST_LIMIT))?;
             print!("{}", render_list(project, env.as_deref(), &listing));
         }
-        Args::Show { id, md, details } => {
-            let path = match receipt::find(root, project, &id)? {
-                Found::One(path) => path,
-                Found::Missing => {
-                    return Err(invalid_input(format!(
-                        "no receipt of {} matches `{}`; run `slip receipts` to list them",
-                        escape_field(project),
-                        escape_field(&id)
-                    ))
-                    .into())
-                }
-                Found::Ambiguous(ids) => {
-                    return Err(invalid_input(format!(
-                        "`{}` matches several receipts ({}); type more of the ID",
-                        escape_field(&id),
-                        ids.join(", ")
-                    ))
-                    .into())
+        Args::Show {
+            id,
+            md,
+            details,
+            json,
+        } => {
+            let record = match records::receipt(root, project, &id) {
+                Ok(record) => record,
+                Err(error) => {
+                    let text_error = show_error(project, &id, &error);
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&records::versioned_error(error))?
+                        );
+                        return Ok(super::error_exit_code(text_error.as_ref()));
+                    }
+                    return Err(text_error);
                 }
             };
-            let receipt = receipt::read(&path).map_err(|error| match error {
-                ReceiptError::Version(version) => invalid_input(format!(
-                    "this receipt was written by a newer Shipslip (receipt schema v{version}); upgrade slip to read it"
-                ))
-                .into(),
-                error => Box::<dyn Error>::from(error),
-            })?;
-            if md {
-                print!("{}", receipt::markdown(&receipt, details));
+            if json {
+                println!("{}", serde_json::to_string(&records::versioned(record))?);
+            } else if md {
+                print!("{}", records::markdown(&record, details));
             } else {
-                print!("{}", render_show(&receipt));
+                print!("{}", render_show(&record));
             }
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+fn show_error(project: &str, id: &str, error: &ReceiptQueryError) -> Box<dyn Error> {
+    match error {
+        ReceiptQueryError::Missing => invalid_input(format!(
+            "no receipt of {} matches `{}`; run `slip receipts` to list them",
+            escape_field(project), escape_field(id)
+        )).into(),
+        ReceiptQueryError::Ambiguous { ids } => invalid_input(format!(
+            "`{}` matches several receipts ({}); type more of the ID",
+            escape_field(id), ids.join(", ")
+        )).into(),
+        ReceiptQueryError::NewerVersion { version } => invalid_input(format!(
+            "this receipt was written by a newer Shipslip (receipt schema v{version}); upgrade slip to read it"
+        )).into(),
+        ReceiptQueryError::Unreadable { message } => std::io::Error::other(message.raw()).into(),
+    }
 }
 
 fn render_list(project: &str, env: Option<&str>, listing: &receipt::Listing) -> String {
@@ -223,15 +256,15 @@ fn render_list(project: &str, env: Option<&str>, listing: &receipt::Listing) -> 
     out
 }
 
-fn render_show(receipt: &Receipt) -> String {
+fn render_show(receipt: &ReceiptRecord) -> String {
     let mut out = String::new();
     let target = &receipt.target;
     let badge = receipt.badge();
     let field = |out: &mut String, label: &str, value: &str| {
         let _ = writeln!(out, "{label:<20}{value}");
     };
-    let _ = writeln!(out, "Receipt {}\n", escape_field(&receipt.run_id));
-    let outcome = match receipt.summary() {
+    let _ = writeln!(out, "Receipt {}\n", escape_field(receipt.run_id.raw()));
+    let outcome = match receipt.summary.as_ref() {
         Some(summary) if !badge.outcome.unfinished => summary.field(),
         _ => escape_field(&badge.outcome.headline()),
     };
@@ -245,8 +278,8 @@ fn render_show(receipt: &Receipt) -> String {
         "Project:",
         &format!(
             "{} (checkout {})",
-            escape_field(&receipt.project),
-            escape_field(&receipt.repo_root)
+            escape_field(receipt.project.raw()),
+            escape_field(receipt.repo_root.raw())
         ),
     );
     field(
@@ -254,15 +287,15 @@ fn render_show(receipt: &Receipt) -> String {
         "Environment:",
         &format!(
             "{}{} via {}:{}, branch {}",
-            escape_field(&target.env),
+            escape_field(target.env.raw()),
             if target.production {
                 " (production)"
             } else {
                 ""
             },
-            escape_field(&target.ssh_alias),
-            escape_field(&target.path),
-            escape_field(&target.branch)
+            escape_field(target.ssh_alias.raw()),
+            escape_field(target.path.raw()),
+            escape_field(target.branch.raw())
         ),
     );
     field(&mut out, "Plan:", &receipt.plan_text());
@@ -287,19 +320,20 @@ fn render_show(receipt: &Receipt) -> String {
         &mut out,
         "Started by:",
         &receipt
-            .started_by()
+            .started_by
+            .as_ref()
             .map_or_else(|| "not recorded".into(), |who| who.field()),
     );
     if receipt.kind == ReceiptKind::Up {
-        field(&mut out, "Server HEAD:", &short(&receipt.from_sha));
+        field(&mut out, "Server HEAD:", &short(receipt.from_sha.raw()));
     } else {
         field(
             &mut out,
             "From → target:",
             &format!(
                 "{} → {}",
-                short(&receipt.from_sha),
-                short(&receipt.target_sha)
+                short(receipt.from_sha.raw()),
+                short(receipt.target_sha.raw())
             ),
         );
     }
@@ -308,8 +342,10 @@ fn render_show(receipt: &Receipt) -> String {
             &mut out,
             "Server HEAD at end:",
             &match (&receipt.server_head_at_end, receipt.tree_dirty) {
-                (Some(head), Some(true)) => format!("{} with uncommitted changes", short(head)),
-                (Some(head), _) => short(head),
+                (Some(head), Some(true)) => {
+                    format!("{} with uncommitted changes", short(head.raw()))
+                }
+                (Some(head), _) => short(head.raw()),
                 (None, _) => "not recorded".into(),
             },
         );
@@ -318,7 +354,7 @@ fn render_show(receipt: &Receipt) -> String {
     if !receipt.commits.is_empty() {
         out.push_str("\nCommits:\n");
         for commit in &receipt.commits {
-            let _ = writeln!(out, "  {}", escape_field(commit));
+            let _ = writeln!(out, "  {}", commit.field());
         }
         if receipt.more_commits > 0 {
             let _ = writeln!(out, "  and {} more commits", receipt.more_commits);
@@ -326,8 +362,8 @@ fn render_show(receipt: &Receipt) -> String {
     }
 
     out.push_str("\nSteps:\n");
-    for step in receipt.step_rows() {
-        step_line(&mut out, &step);
+    for step in &receipt.steps {
+        step_line(&mut out, step);
         for line in &step.output {
             let _ = writeln!(out, "        {}", escape(&strip_color(line.raw())));
         }
@@ -340,7 +376,7 @@ fn render_show(receipt: &Receipt) -> String {
             describe_watch(watch.status),
             format_duration(u128::from(watch.duration_ms)),
             watch.observed_lines,
-            escape_field(watch.log_path.as_deref().unwrap_or(target.log_path()))
+            escape_field(watch.log_path.as_ref().unwrap_or(&target.log_path).raw())
         );
         if watch.status != WatchStatus::NotRun {
             let _ = writeln!(
@@ -354,11 +390,11 @@ fn render_show(receipt: &Receipt) -> String {
                 out,
                 "  New: ×{} {}{}",
                 group.count,
-                escape_field(&group.exception),
+                group.exception.field(),
                 group
                     .file
-                    .as_deref()
-                    .map(|file| format!("  {}", escape_field(file)))
+                    .as_ref()
+                    .map(|file| format!("  {}", file.field()))
                     .unwrap_or_default()
             );
             for variant in &group.variants {
@@ -368,10 +404,10 @@ fn render_show(receipt: &Receipt) -> String {
                     variant.count,
                     variant
                         .display_file_line
-                        .as_deref()
-                        .map(|line| format!(" {}", escape_field(line)))
+                        .as_ref()
+                        .map(|line| format!(" {}", line.field()))
                         .unwrap_or_default(),
-                    escape_field(&variant.message)
+                    variant.message.field()
                 );
             }
         }
@@ -379,28 +415,24 @@ fn render_show(receipt: &Receipt) -> String {
             let _ = writeln!(out, "  And {} more groups", watch.overflow_groups);
         }
         for warning in &watch.warnings {
-            let _ = writeln!(out, "  Warning: {}", escape_field(warning));
+            let _ = writeln!(out, "  Warning: {}", warning.field());
         }
     }
 
     if let Some(smoke) = &receipt.smoke {
-        let text = describe_smoke(smoke);
+        let text = smoke.text();
         let _ = writeln!(out, "\nSmoke check: {text}");
     }
 
-    let notes: Vec<&String> = receipt
-        .last_message
-        .iter()
-        .chain(&receipt.warnings)
-        .collect();
+    let notes = &receipt.notes;
     if !notes.is_empty() {
         out.push_str("\nNotes:\n");
         for note in notes {
-            let _ = writeln!(out, "  {}", escape_field(note));
+            let _ = writeln!(out, "  {}", note.field());
         }
     }
 
-    let next = receipt.next_steps();
+    let next = &receipt.next_steps;
     if !next.steps.is_empty() {
         out.push_str("\nAt the time of this run:\n");
         for step in &next.steps {

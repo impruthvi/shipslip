@@ -8,10 +8,16 @@ use crate::logs::{escape, escape_field};
 
 mod next_steps;
 mod outcome;
+mod receipt;
 mod steps;
 
+pub use crate::receipt::markdown::render as markdown;
 pub use next_steps::{copy_is_safe, failed_step_options, NextStep, NextSteps, Part};
 pub use outcome::{describe_plan, Badge, Flag, Outcome, OutcomeKind};
+pub use receipt::{
+    receipt, receipt_at, ErrorGroup, ErrorVariant, ReceiptQueryError, ReceiptRecord, Smoke, Target,
+    Watch,
+};
 pub use steps::{StepKind, StepRow, StepState};
 
 /// The JSON schema number. Within one number fields are only added.

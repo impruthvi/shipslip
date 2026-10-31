@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde::Serialize;
 use shipslip::config::LoadedConfig;
 use shipslip::git::{Comparison, Git};
-use shipslip::receipt::{compare_envs_with, read, CodeState, EnvCell, Overview, ReceiptError};
+use shipslip::receipt::{compare_envs_with, CodeState, EnvCell, Overview, ReceiptError};
+
+use shipslip::records::receipt_at;
 
 use crate::receipt_view::{slip, SlipView};
 use crate::view::{self, compare_view, CompareView, Locators, MapView};
@@ -222,7 +224,7 @@ impl AppState {
         ReceiptResult::Opened {
             generation,
             id,
-            slip: slip(read(path)),
+            slip: slip(receipt_at(path)),
         }
     }
 

@@ -12,7 +12,9 @@ use std::path::Path;
 
 use serde_json::{json, Value};
 use shipslip::git::Comparison;
-use shipslip::receipt::{overview, read, ReceiptError};
+use shipslip::receipt::{overview, ReceiptError};
+
+use shipslip::records::receipt_at as read;
 
 use crate::fixture::{run, Fixture};
 use crate::receipt_view::slip;

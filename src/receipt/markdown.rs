@@ -10,30 +10,36 @@ use std::fmt::Write;
 
 use super::{describe_watch, format_duration, format_utc, strip_color, timing_suffix, Receipt};
 use crate::logs::{escape, escape_field};
-use crate::records::StepKind;
-use crate::SmokeResult;
+use crate::records::{ReceiptRecord, Smoke, StepKind};
 
 pub fn markdown(receipt: &Receipt, details: bool) -> String {
+    render(
+        &ReceiptRecord::from_receipt(std::path::Path::new(""), receipt),
+        details,
+    )
+}
+
+pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
     let mut out = String::new();
     let target = &receipt.target;
     let badge = receipt.badge();
     let _ = writeln!(
         out,
         "# Shipslip receipt: {} / {}\n",
-        inline(&receipt.project),
-        inline(&target.env)
+        inline(receipt.project.raw()),
+        inline(target.env.raw())
     );
     if details {
         out.push_str(
             "> Includes server output and error text. Review it for secrets before sharing.\n\n",
         );
     }
-    let outcome = match (receipt.summary(), details) {
+    let outcome = match (receipt.summary.as_ref(), details) {
         (Some(summary), true) if !badge.outcome.unfinished => inline(summary.raw()),
         _ => inline(&badge.outcome.headline()),
     };
     out.push_str("| | |\n|---|---|\n");
-    row(&mut out, "Run", &code(&receipt.run_id));
+    row(&mut out, "Run", &code(receipt.run_id.raw()));
     row(&mut out, "Outcome", &outcome);
     row(&mut out, "Plan", &inline(&receipt.plan_text()));
     row(
@@ -41,8 +47,8 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
         "Server",
         &format!(
             "{} {}{}",
-            code(&target.ssh_alias),
-            code(&target.path),
+            code(target.ssh_alias.raw()),
+            code(target.path.raw()),
             if target.production {
                 " (production)"
             } else {
@@ -50,7 +56,7 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
             }
         ),
     );
-    row(&mut out, "Branch", &code(&target.branch));
+    row(&mut out, "Branch", &code(target.branch.raw()));
     row(&mut out, "Started", &format_utc(receipt.started_at_ms));
     row(
         &mut out,
@@ -71,22 +77,26 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
         &mut out,
         "Started by",
         &if details {
-            receipt.started_by()
+            receipt.started_by.as_ref()
         } else {
-            receipt.started_by_name()
+            receipt.started_by_name.as_ref()
         }
         .map_or_else(|| "not recorded".into(), |who| inline(who.raw())),
     );
     if receipt.kind == super::ReceiptKind::Up {
-        row(&mut out, "Server HEAD", &code(short(&receipt.from_sha)));
+        row(
+            &mut out,
+            "Server HEAD",
+            &code(short(receipt.from_sha.raw())),
+        );
     } else {
         row(
             &mut out,
             "From → target",
             &format!(
                 "{} → {}",
-                code(short(&receipt.from_sha)),
-                code(short(&receipt.target_sha))
+                code(short(receipt.from_sha.raw())),
+                code(short(receipt.target_sha.raw()))
             ),
         );
     }
@@ -104,7 +114,7 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
     if !receipt.commits.is_empty() {
         out.push_str("\n## Commits\n\n");
         for commit in &receipt.commits {
-            let _ = writeln!(out, "- {}", inline(commit));
+            let _ = writeln!(out, "- {}", inline(commit.raw()));
         }
         if receipt.more_commits > 0 {
             let _ = writeln!(out, "- and {} more commits", receipt.more_commits);
@@ -112,7 +122,7 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
     }
 
     out.push_str("\n## Steps\n\n| Step | Command | Status | Exit |\n|---|---|---|---|\n");
-    for step in receipt.step_rows() {
+    for step in &receipt.steps {
         let label = match step.kind {
             StepKind::MaintenanceDown => "Maintenance on".to_string(),
             StepKind::Step { index } => index.to_string(),
@@ -136,7 +146,7 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
             describe_watch(watch.status),
             format_duration(u128::from(watch.duration_ms)),
             watch.observed_lines,
-            code(watch.log_path.as_deref().unwrap_or(target.log_path()))
+            code(watch.log_path.as_ref().unwrap_or(&target.log_path).raw())
         );
         if !watch.new_errors.is_empty() {
             out.push_str("\n| New error | File | Count |\n|---|---|---|\n");
@@ -144,8 +154,12 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
                 let _ = writeln!(
                     out,
                     "| {} | {} | {} |",
-                    code(&group.exception),
-                    group.file.as_deref().map(code).unwrap_or_default(),
+                    code(group.exception.raw()),
+                    group
+                        .file
+                        .as_ref()
+                        .map(|file| code(file.raw()))
+                        .unwrap_or_default(),
                     group.count
                 );
             }
@@ -158,14 +172,14 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
                         let _ = writeln!(
                             out,
                             "\n{} ×{}{}\n{}",
-                            code(&group.exception),
+                            code(group.exception.raw()),
                             variant.count,
                             variant
                                 .display_file_line
-                                .as_deref()
-                                .map(|line| format!(" at {}", code(line)))
+                                .as_ref()
+                                .map(|line| format!(" at {}", code(line.raw())))
                                 .unwrap_or_default(),
-                            fence(&variant.message)
+                            fence(variant.message.raw())
                         );
                     }
                 }
@@ -174,7 +188,7 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
         if details && !watch.warnings.is_empty() {
             out.push('\n');
             for warning in &watch.warnings {
-                let _ = writeln!(out, "- {}", inline(warning));
+                let _ = writeln!(out, "- {}", inline(warning.raw()));
             }
         }
     }
@@ -182,17 +196,17 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
     if let Some(smoke) = &receipt.smoke {
         out.push_str("\n## Smoke check\n\n");
         let text = match smoke {
-            SmokeResult::NotConfigured => "Not configured.".into(),
-            SmokeResult::Skipped => "Skipped.".into(),
-            SmokeResult::Passed { status, latency_ms } => {
+            Smoke::NotConfigured => "Not configured.".into(),
+            Smoke::Skipped => "Skipped.".into(),
+            Smoke::Passed { status, latency_ms } => {
                 format!("Passed: HTTP {status} in {latency_ms} ms.")
             }
-            SmokeResult::Failed { status, reason } => match (status, details) {
-                (Some(status), true) if *reason != format!("HTTP {status}") => {
-                    format!("Failed: HTTP {status}: {}", inline(reason))
+            Smoke::Failed { status, reason } => match (status, details) {
+                (Some(status), true) if reason.raw() != format!("HTTP {status}") => {
+                    format!("Failed: HTTP {status}: {}", inline(reason.raw()))
                 }
                 (Some(status), _) => format!("Failed: HTTP {status}."),
-                (None, true) => format!("Failed: {}", inline(reason)),
+                (None, true) => format!("Failed: {}", inline(reason.raw())),
                 (None, false) => "Failed.".into(),
             },
         };
@@ -200,15 +214,11 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
     }
 
     if details {
-        let notes: Vec<&String> = receipt
-            .last_message
-            .iter()
-            .chain(&receipt.warnings)
-            .collect();
+        let notes = &receipt.notes;
         if !notes.is_empty() {
             out.push_str("\n## Notes\n\n");
             for note in notes {
-                let _ = writeln!(out, "- {}", inline(note));
+                let _ = writeln!(out, "- {}", inline(note.raw()));
             }
         }
         let with_output: Vec<_> = receipt
@@ -222,9 +232,19 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
                 let _ = writeln!(
                     out,
                     "\nStep {} (last {} lines):\n{}",
-                    step.index,
+                    match step.kind {
+                        StepKind::Step { index } => index,
+                        _ => continue,
+                    },
                     step.output.len(),
-                    fence(&strip_color(&step.output.join("\n")))
+                    fence(&strip_color(
+                        &step
+                            .output
+                            .iter()
+                            .map(|line| line.raw())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    ))
                 );
             }
         }
@@ -240,10 +260,10 @@ fn time_of_day(millis: u128) -> String {
     format_utc(millis)[11..].to_string()
 }
 
-fn server_head(receipt: &Receipt) -> String {
+fn server_head(receipt: &ReceiptRecord) -> String {
     match (&receipt.server_head_at_end, receipt.tree_dirty) {
-        (Some(head), Some(true)) => format!("{} with uncommitted changes", code(short(head))),
-        (Some(head), _) => code(short(head)),
+        (Some(head), Some(true)) => format!("{} with uncommitted changes", code(short(head.raw()))),
+        (Some(head), _) => code(short(head.raw())),
         (None, _) => "not recorded".into(),
     }
 }
