@@ -360,8 +360,8 @@ button.side-item:hover {
   font-size: var(--text-11);
 }
 
-.side-why-text {
-  overflow-wrap: anywhere;
+.side-folder {
+  white-space: nowrap;
 }
 
 .sidebar .flap {
@@ -467,10 +467,6 @@ button.side-item:hover {
   fill: var(--color-accent);
 }
 
-.legend-compare {
-  padding-left: var(--space-12);
-  border-left: 1px solid var(--color-rule);
-}
 
 .legend-compare .muted:first-of-type {
   padding-right: var(--space-8);
@@ -1637,6 +1633,12 @@ button.side-item:hover {
   min-width: 0;
 }
 
+.workspace-folder {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+}
+
 .workspace-heading h1 {
   overflow: hidden;
   font-size: 15px;
@@ -1731,6 +1733,10 @@ button.side-item:hover {
   font-size: var(--text-14);
   line-height: var(--leading-body);
   font-weight: var(--font-weight-medium);
+}
+
+.preview-risks p {
+  margin: var(--space-8) 0 0;
 }
 
 .preview-risks ul {

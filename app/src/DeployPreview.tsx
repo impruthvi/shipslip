@@ -33,7 +33,6 @@ export function risks(review: DeployReview): string[] {
       lines.push(`Step ${i + 1} changes the database (${step}). Shipslip cannot undo it.`);
     }
   });
-  lines.push("A failed step stops the run. Nothing is retried or rolled back automatically.");
   return lines;
 }
 
@@ -171,11 +170,14 @@ export function Preview({
             <h2 id="preview-risks" className="caps">
               Before you confirm
             </h2>
-            <ul>
-              {risks(review).map((line) => (
-                <li key={line}>{line}</li>
-              ))}
-            </ul>
+            {risks(review).length > 0 && (
+              <ul>
+                {risks(review).map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            )}
+            <p className="muted">A failed step stops the run. Nothing is retried or rolled back automatically.</p>
           </section>
         )}
         <p className="workspace-section muted">

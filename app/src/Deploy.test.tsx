@@ -243,7 +243,6 @@ test("preview shows what ships; production deploys only once its name is typed",
   expect(risks.map((r) => r.textContent)).toEqual([
     "The app is in maintenance mode from before the first step until every step succeeds. If a step fails, it stays in maintenance mode.",
     "Step 2 changes the database (php artisan migrate --force). Shipslip cannot undo it.",
-    "A failed step stops the run. Nothing is retried or rolled back automatically.",
   ]);
 
   const deploy = screen.getByRole("button", { name: "Deploy to production" });
@@ -335,12 +334,12 @@ test("running lists every step with its mark and follows the running step's outp
   const steps = within(screen.getByRole("region", { name: "Steps" }));
   const heads = steps.getAllByRole("button").map((b) => b.textContent);
   expect(heads).toEqual([
-    "onMaintenance on: php artisan down",
+    "onphp artisan down",
     "0git fast-forward",
     expect.stringMatching(/^1composer install --no-dev\d+s$/),
     "2php artisan migrate --force",
     "3php artisan optimize",
-    "offMaintenance off: php artisan up",
+    "offphp artisan up",
   ]);
   expect(steps.getAllByRole("img", { name: "done" })).toHaveLength(2);
   expect(steps.getAllByRole("img", { name: "not started" })).toHaveLength(3);
@@ -732,7 +731,7 @@ test("bring the app up: a confirm shows the one step and needs the name typed", 
   expect(confirm).toHaveBeenCalledWith("up-1", "production");
   await act(async () => send({ ...fixtures.runBatches.running, handle: "up-1" }));
   const rows = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("button");
-  expect(rows.map((r) => r.textContent)).toEqual(["offMaintenance off: php artisan up"]);
+  expect(rows.map((r) => r.textContent)).toEqual(["offphp artisan up"]);
   // One step: nothing after it to stop before.
   expect(screen.queryByRole("button", { name: "Stop after this step" })).toBeNull();
 });
@@ -941,7 +940,7 @@ test("a live run shows on its cell and in the sidebar, which leads back to it", 
   expect(grid.getByRole("img", { name: "running now" })).toBeInTheDocument();
   const sidebar = () => within(screen.getByRole("navigation"));
   expect(grid.getByText("Running")).toHaveClass("flap");
-  const link = sidebar().getByRole("button", { name: new RegExp(`^${cell.label} → ${cell.env} 2m 1\\ds$`) });
+  const link = sidebar().getByRole("button", { name: new RegExp(`^${cell.label} ${cell.env} · 2m 1\\ds$`) });
 
   fireEvent.click(link);
   await settle();
@@ -955,7 +954,7 @@ test("a live run shows on its cell and in the sidebar, which leads back to it", 
   expect(stop).not.toHaveBeenCalled();
   expect(cancel).not.toHaveBeenCalled();
   expect(unfollow).toHaveBeenCalled();
-  expect(sidebar().getByRole("button", { name: new RegExp(`^${cell.label} → ${cell.env}`) })).toHaveFocus();
+  expect(sidebar().getByRole("button", { name: new RegExp(`^${cell.label} ${cell.env} · `) })).toHaveFocus();
 });
 
 test("several live runs each get a sidebar line", async () => {
@@ -970,8 +969,8 @@ test("several live runs each get a sidebar line", async () => {
   render(<App />);
   await settle();
   const sidebar = within(screen.getByRole("navigation"));
-  expect(sidebar.getByRole("button", { name: new RegExp(`^${cell.label} → ${cell.env} `) })).toBeInTheDocument();
-  expect(sidebar.getByRole("button", { name: /^other → staging / })).toBeInTheDocument();
+  expect(sidebar.getByRole("button", { name: new RegExp(`^${cell.label} ${cell.env} · `) })).toBeInTheDocument();
+  expect(sidebar.getByRole("button", { name: /^other staging · / })).toBeInTheDocument();
 });
 
 test("a run that ends in the background re-reads the map and the entry", async () => {
@@ -983,7 +982,7 @@ test("a run that ends in the background re-reads the map and the entry", async (
     liveRuns.mockResolvedValue({ runs: [liveRun(cell, 1000)], closedPreviews: [] });
     await act(async () => vi.advanceTimersByTimeAsync(2000));
     const runs = () => within(screen.getByRole("region", { name: "Deploys running" }));
-    expect(runs().getByRole("button", { name: new RegExp(`^${cell.label} → ${cell.env} `) })).toBeInTheDocument();
+    expect(runs().getByRole("button", { name: new RegExp(`^${cell.label} ${cell.env} · `) })).toBeInTheDocument();
     const reads = loadMap.mock.calls.length;
     const asks = entry.mock.calls.length;
     liveRuns.mockResolvedValue({ runs: [], closedPreviews: [] });

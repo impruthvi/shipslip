@@ -28,6 +28,8 @@ export interface DeployTarget {
   env: string;
   /** The app's name on the map. */
   label: string;
+  /** Set when another app on the map has the same name. */
+  folder?: string | null;
   production: boolean;
 }
 
@@ -369,6 +371,7 @@ export function Workspace({
           <h1 ref={heading} tabIndex={-1}>
             {title}
           </h1>
+          {target.folder && <span className="workspace-folder muted">in {target.folder}</span>}
           {production && <span className="production-chip">PRODUCTION</span>}
         </div>
         {sub && (

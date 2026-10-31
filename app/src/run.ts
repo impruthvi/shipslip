@@ -57,13 +57,13 @@ export function runRows(info: RunInfo, state: RunState): RunRow[] {
   const rows: RunRow[] = [];
   const on: RunRow = {
     index: "on",
-    command: "Maintenance on: php artisan down",
+    command: "php artisan down",
     progress: state.maintenanceDown,
     owns: (s) => s.kind === "maintenance" && s.phase === "Down",
   };
   const off: RunRow = {
     index: "off",
-    command: "Maintenance off: php artisan up",
+    command: "php artisan up",
     progress: state.maintenanceUp,
     owns: (s) => s.kind === "maintenance" && s.phase === "Up",
   };

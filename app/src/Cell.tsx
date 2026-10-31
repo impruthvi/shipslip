@@ -70,8 +70,11 @@ export function reason(cell: EnvCellView, live?: string): { text: string; classN
   // "Succeeded" under a "Succeeded" status word says nothing new.
   // Success stays quiet ink: a green line would pull the eye to the healthy cell.
   if (state) {
-    if (state.text === status(cell).word) return null;
-    return state.className === "tone-good" ? { ...state, className: "muted" } : state;
+    const word = status(cell).word;
+    if (state.text === word) return null;
+    const rest = state.text.startsWith(`${word} · `) ? state.text.slice(word.length + 3) : null;
+    const text = rest ? rest[0].toUpperCase() + rest.slice(1) : state.text;
+    return { text, className: state.className === "tone-good" ? "muted" : state.className };
   }
   return cell.words ? { text: cell.words, className: "muted sentence" } : null;
 }

@@ -17,6 +17,7 @@ import { useLiveRuns } from "./useLiveRuns";
 import { useSelection } from "./useSelection";
 import { Workspace, type DeployTarget, type Leave, type Start } from "./Workspace";
 import { notify } from "./notify";
+import { twinFolder } from "./text";
 import { deploy } from "./deployApi";
 import type { RunInfo } from "./types";
 
@@ -118,6 +119,7 @@ export default function App() {
       row: selected.row,
       env: selected.env,
       label: row.label,
+      folder: map ? twinFolder(map.rows.map((x) => x.label), row.label, row.repoRoot) : null,
       production: entry.production,
     };
     let start: Start;
@@ -140,6 +142,7 @@ export default function App() {
         row: r,
         env: run.env,
         label: r >= 0 && map ? map.rows[r].label : run.project,
+        folder: map ? twinFolder(map.rows.map((x) => x.label), run.project, run.checkout) : null,
         production: run.production,
       },
       start: { kind: "follow", info: run },

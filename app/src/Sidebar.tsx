@@ -3,7 +3,7 @@ import { Flap, reason, status, type StatusTone } from "./Cell";
 import { Footer } from "./Footer";
 import { Mark } from "./Mark";
 import { ProblemsStrip } from "./ProblemsStrip";
-import { parentDir, tailPath } from "./text";
+import { twinFolder } from "./text";
 import { elapsed } from "./time";
 import type { RunInfo } from "./types";
 import type { MapState } from "./useReleaseMap";
@@ -24,6 +24,11 @@ interface Props {
   live: Record<string, string>;
   /** A deploy screen is open: it owns navigation, so the lists only show. */
   busy: boolean;
+}
+
+/** Which checkout a same-named app is, kept whole so it never breaks mid-name. */
+function Folder({ path }: { path: string | null }) {
+  return path && <span className="side-folder"> · in {path}</span>;
 }
 
 /** A sidebar line: a button, or plain text while a deploy screen is open. */
@@ -49,7 +54,6 @@ function Item({
 export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onProblem, live, busy }: Props) {
   const map = state.phase === "shown" && state.loaded.map.screen !== "firstRun" ? state.loaded.map : null;
   const labels = map?.rows.map((row) => row.label) ?? [];
-  const twin = (label: string) => labels.indexOf(label) !== labels.lastIndexOf(label);
   const attention = map
     ? map.rows
         .flatMap((row, r) =>
@@ -84,10 +88,21 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
                     <span className="side-mark" aria-hidden>
                       <Mark kind="live" />
                     </span>
-                    <span className="side-name">
-                      {run.project} → {run.env}
-                    </span>{" "}
-                    <span className="side-meta muted">{elapsed(now - run.startedAtMs)}</span>
+                    <span className="side-name" title={run.checkout}>
+                      {run.project}
+                    </span>
+                  </span>{" "}
+                  <span className="side-why">
+                    <span className="side-why-text muted">
+                      {run.env}
+                      <Folder path={twinFolder(
+                          [...labels, ...runs.filter((x) => x.checkout !== run.checkout).map((x) => x.project)],
+                          run.project,
+                          run.checkout,
+                        )} />
+                      {" · "}
+                      <span className="side-meta">{elapsed(now - run.startedAtMs)}</span>
+                    </span>
                   </span>
                 </Item>
               </li>
@@ -119,7 +134,7 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
                       <Flap status={said} />{" "}
                       <span className="side-why-text muted">
                         {env}
-                        {twin(row.label) && ` · in ${tailPath(parentDir(row.repoRoot), 18)}`}
+                        <Folder path={twinFolder(labels, row.label, row.repoRoot)} />
                       </span>
                     </span>
                   </Item>

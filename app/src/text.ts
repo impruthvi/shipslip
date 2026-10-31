@@ -30,6 +30,11 @@ export function tailPath(path: string, max = 22): string {
 }
 
 /** The folder a checkout sits in. */
+/** The folder that tells same-named apps apart, or null when the name is unique. */
+export function twinFolder(labels: string[], label: string, repoRoot: string): string | null {
+  return labels.filter((l) => l === label).length > 1 ? tailPath(parentDir(repoRoot), 18) : null;
+}
+
 export function parentDir(path: string): string {
   const cut = path.replace(/\/+$/, "").lastIndexOf("/");
   return cut > 0 ? path.slice(0, cut) : path;

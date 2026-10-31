@@ -17,7 +17,9 @@ test("a deploy keeps the running and attention lists visible without navigation 
   const current = props(true);
   render(<Sidebar {...current} />);
   const runs = screen.getByRole("heading", { name: "Deploys running" }).closest("section")!;
-  expect(within(runs).getByText(`${fixtures.runInfo.project} → ${fixtures.runInfo.env}`)).toBeInTheDocument();
+  expect(within(runs).getByRole("listitem")).toHaveTextContent(
+    new RegExp(`^${fixtures.runInfo.project} ${fixtures.runInfo.env} · `),
+  );
   const attention = screen.getByRole("heading", { name: /^Needs attention/ }).closest("section")!;
   expect(within(attention).getAllByRole("listitem").length).toBeGreaterThan(0);
   expect(within(runs).queryByRole("button")).toBeNull();
