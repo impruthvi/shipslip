@@ -3546,7 +3546,7 @@ mod tests {
         assert_eq!(receipt.steps[0].output, ["back up"]);
         assert!(receipt.badge().flags.is_empty());
         assert_eq!(
-            receipt.summary().unwrap(),
+            receipt.summary().unwrap().raw(),
             "The app was brought up (`php artisan up` succeeded)."
         );
     }
@@ -3582,9 +3582,9 @@ mod tests {
         assert!(receipt
             .badge()
             .flags
-            .contains(&crate::receipt::Flag::AppLeftDown));
+            .contains(&crate::records::Flag::AppLeftDown));
         assert_eq!(
-            receipt.summary().unwrap(),
+            receipt.summary().unwrap().raw(),
             "`php artisan up` exited with 1; the app may still be in maintenance mode."
         );
     }

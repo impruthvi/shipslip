@@ -98,6 +98,35 @@ fn show_escapes_server_text_and_cannot_forge_fields() {
 }
 
 #[test]
+fn show_escapes_untrusted_text_exactly_once() {
+    let text = render_show(&receipt(|value| {
+        value["target"]["env"] = json!("stag\u{1b}[2J`x`<b>");
+        value["repo_root"] = json!("/work/a\u{7}pp");
+        value["status"] = json!("InProgress");
+        value["outcome"] = json!({"FailedAtStep": {"step": 1, "partial_update": false}});
+        value["steps"][0]["status"] = json!("Failed");
+        value["steps"][0]["command"] = json!("php artisan \u{1b}]0;x\u{7} `id` <i>");
+    }));
+    assert!(
+        !text.contains('\u{1b}') && !text.contains('\u{7}'),
+        "{text}"
+    );
+    assert!(
+        text.contains("  ✗ failed       1  php artisan \\x1b]0;x\\x07 `id` <i> (exit 0)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("resume it from /work/a\\x07pp with `slip attach stag\\x1b[2J`x`<b>`."),
+        "{text}"
+    );
+    assert!(
+        text.contains("then `slip from-step stag\\x1b[2J`x`<b> 1` runs"),
+        "{text}"
+    );
+    assert!(!text.contains("\\\\x"), "escaped twice: {text}");
+}
+
+#[test]
 fn show_gives_a_finished_step_duration_only() {
     let untimed = render_show(&receipt(|_| {}));
     assert!(

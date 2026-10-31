@@ -8,7 +8,7 @@ use std::fmt::Write;
 use super::{CodeState, EnvCell, EnvComparison, Evidence, NotKnownReason, Qualifier};
 use crate::git::Comparison;
 use crate::logs::escape_field;
-use crate::receipt::{Flag, ReceiptStepStatus, MIN_ID_LEN};
+use crate::receipt::{ReceiptStepStatus, MIN_ID_LEN};
 use crate::DeployOutcome;
 
 /// The shape that tells cell states apart without color.
@@ -252,22 +252,6 @@ pub fn newer_elsewhere_text(cell: &EnvCell, now_ms: u128) -> Option<String> {
         other.repo_root,
         other.env
     )))
-}
-
-impl Flag {
-    /// The flag in words for a cell, without the leading symbol.
-    pub fn cell_text(&self) -> String {
-        match self {
-            Self::NewErrors(1) => "1 new error group after this run".into(),
-            Self::NewErrors(count) => format!("{count} new error groups after this run"),
-            Self::LogNotFullyObserved => "log not fully observed".into(),
-            Self::LogNotRecorded => "log not recorded".into(),
-            Self::SmokeFailed(Some(status)) => format!("smoke {status}"),
-            Self::SmokeFailed(None) => "smoke failed".into(),
-            Self::SmokeNotRecorded => "smoke not recorded".into(),
-            Self::AppLeftDown => "app may be in maintenance mode".into(),
-        }
-    }
 }
 
 /// The first `len` characters of a commit.

@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::{json, Value};
 
 use super::*;
+use crate::records::{Flag, Untrusted};
 use crate::{AbortReason, WatchStatus};
 
 struct TempRoot(PathBuf);
@@ -28,7 +29,7 @@ impl Drop for TempRoot {
 }
 
 /// A finished, successful v1 receipt as written before `actor` existed.
-fn receipt_json(run_id: &str, started_at_ms: u64, env: &str) -> Value {
+pub(crate) fn receipt_json(run_id: &str, started_at_ms: u64, env: &str) -> Value {
     let target = json!({
         "env": env,
         "production": false,
@@ -118,7 +119,7 @@ fn write_receipt(root: &Path, value: &Value) -> PathBuf {
     )
 }
 
-fn parse(value: Value) -> Receipt {
+pub(crate) fn parse(value: Value) -> Receipt {
     serde_json::from_value(value).unwrap()
 }
 
@@ -254,7 +255,7 @@ fn find_matches_unique_prefixes_only() {
 }
 
 /// A finished, successful `slip up`.
-fn up_json(run_id: &str, started_at_ms: u64) -> Value {
+pub(crate) fn up_json(run_id: &str, started_at_ms: u64) -> Value {
     let mut value = receipt_json(run_id, started_at_ms, "staging");
     value["version"] = json!(2);
     value["kind"] = json!("up");
@@ -282,7 +283,7 @@ fn deploy_receipts_stay_version_1_without_a_kind_and_up_receipts_are_version_2()
     assert_eq!(up.kind, ReceiptKind::Up);
     assert_eq!(up.plan_text(), "bring the app up (`php artisan up`)");
     assert!(up.badge().flags.is_empty());
-    assert!(up.next_steps().is_empty());
+    assert!(up.next_steps().steps.is_empty());
     assert!(markdown(&up, true).contains("The app was brought up"));
 
     // A kind that does not match the version is not trusted.
@@ -301,29 +302,17 @@ fn deploy_receipts_stay_version_1_without_a_kind_and_up_receipts_are_version_2()
 }
 
 #[test]
-fn an_unfinished_or_failed_up_points_at_attach_or_another_up() {
-    let mut running = up_json("aaaa0001-0", 1000);
-    running["status"] = json!("InProgress");
-    running["outcome"] = Value::Null;
-    running["app_left_down"] = json!(true);
-    let running = parse(running);
-    assert!(running.next_steps()[0].contains("`slip attach staging`"));
-    assert_eq!(running.next_steps().len(), 1);
-
+fn a_failed_up_says_the_app_may_still_be_down() {
     let mut failed = up_json("bbbb0002-0", 2000);
     failed["outcome"] = json!({"FailedAtStep": {"step": 0, "partial_update": false}});
     failed["app_left_down"] = json!(true);
     failed["maintenance_up_exit_code"] = json!(1);
     let failed = parse(failed);
     assert_eq!(
-        failed.summary().unwrap(),
+        failed.summary().unwrap().raw(),
         "`php artisan up` exited with 1; the app may still be in maintenance mode."
     );
     assert!(failed.badge().flags.contains(&Flag::AppLeftDown));
-    assert_eq!(
-        failed.next_steps(),
-        ["The app may still be in maintenance mode. After checking the server, `slip up staging` tries again."]
-    );
 }
 
 #[test]
@@ -354,17 +343,17 @@ fn actor_is_best_effort() {
         git_email: None,
     });
     assert_eq!(
-        receipt.started_by().as_deref(),
-        Some("Ana (local user ana)")
+        receipt.started_by(),
+        Some(Untrusted::new("Ana (local user ana)"))
     );
-    assert_eq!(receipt.started_by_name().as_deref(), Some("Ana"));
+    assert_eq!(receipt.started_by_name(), Some(Untrusted::new("Ana")));
 
     receipt.actor = Some(Actor {
         user: Some("ana".into()),
         git_name: None,
         git_email: Some("ana@example.test".into()),
     });
-    assert_eq!(receipt.started_by_name().as_deref(), Some("ana"));
+    assert_eq!(receipt.started_by_name(), Some(Untrusted::new("ana")));
 }
 
 #[test]
@@ -515,115 +504,6 @@ fn markdown_shows_the_deployer_email_only_with_details() {
 }
 
 #[test]
-fn next_steps_text_for_every_outcome() {
-    let with = |outcome: Value| {
-        let mut value = receipt_json("aaaa0001-0", 1000, "staging");
-        value["outcome"] = outcome;
-        parse(value)
-    };
-    let server_fix = |step: usize, env: &str| {
-        format!("If the cause was on the server (permissions, .env, database), fix it there, then `slip from-step {env} {step}` runs the remaining steps on the deployed commit.")
-    };
-    let code_fix =
-        |env: &str| format!("If it needs a code change, push the fix and run `slip deploy {env}`.");
-    let cases: Vec<(Value, Vec<String>)> = vec![
-        (json!("Succeeded"), vec![]),
-        (json!("CancelledBeforeChanges"), vec![]),
-        (
-            json!({"FailedAtStep": {"step": 0, "partial_update": true}}),
-            vec!["The fast-forward failed. Check the server checkout before deploying again.".into()],
-        ),
-        (
-            json!({"FailedAtStep": {"step": 2, "partial_update": false}}),
-            vec![
-                "Step 2 failed and later steps did not run.".into(),
-                server_fix(2, "staging"),
-                code_fix("staging"),
-            ],
-        ),
-        (
-            json!({"StoppedAfterStep": {"step": 1, "reason": "Requested"}}),
-            vec!["Steps after 1 did not run. `slip from-step staging 2` runs them on the deployed commit.".into()],
-        ),
-        // Stopping after the last step leaves nothing to run.
-        (json!({"StoppedAfterStep": {"step": 2, "reason": "LockLost"}}), vec![]),
-        (
-            json!({"StoppedInMaintenance": "LockLost"}),
-            vec!["No deploy steps ran, so the code on the server did not change.".into()],
-        ),
-        (
-            json!({"Unknown": {"step": 1, "reason": "connection lost"}}),
-            vec!["The result of step 1 is unknown. Check the server before running anything again.".into()],
-        ),
-    ];
-    for (outcome, expected) in cases {
-        assert_eq!(with(outcome.clone()).next_steps(), expected, "{outcome}");
-    }
-
-    let mut unfinished = receipt_json("aaaa0001-0", 1000, "staging");
-    unfinished["status"] = json!("InProgress");
-    unfinished["app_left_down"] = json!(true);
-    assert_eq!(
-        parse(unfinished).next_steps(),
-        [
-            "The run did not finish. If no deploy is running, resume it from /repo with `slip attach staging`.",
-            "The app may still be in maintenance mode. After checking the server, `slip up staging` turns it off.",
-        ]
-    );
-
-    let with_new_errors = |groups: usize, overflow: u64, outcome: Value| {
-        let mut receipt = with(outcome);
-        let watch = receipt.watch.as_mut().unwrap();
-        let group = serde_json::from_value(json!({
-            "exception": "RuntimeException",
-            "file": null,
-            "count": 1,
-            "variants": [],
-            "overflow_variants": 0
-        }))
-        .unwrap();
-        watch.new_errors = vec![group; groups];
-        watch.overflow_groups = overflow;
-        receipt.next_steps()
-    };
-    assert_eq!(
-        with_new_errors(1, 0, json!("Succeeded")),
-        ["The log showed 1 new error group after this run. `slip logs staging` shows the log."]
-    );
-    assert_eq!(
-        with_new_errors(2, 3, json!("Succeeded")),
-        ["The log showed 5 new error groups after this run. `slip logs staging` shows the log."]
-    );
-    assert_eq!(
-        with_new_errors(
-            1,
-            0,
-            json!({"FailedAtStep": {"step": 2, "partial_update": false}})
-        ),
-        [
-            "Step 2 failed and later steps did not run.".to_string(),
-            server_fix(2, "staging"),
-            code_fix("staging"),
-            "The log showed 1 new error group after this run. `slip logs staging` shows the log."
-                .into(),
-        ]
-    );
-
-    let mut forged = receipt_json("aaaa0001-0", 1000, "stag\ning");
-    forged["outcome"] = json!({"FailedAtStep": {"step": 1, "partial_update": false}});
-    forged["app_left_down"] = json!(true);
-    assert_eq!(
-        parse(forged).next_steps(),
-        [
-            "Step 1 failed and later steps did not run.".to_string(),
-            server_fix(1, "stag\\x0aing"),
-            code_fix("stag\\x0aing"),
-            "The app may still be in maintenance mode. After checking the server, `slip up stag\\x0aing` turns it off.".into(),
-        ]
-    );
-}
-
-#[test]
 fn badge_flags_every_incomplete_check() {
     let base = || parse(receipt_json("aaaa0001-0", 1000, "staging"));
     let watch = |status: WatchStatus| {
@@ -632,7 +512,7 @@ fn badge_flags_every_incomplete_check() {
         receipt.badge().flags
     };
     assert_eq!(base().badge().flags, []);
-    assert_eq!(base().badge().headline(), "Succeeded");
+    assert_eq!(base().badge().outcome.headline(), "Succeeded");
     for status in [
         WatchStatus::Partial,
         WatchStatus::Unavailable,
@@ -668,13 +548,13 @@ fn badge_flags_every_incomplete_check() {
     assert_eq!(
         flags,
         [
-            Flag::NewErrors(3),
-            Flag::SmokeFailed(Some(500)),
+            Flag::NewErrors { groups: 3 },
+            Flag::SmokeFailed { status: Some(500) },
             Flag::AppLeftDown
         ]
     );
     assert_eq!(
-        flags.iter().map(Flag::text).collect::<Vec<_>>(),
+        flags.iter().map(|flag| flag.text()).collect::<Vec<_>>(),
         [
             "⚠ 3 new error groups",
             "⚠ smoke 500",
@@ -686,8 +566,11 @@ fn badge_flags_every_incomplete_check() {
     let mut receipt = base();
     receipt.status = ReceiptStatus::InProgress;
     let badge = receipt.badge();
-    assert!(badge.unfinished);
-    assert_eq!(badge.headline(), "Unfinished (last recorded: Succeeded)");
+    assert!(badge.outcome.unfinished);
+    assert_eq!(
+        badge.outcome.headline(),
+        "Unfinished (last recorded: Succeeded)"
+    );
 
     // Checks never apply to a run that changed nothing.
     let mut receipt = base();
@@ -695,7 +578,7 @@ fn badge_flags_every_incomplete_check() {
     receipt.watch = None;
     receipt.smoke = None;
     assert_eq!(receipt.badge().flags, []);
-    assert_eq!(receipt.badge().headline(), "Aborted before changes");
+    assert_eq!(receipt.badge().outcome.headline(), "Aborted before changes");
 }
 
 fn secret_receipt() -> Receipt {

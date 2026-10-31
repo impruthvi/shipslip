@@ -56,3 +56,7 @@ _Avoid_: Duration (as the stored thing), server time
 
 **Evidence mark**:
 Where a receipt's claim about the code on the server came from: recorded, incomplete, observed, not known, or no code. Separate from the outcome.
+
+**Next step**:
+A recovery action a receipt suggests, built only from what it recorded. It may name a `slip` command to run; it never says what is on the server now.
+_Avoid_: Fix, remedy, live status

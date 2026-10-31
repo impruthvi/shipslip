@@ -19,10 +19,7 @@ mod history;
 pub(crate) mod markdown;
 mod overview;
 
-pub use history::{
-    describe_plan, describe_smoke, describe_watch, failed_step_options, find, list, Badge, Flag,
-    Found, Listed, Listing, MIN_ID_LEN,
-};
+pub use history::{describe_smoke, describe_watch, find, list, Found, Listed, Listing, MIN_ID_LEN};
 pub use markdown::markdown;
 pub use overview::{
     age, code_text, compare_envs, compare_envs_with, comparison_text, newer_elsewhere_text,
@@ -931,4 +928,4 @@ fn write_atomic(path: &Path, receipt: &Receipt) -> Result<(), ReceiptError> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

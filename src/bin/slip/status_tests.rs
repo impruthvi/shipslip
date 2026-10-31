@@ -1,9 +1,10 @@
 use super::*;
 use shipslip::git::Comparison;
 use shipslip::receipt::{
-    AttemptSummary, Badge, CodeState, EnvCell, Evidence, Flag, NewerElsewhere, NotKnownReason,
-    Problem, ProblemKind, Qualifier, ReceiptStepStatus,
+    AttemptSummary, CodeState, EnvCell, Evidence, NewerElsewhere, NotKnownReason, Problem,
+    ProblemKind, Qualifier, ReceiptStepStatus,
 };
+use shipslip::records::{Badge, Flag, NextStep, NextSteps, Outcome, OutcomeKind, Part};
 use shipslip::{DeployOutcome, RunPlan};
 
 const NOW: u128 = 10 * 86_400_000;
@@ -193,11 +194,13 @@ fn a_successful_up_reads_as_app_brought_up() {
         kind: ReceiptKind::Up,
         run_plan: RunPlan::Deploy,
         badge: Badge {
-            unfinished: false,
-            outcome: Some(DeployOutcome::Succeeded),
+            outcome: Outcome {
+                kind: OutcomeKind::Succeeded,
+                unfinished: false,
+            },
             flags: vec![],
         },
-        next_steps: vec![],
+        next_steps: NextSteps::default(),
         path: "/r/shop/staging/1-ffff0006-0.json".into(),
     });
     let overview = Overview {
@@ -221,13 +224,23 @@ fn map_shows_last_runs_targets_hints_and_problems() {
         kind: ReceiptKind::Deploy,
         run_plan: RunPlan::Deploy,
         badge: Badge {
-            unfinished: true,
-            outcome: Some(DeployOutcome::Succeeded),
-            flags: vec![Flag::NewErrors(2)],
+            outcome: Outcome {
+                kind: OutcomeKind::Succeeded,
+                unfinished: true,
+            },
+            flags: vec![Flag::NewErrors { groups: 2 }],
         },
-        next_steps: vec![
-            "The run did not finish. If no deploy is running, resume it from /work/shop with `slip attach production`.".into(),
-        ],
+        next_steps: NextSteps {
+            copy_safe: true,
+            steps: vec![NextStep(vec![
+                Part::Text(
+                    "The run did not finish. If no deploy is running, resume it from /work/shop with "
+                        .into(),
+                ),
+                Part::Command(vec!["slip".into(), "attach".into(), "production".into()]),
+                Part::Text(".".into()),
+            ])],
+        },
         path: "/r/shop/production/1-eeee0005-0.json".into(),
     });
     let mut staging = cell("staging", recorded(true, Evidence::FastForward));

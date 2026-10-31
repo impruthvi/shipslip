@@ -12,11 +12,11 @@ use std::path::{Path, PathBuf};
 
 use super::history::{entries_in, Entry};
 use super::{
-    io_error, read_receipt, safe_component, Badge, Receipt, ReceiptError, ReceiptKind,
-    ReceiptStatus,
+    io_error, read_receipt, safe_component, Receipt, ReceiptError, ReceiptKind, ReceiptStatus,
 };
-use super::{Flag, ReceiptStepStatus, ReceiptSummary};
+use super::{ReceiptStepStatus, ReceiptSummary};
 use crate::git::{Comparison, Git};
+use crate::records::{Badge, Flag, NextSteps};
 use crate::{DeployOutcome, RunPlan};
 
 /// Receipts of one cell read before it settles on "no code change".
@@ -134,8 +134,7 @@ pub struct AttemptSummary {
     pub kind: ReceiptKind,
     pub run_plan: RunPlan,
     pub badge: Badge,
-    /// [`Receipt::next_steps`], already escaped.
-    pub next_steps: Vec<String>,
+    pub next_steps: NextSteps,
     /// The receipt file.
     pub path: PathBuf,
 }
@@ -154,23 +153,7 @@ impl AttemptSummary {
     }
 
     fn needs_attention(&self) -> bool {
-        let badge = &self.badge;
-        badge.unfinished
-            || matches!(
-                badge.outcome,
-                Some(
-                    DeployOutcome::FailedAtStep { .. }
-                        | DeployOutcome::StoppedAfterStep { .. }
-                        | DeployOutcome::StoppedInMaintenance(_)
-                        | DeployOutcome::Unknown { .. }
-                )
-            )
-            || badge.flags.iter().any(|flag| {
-                matches!(
-                    flag,
-                    Flag::NewErrors(_) | Flag::SmokeFailed(_) | Flag::AppLeftDown
-                )
-            })
+        self.badge.outcome.needs_attention() || self.badge.flags.iter().any(|flag| flag.is_bad())
     }
 }
 
@@ -622,9 +605,7 @@ fn walk(owns: &[Own]) -> Walk {
                     .badge
                     .flags
                     .retain(|flag| *flag != Flag::AppLeftDown);
-                code_run
-                    .next_steps
-                    .retain(|line| !line.contains("`slip up "));
+                code_run.next_steps.steps.retain(|step| !step.runs("up"));
             }
             result.code = code;
             result.code_run = Some(code_run);

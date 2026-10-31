@@ -7,9 +7,10 @@ use shipslip::config::LoadedConfig;
 use shipslip::logs::{escape, escape_field};
 use shipslip::receipt::{
     self, describe_smoke, describe_watch, format_duration, strip_color, timing_suffix, Found,
-    Listed, Receipt, ReceiptError, ReceiptKind, ReceiptStatus, ReceiptStepStatus,
+    Listed, Receipt, ReceiptError, ReceiptKind, ReceiptStatus,
 };
-use shipslip::{DeployOutcome, StepTimes, WatchStatus};
+use shipslip::records::{failed_step_options, NextStep, Part, StepKind, StepRow};
+use shipslip::{DeployOutcome, WatchStatus};
 
 use super::invalid_input;
 
@@ -141,7 +142,7 @@ fn render_list(project: &str, env: Option<&str>, listing: &receipt::Listing) -> 
         rows.push(match listed {
             Listed::Receipt { id, receipt, .. } => {
                 let badge = receipt.badge();
-                let mut outcome = badge.headline();
+                let mut outcome = badge.outcome.headline();
                 for flag in &badge.flags {
                     outcome.push_str("  ");
                     outcome.push_str(&flag.text());
@@ -231,10 +232,10 @@ fn render_show(receipt: &Receipt) -> String {
     };
     let _ = writeln!(out, "Receipt {}\n", escape_field(&receipt.run_id));
     let outcome = match receipt.summary() {
-        Some(summary) if !badge.unfinished => summary,
-        _ => badge.headline(),
+        Some(summary) if !badge.outcome.unfinished => summary.field(),
+        _ => escape_field(&badge.outcome.headline()),
     };
-    field(&mut out, "Outcome:", &escape_field(&outcome));
+    field(&mut out, "Outcome:", &outcome);
     if !badge.flags.is_empty() {
         let flags: Vec<String> = badge.flags.iter().map(|flag| flag.text()).collect();
         field(&mut out, "Flags:", &flags.join(", "));
@@ -285,11 +286,9 @@ fn render_show(receipt: &Receipt) -> String {
     field(
         &mut out,
         "Started by:",
-        &escape_field(
-            &receipt
-                .started_by()
-                .unwrap_or_else(|| "not recorded".into()),
-        ),
+        &receipt
+            .started_by()
+            .map_or_else(|| "not recorded".into(), |who| who.field()),
     );
     if receipt.kind == ReceiptKind::Up {
         field(&mut out, "Server HEAD:", &short(&receipt.from_sha));
@@ -327,39 +326,10 @@ fn render_show(receipt: &Receipt) -> String {
     }
 
     out.push_str("\nSteps:\n");
-    if let Some(status) = &receipt.maintenance_down_status {
-        step_line(
-            &mut out,
-            "on",
-            "Maintenance on: php artisan down",
-            status.clone().into(),
-            receipt.maintenance_down_exit_code,
-            receipt.maintenance_down_times(),
-        );
-    }
-    for step in &receipt.steps {
-        step_line(
-            &mut out,
-            &step.index.to_string(),
-            &step.command,
-            step.status,
-            step.exit_code,
-            step.times(),
-        );
+    for step in receipt.step_rows() {
+        step_line(&mut out, &step);
         for line in &step.output {
-            let _ = writeln!(out, "        {}", escape(&strip_color(line)));
-        }
-    }
-    if receipt.kind == shipslip::receipt::ReceiptKind::Deploy {
-        if let Some(status) = &receipt.maintenance_up_status {
-            step_line(
-                &mut out,
-                "off",
-                "Maintenance off: php artisan up",
-                status.clone().into(),
-                receipt.maintenance_up_exit_code,
-                receipt.maintenance_up_times(),
-            );
+            let _ = writeln!(out, "        {}", escape(&strip_color(line.raw())));
         }
     }
 
@@ -431,10 +401,10 @@ fn render_show(receipt: &Receipt) -> String {
     }
 
     let next = receipt.next_steps();
-    if !next.is_empty() {
+    if !next.steps.is_empty() {
         out.push_str("\nAt the time of this run:\n");
-        for line in next {
-            let _ = writeln!(out, "  {line}");
+        for step in &next.steps {
+            let _ = writeln!(out, "  {}", next_step_text(step));
         }
     }
     out
@@ -473,7 +443,6 @@ pub(super) fn up_to_date_hint(root: &Path, project: &str, env: &str) -> Option<S
             .copied()
             .find(|(_, up)| same_target(runs[index].1, up))
     });
-    let env = escape_field(env);
     let mut lines = Vec::new();
     if let Some(index) = deploy_index {
         let (id, deploy) = runs[index];
@@ -488,18 +457,19 @@ pub(super) fn up_to_date_hint(root: &Path, project: &str, env: &str) -> Option<S
         {
             lines.push(format!(
                 "The last run here ({id}) did not succeed: {}. See `slip receipts show {id}`.",
-                deploy.badge().headline()
+                deploy.badge().outcome.headline()
             ));
             if let Some(DeployOutcome::FailedAtStep { step, .. }) = &deploy.outcome {
                 if *step > 0 {
-                    lines.extend(receipt::failed_step_options(&env, *step));
+                    lines.extend(failed_step_options(env, *step).iter().map(next_step_text));
                 }
             }
             // A failed/unfinished Up has more specific recovery instructions,
             // including attach or checking an unknown result before retrying.
             if app_left_down && !relevant_up.is_some_and(|(_, up)| needs_attention(up)) {
                 lines.push(format!(
-                    "The app may still be in maintenance mode; `slip up {env}` turns it off."
+                    "The app may still be in maintenance mode; `slip up {}` turns it off.",
+                    escape_field(env)
                 ));
             }
         }
@@ -511,32 +481,50 @@ pub(super) fn up_to_date_hint(root: &Path, project: &str, env: &str) -> Option<S
     for (id, up) in up_recovery.into_iter().flatten() {
         lines.push(format!(
             "The last `slip up` here ({id}) did not succeed: {}. See `slip receipts show {id}`.",
-            up.badge().headline()
+            up.badge().outcome.headline()
         ));
-        lines.extend(up.next_steps());
+        lines.extend(up.next_steps().steps.iter().map(next_step_text));
     }
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
-fn step_line(
-    out: &mut String,
-    index: &str,
-    command: &str,
-    status: ReceiptStepStatus,
-    exit_code: Option<i32>,
-    times: StepTimes,
-) {
+fn step_line(out: &mut String, step: &StepRow) {
+    let (index, command) = match step.kind {
+        StepKind::MaintenanceDown => (
+            "on".to_string(),
+            format!("Maintenance on: {}", step.command.field()),
+        ),
+        StepKind::Step { index } => (index.to_string(), step.command.field()),
+        StepKind::MaintenanceUp => (
+            "off".to_string(),
+            format!("Maintenance off: {}", step.command.field()),
+        ),
+    };
     let _ = writeln!(
         out,
         "  {:<12}{:>4}  {}{}{}",
-        status.label(),
+        step.status.label(),
         index,
-        escape_field(command),
-        exit_code
+        command,
+        step.exit_code
             .map(|code| format!(" (exit {code})"))
             .unwrap_or_default(),
-        timing_suffix(times, time_of_day)
+        timing_suffix(step.times(), time_of_day)
     );
+}
+
+/// A next step on one line, its commands in backticks, every part escaped.
+pub(super) fn next_step_text(step: &NextStep) -> String {
+    step.0
+        .iter()
+        .map(|part| match part {
+            Part::Text(text) => text.field(),
+            Part::Command(args) => {
+                let args: Vec<String> = args.iter().map(|arg| arg.field()).collect();
+                format!("`{}`", args.join(" "))
+            }
+        })
+        .collect()
 }
 
 fn short(sha: &str) -> String {

@@ -7,8 +7,8 @@ use serde::Serialize;
 use shipslip::logs::escape_field;
 use shipslip::receipt::{
     describe_smoke, describe_watch, format_duration, strip_color, Receipt, ReceiptError,
-    ReceiptStepStatus,
 };
+use shipslip::records::{StepKind, StepRow, StepState};
 use shipslip::{ErrorGroup, StepTimes, WatchResult, WatchStatus};
 
 use crate::view::{flags, guidance, outcome, FlagView, Guidance, OutcomeView};
@@ -175,46 +175,14 @@ pub fn slip(result: Result<Receipt, ReceiptError>) -> SlipView {
 fn receipt_view(receipt: &Receipt) -> ReceiptView {
     let badge = receipt.badge();
     let target = &receipt.target;
-    let mut steps = Vec::new();
-    if let Some(status) = &receipt.maintenance_down_status {
-        steps.push(step(
-            "on",
-            "Maintenance on: php artisan down",
-            status.clone().into(),
-            receipt.maintenance_down_exit_code,
-            receipt.maintenance_down_times(),
-            &[],
-        ));
-    }
-    for item in &receipt.steps {
-        steps.push(step(
-            &item.index.to_string(),
-            &item.command,
-            item.status,
-            item.exit_code,
-            item.times(),
-            &item.output,
-        ));
-    }
-    if receipt.kind == shipslip::receipt::ReceiptKind::Deploy {
-        if let Some(status) = &receipt.maintenance_up_status {
-            steps.push(step(
-                "off",
-                "Maintenance off: php artisan up",
-                status.clone().into(),
-                receipt.maintenance_up_exit_code,
-                receipt.maintenance_up_times(),
-                &[],
-            ));
-        }
-    }
+    let steps = receipt.step_rows().iter().map(step).collect();
     ReceiptView {
         run_id: escape_field(&receipt.run_id),
         outcome: outcome(&badge),
         summary: receipt
             .summary()
-            .filter(|_| !badge.unfinished)
-            .map(|summary| escape_field(&summary)),
+            .filter(|_| !badge.outcome.unfinished)
+            .map(|summary| summary.field()),
         flags: flags(&badge),
         project: escape_field(&receipt.project),
         repo_root: escape_field(&receipt.repo_root),
@@ -228,7 +196,7 @@ fn receipt_view(receipt: &Receipt) -> ReceiptView {
         duration: receipt
             .finished_at_ms
             .map(|end| format_duration(end.saturating_sub(receipt.started_at_ms))),
-        started_by: receipt.started_by().map(|who| escape_field(&who)),
+        started_by: receipt.started_by().map(|who| who.field()),
         from_sha: escape_field(&receipt.from_sha),
         target_sha: escape_field(&receipt.target_sha),
         server_head: receipt.ended_in_failure().then(|| ServerHead {
@@ -248,35 +216,40 @@ fn receipt_view(receipt: &Receipt) -> ReceiptView {
             .chain(&receipt.warnings)
             .map(|note| escape_field(note))
             .collect(),
-        next_steps: guidance(&receipt.next_steps(), &receipt.repo_root, &target.env),
+        next_steps: guidance(&receipt.next_steps(), &receipt.repo_root),
     }
 }
 
-fn step(
-    index: &str,
-    command: &str,
-    status: ReceiptStepStatus,
-    exit_code: Option<i32>,
-    times: StepTimes,
-    output: &[String],
-) -> StepView {
+fn step(row: &StepRow) -> StepView {
+    let (index, command) = match row.kind {
+        StepKind::MaintenanceDown => (
+            "on".to_string(),
+            format!("Maintenance on: {}", row.command.field()),
+        ),
+        StepKind::Step { index } => (index.to_string(), row.command.field()),
+        StepKind::MaintenanceUp => (
+            "off".to_string(),
+            format!("Maintenance off: {}", row.command.field()),
+        ),
+    };
     StepView {
-        index: index.into(),
-        command: escape_field(command),
-        status: match status {
-            ReceiptStepStatus::Ok => StepStatusView::Ok,
-            ReceiptStepStatus::Failed => StepStatusView::Failed,
-            ReceiptStepStatus::Unknown => StepStatusView::Unknown,
-            ReceiptStepStatus::NotStarted | ReceiptStepStatus::Pending => StepStatusView::NotRun,
-            ReceiptStepStatus::Running => StepStatusView::Running,
-            ReceiptStepStatus::Skipped => StepStatusView::Skipped,
+        index,
+        command,
+        status: match row.status {
+            StepState::Ok => StepStatusView::Ok,
+            StepState::Failed => StepStatusView::Failed,
+            StepState::Unknown => StepStatusView::Unknown,
+            StepState::NotStarted | StepState::Pending => StepStatusView::NotRun,
+            StepState::Running => StepStatusView::Running,
+            StepState::Skipped => StepStatusView::Skipped,
         },
-        label: status.label().into(),
-        exit_code,
-        timing: step_timing(times),
-        output: output
+        label: row.status.label().into(),
+        exit_code: row.exit_code,
+        timing: step_timing(row.times()),
+        output: row
+            .output
             .iter()
-            .map(|line| escape_field(&strip_color(line)))
+            .map(|line| escape_field(&strip_color(line.raw())))
             .collect(),
     }
 }
