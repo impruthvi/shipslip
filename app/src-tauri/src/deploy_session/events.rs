@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::receipt_view::{watch_view, WatchView};
+use crate::receipt_view::{step_timing, watch_view, StepTiming, WatchView};
 use serde::Serialize;
 use shipslip::interrupt::{next_stage, Stage};
 use shipslip::logs::escape_field;
@@ -49,6 +49,8 @@ pub struct Progress {
     pub name: Option<String>,
     pub status: ReceiptStepStatus,
     pub exit_code: Option<i32>,
+    /// From the finished event; `None` while running.
+    pub timing: Option<StepTiming>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -262,6 +264,7 @@ impl RunFeed {
                         name: Some(escape_field(&name)),
                         status: ReceiptStepStatus::Running,
                         exit_code: None,
+                        timing: None,
                     },
                 );
                 None
@@ -270,15 +273,17 @@ impl RunFeed {
                 index,
                 status,
                 exit_code,
-                ..
+                times,
             } => {
                 let progress = history.state.steps.entry(index).or_insert(Progress {
                     name: None,
                     status: ReceiptStepStatus::Running,
                     exit_code: None,
+                    timing: None,
                 });
                 progress.status = status.into();
                 progress.exit_code = exit_code;
+                progress.timing = step_timing(times);
                 None
             }
             DeployEvent::MaintenanceStarted { phase } => {
@@ -291,6 +296,7 @@ impl RunFeed {
                     name: None,
                     status: ReceiptStepStatus::Running,
                     exit_code: None,
+                    timing: None,
                 });
                 match phase {
                     MaintenancePhase::Up => history.state.maintenance_up = progress,
@@ -302,7 +308,7 @@ impl RunFeed {
                 phase,
                 status,
                 exit_code,
-                ..
+                times,
             } => {
                 history.stage = match phase {
                     MaintenancePhase::Up => "finishing",
@@ -313,6 +319,7 @@ impl RunFeed {
                     name: None,
                     status: status.into(),
                     exit_code,
+                    timing: step_timing(times),
                 });
                 match phase {
                     MaintenancePhase::Up => history.state.maintenance_up = progress,

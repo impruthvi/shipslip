@@ -335,8 +335,8 @@ test("running lists every step with its mark and follows the running step's outp
   const heads = steps.getAllByRole("button").map((b) => b.textContent);
   expect(heads).toEqual([
     "onphp artisan down",
-    "0git fast-forward",
-    expect.stringMatching(/^1composer install --no-dev\d+s$/),
+    "0git fast-forward1s",
+    "1composer install --no-dev",
     "2php artisan migrate --force",
     "3php artisan optimize",
     "offphp artisan up",
@@ -361,6 +361,53 @@ test("running lists every step with its mark and follows the running step's outp
   fireEvent.click(screen.getByRole("button", { name: "Stop after this step" }));
   expect(stop).toHaveBeenCalledWith("run-1", "afterStep");
   expect(screen.getByText("Stopping after this step…")).toBeInTheDocument();
+});
+
+test("a step shows the duration its finished event carries, and no timer while it runs", async () => {
+  await startRun();
+  const batch = fixtures.runBatches.running;
+  await act(async () => send(batch));
+  const steps = within(screen.getByRole("region", { name: "Steps" }));
+  const head = () => steps.getByRole("button", { name: /composer install/ });
+  expect(head()).toHaveTextContent(/--no-dev$/);
+  const step = batch.state.steps["1"]!;
+  await act(async () =>
+    send({
+      ...batch,
+      replay: false,
+      after: batch.through,
+      through: batch.through + 1,
+      output: [],
+      state: {
+        ...batch.state,
+        steps: {
+          ...batch.state.steps,
+          "1": { ...step, status: "Ok", exitCode: 0, timing: { kind: "took", duration: "2m 44s", durationMs: 164_000 } },
+        },
+      },
+    }),
+  );
+  expect(head()).toHaveTextContent(/--no-dev2m 44s$/);
+  expect(screen.getByTestId("announce-polite")).toHaveTextContent("Step 1 done in 2 minutes 44 seconds");
+
+  await act(async () =>
+    send({
+      ...batch,
+      replay: false,
+      after: batch.through + 1,
+      through: batch.through + 2,
+      output: [],
+      state: {
+        ...batch.state,
+        steps: {
+          ...batch.state.steps,
+          "1": { ...step, status: "Unknown", exitCode: null, timing: { kind: "endNotKnown", startedAtMs: Date.UTC(2026, 9, 31, 14, 3) } },
+        },
+      },
+    }),
+  );
+  expect(head()).toHaveTextContent(/--no-devstarted \d\d:\d\d.*, end not known$/);
+  expect(head().querySelector("time")).toHaveAttribute("title", "2026-10-31 14:03 UTC");
 });
 
 test("remote output is shown as text, never as markup", async () => {

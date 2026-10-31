@@ -39,6 +39,10 @@ impl Builder<'_> {
         receipt["repo_root"] = json!(self.root(app));
         receipt["started_at_ms"] = json!(started);
         receipt["finished_at_ms"] = json!(started + 95_000);
+        receipt["steps"][0]["started_at_ms"] = json!(started + 400);
+        receipt["steps"][0]["finished_at_ms"] = json!(started + 1_600);
+        receipt["steps"][1]["started_at_ms"] = json!(started + 1_700);
+        receipt["steps"][1]["finished_at_ms"] = json!(started + 49_700);
         receipt["target_sha"] = json!(sha);
         receipt["target"]["ssh_alias"] = json!(format!("{env}1"));
         receipt["target"]["path"] = json!(format!("/var/www/{app}"));
@@ -95,6 +99,8 @@ fn not_started(receipt: &mut Value, from: usize) {
     {
         step["status"] = json!("NotStarted");
         step["exit_code"] = json!(null);
+        step["started_at_ms"] = json!(null);
+        step["finished_at_ms"] = json!(null);
     }
 }
 
@@ -163,6 +169,9 @@ fn release_map(fx: &Fixture) {
     stop["app_left_down"] = json!(true);
     stop["maintenance_down_status"] = json!("Ok");
     stop["maintenance_down_exit_code"] = json!(0);
+    stop["maintenance_down_started_at_ms"] = json!(stop["started_at_ms"].as_u64().unwrap() + 300);
+    stop["maintenance_down_finished_at_ms"] =
+        json!(stop["started_at_ms"].as_u64().unwrap() + 2_100);
     not_started(&mut stop, 0);
     b.save(&stop);
     fx.approve_at(&api, "production", "production2", "/var/www/api");
@@ -263,6 +272,7 @@ fn build() -> (Fixtures, Vec<String>) {
     unfinished["outcome"] = json!(null);
     unfinished["steps"][1]["status"] = json!("Running");
     unfinished["steps"][1]["exit_code"] = json!(null);
+    unfinished["steps"][1]["finished_at_ms"] = json!(null);
     slips.insert("unfinished", unfinished);
     let mut withheld = b.deploy("shop", "qa", 10, &sha('a'));
     withheld["target"]["env"] = json!("qa;eu");

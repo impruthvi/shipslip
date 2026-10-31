@@ -1901,11 +1901,15 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         });
         if let Some(status) = status {
             let exit_code = Some(if status == StepStatus::Ok { 0 } else { 1 });
+            let started = 1_000 * index as u128;
             feed.record(DeployEvent::StepFinished {
                 index,
                 status,
                 exit_code,
-                times: StepTimes::default(),
+                times: StepTimes {
+                    started_at_ms: Some(started),
+                    finished_at_ms: Some(started + 1_200),
+                },
             });
         }
     };

@@ -9,7 +9,7 @@ use shipslip::receipt::{
     describe_smoke, describe_watch, format_duration, strip_color, Receipt, ReceiptError,
     ReceiptStepStatus,
 };
-use shipslip::{ErrorGroup, WatchResult, WatchStatus};
+use shipslip::{ErrorGroup, StepTimes, WatchResult, WatchStatus};
 
 use crate::view::{flags, guidance, outcome, FlagView, Guidance, OutcomeView};
 
@@ -83,7 +83,35 @@ pub struct StepView {
     /// The library's label, e.g. "✗ failed".
     pub label: String,
     pub exit_code: Option<i32>,
+    pub timing: Option<StepTiming>,
     pub output: Vec<String>,
+}
+
+/// What this Mac recorded of a step's run time. `None` when it recorded nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum StepTiming {
+    /// `duration` is e.g. "2m 44s".
+    Took { duration: String, duration_ms: u64 },
+    /// Sent at this time; the end was not seen.
+    EndNotKnown { started_at_ms: u64 },
+}
+
+pub(crate) fn step_timing(times: StepTimes) -> Option<StepTiming> {
+    match (times.started_at_ms, times.duration_ms()) {
+        (_, Some(ms)) => Some(StepTiming::Took {
+            duration: format_duration(ms),
+            duration_ms: millis(ms),
+        }),
+        (Some(started), None) => Some(StepTiming::EndNotKnown {
+            started_at_ms: millis(started),
+        }),
+        (None, None) => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -154,6 +182,7 @@ fn receipt_view(receipt: &Receipt) -> ReceiptView {
             "Maintenance on: php artisan down",
             status.clone().into(),
             receipt.maintenance_down_exit_code,
+            receipt.maintenance_down_times(),
             &[],
         ));
     }
@@ -163,6 +192,7 @@ fn receipt_view(receipt: &Receipt) -> ReceiptView {
             &item.command,
             item.status,
             item.exit_code,
+            item.times(),
             &item.output,
         ));
     }
@@ -173,6 +203,7 @@ fn receipt_view(receipt: &Receipt) -> ReceiptView {
                 "Maintenance off: php artisan up",
                 status.clone().into(),
                 receipt.maintenance_up_exit_code,
+                receipt.maintenance_up_times(),
                 &[],
             ));
         }
@@ -226,6 +257,7 @@ fn step(
     command: &str,
     status: ReceiptStepStatus,
     exit_code: Option<i32>,
+    times: StepTimes,
     output: &[String],
 ) -> StepView {
     StepView {
@@ -241,6 +273,7 @@ fn step(
         },
         label: status.label().into(),
         exit_code,
+        timing: step_timing(times),
         output: output
             .iter()
             .map(|line| escape_field(&strip_color(line)))
@@ -403,6 +436,50 @@ mod tests {
         let index: Vec<_> = view.steps.iter().map(|s| s.index.as_str()).collect();
         assert_eq!(index, ["on", "0", "1", "off"]);
         assert_eq!(view.steps[3].status, StepStatusView::Failed);
+    }
+
+    #[test]
+    fn step_rows_carry_the_recorded_times() {
+        let fx = Fixture::new();
+        let mut receipt = run(1, "staging");
+        receipt["steps"][0]["started_at_ms"] = json!(1_000);
+        receipt["steps"][0]["finished_at_ms"] = json!(165_000);
+        receipt["steps"][1]["status"] = json!("Unknown");
+        receipt["steps"][1]["started_at_ms"] = json!(170_000);
+        receipt["maintenance_down_status"] = json!("Ok");
+        receipt["maintenance_down_exit_code"] = json!(0);
+        receipt["maintenance_down_started_at_ms"] = json!(500);
+        receipt["maintenance_down_finished_at_ms"] = json!(900);
+        receipt["maintenance_up_status"] = json!("Unknown");
+        receipt["maintenance_up_exit_code"] = json!(null);
+        receipt["maintenance_up_started_at_ms"] = json!(180_000);
+        let view = open(&fx, &receipt);
+        let took = |duration: &str, duration_ms| {
+            Some(StepTiming::Took {
+                duration: duration.into(),
+                duration_ms,
+            })
+        };
+        let unseen = |started_at_ms| Some(StepTiming::EndNotKnown { started_at_ms });
+        let timing: Vec<_> = view.steps.iter().map(|s| s.timing.clone()).collect();
+        assert_eq!(
+            timing,
+            [
+                took("400 ms", 400),
+                took("2m 44s", 164_000),
+                unseen(170_000),
+                unseen(180_000)
+            ]
+        );
+    }
+
+    #[test]
+    fn steps_without_times_carry_none() {
+        let fx = Fixture::new();
+        let view = open(&fx, &run(1, "staging"));
+        assert!(view.steps.iter().all(|s| s.timing.is_none()));
+        let json = serde_json::to_value(StepTiming::EndNotKnown { started_at_ms: 5 }).unwrap();
+        assert_eq!(json, json!({"kind": "endNotKnown", "startedAtMs": 5}));
     }
 
     #[test]

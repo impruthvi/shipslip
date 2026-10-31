@@ -91,13 +91,13 @@ test("the running header says which step of how many, and what maintenance mode 
   const line = (state: RunBatch["state"]) => progressLine(info, state, runRows(info, state));
   const { state } = fixtures.runBatches.running;
   expect(line(state)).toBe(`Step 1 of ${info.steps.length} · app in maintenance mode`);
-  expect(line({ ...state, steps: {}, maintenanceDown: { name: null, status: "Running", exitCode: null } })).toBe(
+  expect(line({ ...state, steps: {}, maintenanceDown: { name: null, status: "Running", exitCode: null, timing: null } })).toBe(
     "Turning maintenance on",
   );
   expect(
-    line({ ...state, steps: {}, maintenanceDown: { name: null, status: "Unknown", exitCode: null } }),
+    line({ ...state, steps: {}, maintenanceDown: { name: null, status: "Unknown", exitCode: null, timing: null } }),
   ).toBe("maintenance mode not known");
-  expect(line({ ...state, steps: {}, maintenanceUp: { name: null, status: "Ok", exitCode: null } })).toBe(
+  expect(line({ ...state, steps: {}, maintenanceUp: { name: null, status: "Ok", exitCode: null, timing: null } })).toBe(
     "maintenance off",
   );
 });

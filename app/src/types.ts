@@ -135,12 +135,18 @@ export interface Guidance {
 
 export type StepStatus = "ok" | "failed" | "unknown" | "notRun" | "running" | "skipped";
 
+/** What this Mac recorded of a step's run time; `null` when nothing was. */
+export type StepTiming =
+  | { kind: "took"; duration: string; durationMs: number }
+  | { kind: "endNotKnown"; startedAtMs: number };
+
 export interface StepView {
   index: string;
   command: string;
   status: StepStatus;
   label: string;
   exitCode: number | null;
+  timing: StepTiming | null;
   output: string[];
 }
 
@@ -393,6 +399,8 @@ export interface Progress {
   name: string | null;
   status: ProgressStatus;
   exitCode: number | null;
+  /** From the finished event; `null` while running. */
+  timing: StepTiming | null;
 }
 
 export type Terminal =

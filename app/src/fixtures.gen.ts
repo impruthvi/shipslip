@@ -485,6 +485,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "1s",
+            "durationMs": 1200
+          },
           "output": []
         },
         {
@@ -493,6 +498,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "48s",
+            "durationMs": 48000
+          },
           "output": []
         }
       ],
@@ -560,6 +570,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "1s",
+            "durationMs": 1800
+          },
           "output": []
         },
         {
@@ -568,6 +583,7 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "notRun",
           "label": "– not run",
           "exitCode": null,
+          "timing": null,
           "output": []
         },
         {
@@ -576,6 +592,7 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "notRun",
           "label": "– not run",
           "exitCode": null,
+          "timing": null,
           "output": []
         }
       ],
@@ -666,6 +683,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "1s",
+            "durationMs": 1200
+          },
           "output": []
         },
         {
@@ -674,6 +696,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "48s",
+            "durationMs": 48000
+          },
           "output": []
         }
       ],
@@ -781,6 +808,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "1s",
+            "durationMs": 1200
+          },
           "output": []
         },
         {
@@ -789,6 +821,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "failed",
           "label": "✗ failed",
           "exitCode": 255,
+          "timing": {
+            "kind": "took",
+            "duration": "48s",
+            "durationMs": 48000
+          },
           "output": []
         }
       ],
@@ -888,6 +925,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "1s",
+            "durationMs": 1200
+          },
           "output": []
         },
         {
@@ -896,6 +938,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "48s",
+            "durationMs": 48000
+          },
           "output": []
         }
       ],
@@ -968,6 +1015,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "1s",
+            "durationMs": 1200
+          },
           "output": []
         },
         {
@@ -976,6 +1028,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "failed",
           "label": "✗ failed",
           "exitCode": 1,
+          "timing": {
+            "kind": "took",
+            "duration": "48s",
+            "durationMs": 48000
+          },
           "output": [
             "   INFO  Running migrations.",
             "  2026_10_09_add_discount_code ......................... FAIL",
@@ -1083,6 +1140,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "failed",
           "label": "✗ failed",
           "exitCode": 128,
+          "timing": {
+            "kind": "took",
+            "duration": "1s",
+            "durationMs": 1200
+          },
           "output": []
         },
         {
@@ -1091,6 +1153,7 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "notRun",
           "label": "– not run",
           "exitCode": null,
+          "timing": null,
           "output": []
         }
       ],
@@ -1158,6 +1221,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "1s",
+            "durationMs": 1200
+          },
           "output": []
         },
         {
@@ -1166,6 +1234,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "48s",
+            "durationMs": 48000
+          },
           "output": []
         }
       ],
@@ -1226,6 +1299,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "1s",
+            "durationMs": 1200
+          },
           "output": []
         },
         {
@@ -1234,6 +1312,11 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
+          "timing": {
+            "kind": "took",
+            "duration": "48s",
+            "durationMs": 48000
+          },
           "output": []
         }
       ],
@@ -1294,6 +1377,7 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "notRun",
           "label": "– not run",
           "exitCode": null,
+          "timing": null,
           "output": []
         },
         {
@@ -1302,6 +1386,7 @@ export const receipts: Record<string, ReceiptResult> = {
           "status": "notRun",
           "label": "– not run",
           "exitCode": null,
+          "timing": null,
           "output": []
         }
       ],
@@ -1413,7 +1498,12 @@ export const slips: Record<string, SlipView> = {
         "index": "0",
         "label": "✓ ok",
         "output": [],
-        "status": "ok"
+        "status": "ok",
+        "timing": {
+          "duration": "1s",
+          "durationMs": 1200,
+          "kind": "took"
+        }
       },
       {
         "command": "php artisan migrate --force",
@@ -1421,7 +1511,12 @@ export const slips: Record<string, SlipView> = {
         "index": "1",
         "label": "✓ ok",
         "output": [],
-        "status": "ok"
+        "status": "ok",
+        "timing": {
+          "duration": "48s",
+          "durationMs": 48000,
+          "kind": "took"
+        }
       }
     ],
     "summary": "Deploy run succeeded.",
@@ -1499,7 +1594,12 @@ export const slips: Record<string, SlipView> = {
         "index": "0",
         "label": "✓ ok",
         "output": [],
-        "status": "ok"
+        "status": "ok",
+        "timing": {
+          "duration": "1s",
+          "durationMs": 1200,
+          "kind": "took"
+        }
       },
       {
         "command": "php artisan migrate --force",
@@ -1507,7 +1607,11 @@ export const slips: Record<string, SlipView> = {
         "index": "1",
         "label": "? running when saved",
         "output": [],
-        "status": "running"
+        "status": "running",
+        "timing": {
+          "kind": "endNotKnown",
+          "startedAtMs": 1791794821700
+        }
       }
     ],
     "summary": null,
@@ -1636,7 +1740,8 @@ export const runBatches: Record<string, RunBatch> = {
       "maintenanceDown": {
         "exitCode": 0,
         "name": null,
-        "status": "Ok"
+        "status": "Ok",
+        "timing": null
       },
       "maintenanceUp": null,
       "serverHead": null,
@@ -1645,12 +1750,18 @@ export const runBatches: Record<string, RunBatch> = {
         "0": {
           "exitCode": 0,
           "name": "git fast-forward",
-          "status": "Ok"
+          "status": "Ok",
+          "timing": {
+            "duration": "1s",
+            "durationMs": 1200,
+            "kind": "took"
+          }
         },
         "1": {
           "exitCode": 1,
           "name": "composer install --no-dev",
-          "status": "Failed"
+          "status": "Failed",
+          "timing": null
         }
       },
       "terminal": {
@@ -1728,7 +1839,8 @@ export const runBatches: Record<string, RunBatch> = {
       "maintenanceDown": {
         "exitCode": 0,
         "name": null,
-        "status": "Ok"
+        "status": "Ok",
+        "timing": null
       },
       "maintenanceUp": null,
       "serverHead": null,
@@ -1737,12 +1849,18 @@ export const runBatches: Record<string, RunBatch> = {
         "0": {
           "exitCode": 0,
           "name": "git fast-forward",
-          "status": "Ok"
+          "status": "Ok",
+          "timing": {
+            "duration": "1s",
+            "durationMs": 1200,
+            "kind": "took"
+          }
         },
         "1": {
           "exitCode": null,
           "name": "composer install --no-dev",
-          "status": "Running"
+          "status": "Running",
+          "timing": null
         }
       },
       "terminal": null,
@@ -1781,7 +1899,8 @@ export const runBatches: Record<string, RunBatch> = {
         "0": {
           "exitCode": 0,
           "name": "git fast-forward",
-          "status": "Ok"
+          "status": "Ok",
+          "timing": null
         }
       },
       "terminal": {
@@ -1836,7 +1955,8 @@ export const runBatches: Record<string, RunBatch> = {
         "0": {
           "exitCode": 0,
           "name": "git fast-forward",
-          "status": "Ok"
+          "status": "Ok",
+          "timing": null
         }
       },
       "terminal": null,

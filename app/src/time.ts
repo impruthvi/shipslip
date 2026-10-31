@@ -32,6 +32,12 @@ export function stamp(ms: number, timeZone?: string, zoneLocale?: string): strin
   return `${p.day} ${p.month} ${p.year} · ${p.time}${p.zone ? ` ${p.zone}` : ""}`;
 }
 
+/** Time of day in local time with its zone, e.g. "19:51 IST". */
+export function timeOfDay(ms: number, timeZone?: string, zoneLocale?: string): string {
+  const p = parts(ms, timeZone, zoneLocale);
+  return `${p.time}${p.zone ? ` ${p.zone}` : ""}`;
+}
+
 /** The same moment in UTC, for hover: "2026-10-06 14:21 UTC". */
 export function utcStamp(ms: number): string {
   return `${new Date(ms).toISOString().slice(0, 16).replace("T", " ")} UTC`;

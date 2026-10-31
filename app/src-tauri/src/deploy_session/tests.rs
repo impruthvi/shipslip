@@ -1200,6 +1200,60 @@ fn event_replay_preserves_step_results_and_untrusted_text_as_display_data() {
 }
 
 #[test]
+fn finished_steps_carry_the_times_on_their_events_and_running_steps_none() {
+    let feed = display_feed();
+    let timed = StepTimes {
+        started_at_ms: Some(1_000),
+        finished_at_ms: Some(3_400),
+    };
+    feed.record(DeployEvent::MaintenanceStarted {
+        phase: shipslip::MaintenancePhase::Down,
+    });
+    feed.record(DeployEvent::MaintenanceFinished {
+        phase: shipslip::MaintenancePhase::Down,
+        status: shipslip::StepStatus::Ok,
+        exit_code: Some(0),
+        times: timed,
+    });
+    feed.record(DeployEvent::StepStarted {
+        index: 1,
+        name: "composer install".into(),
+    });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert_eq!(
+        view["state"]["steps"]["1"]["timing"],
+        serde_json::Value::Null
+    );
+    feed.record(DeployEvent::StepFinished {
+        index: 1,
+        status: shipslip::StepStatus::Ok,
+        exit_code: Some(0),
+        times: timed,
+    });
+    feed.record(DeployEvent::StepStarted {
+        index: 2,
+        name: "migrate".into(),
+    });
+    feed.record(DeployEvent::StepFinished {
+        index: 2,
+        status: shipslip::StepStatus::Unknown,
+        exit_code: None,
+        times: StepTimes {
+            finished_at_ms: None,
+            ..timed
+        },
+    });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    let took = serde_json::json!({"kind": "took", "duration": "2s", "durationMs": 2400});
+    assert_eq!(view["state"]["maintenanceDown"]["timing"], took);
+    assert_eq!(view["state"]["steps"]["1"]["timing"], took);
+    assert_eq!(
+        view["state"]["steps"]["2"]["timing"],
+        serde_json::json!({"kind": "endNotKnown", "startedAtMs": 1000})
+    );
+}
+
+#[test]
 fn replay_keeps_log_watch_smoke_and_unknown_result_details_safely() {
     let feed = display_feed();
     feed.record(DeployEvent::Warning {
