@@ -270,6 +270,7 @@ impl RunFeed {
                 index,
                 status,
                 exit_code,
+                ..
             } => {
                 let progress = history.state.steps.entry(index).or_insert(Progress {
                     name: None,

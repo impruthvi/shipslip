@@ -15,7 +15,7 @@ use shipslip::github_auth::discover_repository;
 use shipslip::interrupt::{next_stage, on_interrupt, Interrupt, Stage};
 use shipslip::logs::{self, Level, Lookup, Since};
 use shipslip::receipt::{
-    default_receipts_root, find_open, strip_color, ReceiptJournal, ReceiptKind,
+    default_receipts_root, duration_suffix, find_open, strip_color, ReceiptJournal, ReceiptKind,
 };
 use shipslip::transport::SshTransport;
 use shipslip::{
@@ -23,7 +23,7 @@ use shipslip::{
     prepare_with_github_token, prepare_with_progress, BlockReason, BreakLockError, BringUpError,
     Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecuteRejected, ExecutionHandle,
     MaintenancePhase, PrepareError, PreparePhase, RunEvents, RunPlan, SmokeResult, StepStatus,
-    WatchResult, WatchStatus, POST_DEPLOY_WATCH,
+    StepTimes, WatchResult, WatchStatus, POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 use tokio::time::Instant;
@@ -528,7 +528,8 @@ async fn follow_events(
                 index,
                 status,
                 exit_code,
-            } => show_step_result(index, status, exit_code),
+                times,
+            } => println!("{}", step_result_line(index, &status, exit_code, times)),
             DeployEvent::MaintenanceStarted { phase } => {
                 println!("\nMaintenance mode: {}", phase_name(phase));
             }
@@ -1627,14 +1628,20 @@ async fn cancel_prepared(
     Ok(())
 }
 
-fn show_step_result(index: usize, status: StepStatus, exit_code: Option<i32>) {
-    println!(
-        "Step {index}: {}{}",
-        status_name(&status),
+fn step_result_line(
+    index: usize,
+    status: &StepStatus,
+    exit_code: Option<i32>,
+    times: StepTimes,
+) -> String {
+    format!(
+        "Step {index}: {}{}{}",
+        status_name(status),
         exit_code
             .map(|code| format!(" (exit {code})"))
-            .unwrap_or_default()
-    );
+            .unwrap_or_default(),
+        duration_suffix(times)
+    )
 }
 
 fn show_outcome(outcome: &DeployOutcome) {
@@ -1962,6 +1969,30 @@ mod tests {
         let mut result = WatchResult::not_run();
         result.status = status;
         DeployEvent::WatchFinished(result)
+    }
+
+    #[test]
+    fn finished_step_line_shows_the_recorded_duration() {
+        let timed = StepTimes {
+            started_at_ms: Some(1_000),
+            finished_at_ms: Some(165_000),
+        };
+        assert_eq!(
+            step_result_line(1, &StepStatus::Ok, Some(0), timed),
+            "Step 1: succeeded (exit 0) in 2m 44s"
+        );
+        let started = StepTimes {
+            finished_at_ms: None,
+            ..timed
+        };
+        assert_eq!(
+            step_result_line(2, &StepStatus::Failed, Some(1), started),
+            "Step 2: failed (exit 1)"
+        );
+        assert_eq!(
+            step_result_line(3, &StepStatus::NotStarted, None, StepTimes::default()),
+            "Step 3: not started"
+        );
     }
 
     fn step_started() -> DeployEvent {

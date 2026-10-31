@@ -368,6 +368,58 @@ fn actor_is_best_effort() {
 }
 
 #[test]
+fn step_times_are_optional_and_round_trip() {
+    let old = parse(receipt_json("aaaa0001-0", 1000, "staging"));
+    assert!(old
+        .steps
+        .iter()
+        .all(|step| step.times() == StepTimes::default()));
+    let saved = serde_json::to_value(&old).unwrap();
+    assert_eq!(saved["version"], json!(1));
+    for step in saved["steps"].as_array().unwrap() {
+        assert!(step.get("started_at_ms").is_none(), "{step}");
+        assert!(step.get("finished_at_ms").is_none(), "{step}");
+    }
+
+    let mut timed = receipt_json("aaaa0001-0", 1000, "staging");
+    timed["steps"][1]["started_at_ms"] = json!(2000);
+    timed["steps"][1]["finished_at_ms"] = json!(14_500);
+    timed["steps"][2]["started_at_ms"] = json!(15_000);
+    let receipt = parse(timed.clone());
+    assert_eq!(receipt.steps[1].times().duration_ms(), Some(12_500));
+    assert_eq!(receipt.steps[2].times().duration_ms(), None);
+    assert_eq!(serde_json::to_value(&receipt).unwrap(), {
+        // Fields the receipt always writes, absent from the older fixture.
+        let mut expected = timed;
+        expected["actor"] = json!(null);
+        expected
+    });
+}
+
+#[test]
+fn markdown_shows_a_finished_step_duration_only() {
+    let old = markdown(&parse(receipt_json("aaaa0001-0", 1000, "staging")), false);
+    assert!(
+        old.contains("| 1 | `php artisan migrate --force` | ✓ ok | 0 |"),
+        "{old}"
+    );
+
+    let mut timed = receipt_json("aaaa0001-0", 1000, "staging");
+    timed["steps"][1]["started_at_ms"] = json!(2000);
+    timed["steps"][1]["finished_at_ms"] = json!(14_500);
+    timed["steps"][2]["started_at_ms"] = json!(15_000);
+    let shown = markdown(&parse(timed), false);
+    assert!(
+        shown.contains("| 1 | `php artisan migrate --force` | ✓ ok in 12s | 0 |"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("| 2 | `php artisan optimize` | ✓ ok | 0 |"),
+        "{shown}"
+    );
+}
+
+#[test]
 fn markdown_shows_the_deployer_email_only_with_details() {
     let mut receipt = parse(receipt_json("aaaa0001-0", 1000, "staging"));
     receipt.actor = Some(Actor {

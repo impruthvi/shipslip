@@ -19,7 +19,7 @@ use shipslip::{
     prepare_with_plan, prepare_with_progress, AbortReason, BlockReason, BreakLockError,
     BringUpError, Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle,
     LogChannel, MaintenancePhase, PrepareError, PreparePhase, RunEvents, RunPlan, SmokeResult,
-    StepStatus, StopReason, WatchStatus, POST_DEPLOY_WATCH,
+    StepStatus, StepTimes, StopReason, WatchStatus, POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 
@@ -2054,11 +2054,18 @@ async fn step_survives_a_dropped_connection() {
             partial_update: false
         }))
     );
-    assert!(events.contains(&DeployEvent::StepFinished {
-        index: 1,
-        status: StepStatus::Failed,
-        exit_code: Some(3),
-    }));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        DeployEvent::StepFinished {
+            index: 1,
+            status: StepStatus::Failed,
+            exit_code: Some(3),
+            times: StepTimes {
+                started_at_ms: Some(start),
+                finished_at_ms: Some(end),
+            },
+        } if start <= end
+    )));
 }
 
 #[tokio::test]

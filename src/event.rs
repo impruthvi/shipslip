@@ -15,6 +15,20 @@ pub enum StepStatus {
     NotStarted,
 }
 
+/// When this Mac sent a step and when it saw the step end, in milliseconds
+/// since the Unix epoch. Either may be missing; a duration is never guessed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StepTimes {
+    pub started_at_ms: Option<u128>,
+    pub finished_at_ms: Option<u128>,
+}
+
+impl StepTimes {
+    pub fn duration_ms(self) -> Option<u128> {
+        Some(self.finished_at_ms?.saturating_sub(self.started_at_ms?))
+    }
+}
+
 /// A down command may have changed the app unless it definitely never started.
 pub(crate) fn down_may_have_started(status: &StepStatus) -> bool {
     !matches!(status, StepStatus::NotStarted)
@@ -143,6 +157,8 @@ pub enum DeployEvent {
         index: usize,
         status: StepStatus,
         exit_code: Option<i32>,
+        /// What the receipt journal recorded for this step.
+        times: StepTimes,
     },
     /// The front-end detached while step `index` was running. No `Finished`
     /// event follows; the step keeps running on the server.

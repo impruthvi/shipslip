@@ -6,10 +6,10 @@ use std::process::ExitCode;
 use shipslip::config::LoadedConfig;
 use shipslip::logs::{escape, escape_field};
 use shipslip::receipt::{
-    self, describe_smoke, describe_watch, format_duration, strip_color, Found, Listed, Receipt,
-    ReceiptError, ReceiptKind, ReceiptStatus, ReceiptStepStatus,
+    self, describe_smoke, describe_watch, duration_suffix, format_duration, strip_color, Found,
+    Listed, Receipt, ReceiptError, ReceiptKind, ReceiptStatus, ReceiptStepStatus,
 };
-use shipslip::{DeployOutcome, WatchStatus};
+use shipslip::{DeployOutcome, StepTimes, WatchStatus};
 
 use super::invalid_input;
 
@@ -334,6 +334,7 @@ fn render_show(receipt: &Receipt) -> String {
             "Maintenance on: php artisan down",
             status.clone().into(),
             receipt.maintenance_down_exit_code,
+            StepTimes::default(),
         );
     }
     for step in &receipt.steps {
@@ -343,6 +344,7 @@ fn render_show(receipt: &Receipt) -> String {
             &step.command,
             step.status,
             step.exit_code,
+            step.times(),
         );
         for line in &step.output {
             let _ = writeln!(out, "        {}", escape(&strip_color(line)));
@@ -356,6 +358,7 @@ fn render_show(receipt: &Receipt) -> String {
                 "Maintenance off: php artisan up",
                 status.clone().into(),
                 receipt.maintenance_up_exit_code,
+                StepTimes::default(),
             );
         }
     }
@@ -521,16 +524,18 @@ fn step_line(
     command: &str,
     status: ReceiptStepStatus,
     exit_code: Option<i32>,
+    times: StepTimes,
 ) {
     let _ = writeln!(
         out,
-        "  {:<12}{:>4}  {}{}",
+        "  {:<12}{:>4}  {}{}{}",
         status.label(),
         index,
         escape_field(command),
         exit_code
             .map(|code| format!(" (exit {code})"))
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        duration_suffix(times)
     );
 }
 

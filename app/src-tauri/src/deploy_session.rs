@@ -1848,7 +1848,7 @@ mod tests;
 pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, serde_json::Value> {
     use crate::recovery::recovery;
     use serde_json::to_value;
-    use shipslip::{DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, StepStatus};
+    use shipslip::{DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, StepStatus, StepTimes};
     let info = RunInfo::sample("run-1", "deploy");
     let review = DeployReview {
         handle: "review-1".into(),
@@ -1904,6 +1904,7 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
                 index,
                 status,
                 exit_code,
+                times: StepTimes::default(),
             });
         }
     };
@@ -1930,6 +1931,7 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
             index: 0,
             status: StepStatus::Ok,
             exit_code: Some(0),
+            times: StepTimes::default(),
         },
         DeployEvent::WatchStarted {
             window: std::time::Duration::from_secs(120),
@@ -1948,6 +1950,7 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         index: 1,
         status: StepStatus::Failed,
         exit_code: Some(1),
+        times: StepTimes::default(),
     });
     feed.record(DeployEvent::AppLeftDown);
     feed.record(DeployEvent::Finished(DeployOutcome::FailedAtStep {
