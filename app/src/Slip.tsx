@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { CommandBox } from "./CommandBox";
 import { StepIcon } from "./Mark";
+import { StepTime } from "./StepTime";
 import type { Context, PaneView } from "./slipTarget";
 import { isTime, stamp, utcStamp } from "./time";
 import type {
@@ -259,6 +260,12 @@ function Steps({ steps }: { steps: StepView[] }) {
                     {words}
                     {step.exitCode !== null && step.status === "failed" && ` · exit ${step.exitCode}`}
                   </span>
+                )}
+                {step.timing && (
+                  <>
+                    <span className="muted">{" · "}</span>
+                    <StepTime timing={step.timing} className="muted" />
+                  </>
                 )}
                 {step.output.length > 0 && (
                   <pre className="step-output muted">{step.output.join("\n")}</pre>

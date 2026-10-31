@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Announce } from "./Announcer";
 import { deploy } from "./deployApi";
 import { StepIcon } from "./Mark";
+import { StepTime } from "./StepTime";
 import { applyBatch, progressLine, runRows, watching, type RunLog } from "./run";
 import { countdown, elapsed, spoken } from "./time";
 import type { CommandError, OutputLine, ProgressStatus, RunInfo, Terminal } from "./types";
@@ -76,10 +77,9 @@ export function Running({
   const [stopError, setStopError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const [times, setTimes] = useState<Record<string, { start: number; end?: number }>>({});
   const [watchStart, setWatchStart] = useState<number | null>(null);
-  /** What the effect below has already timed and announced. */
-  const seen = useRef({ times, watchStart });
+  /** What the effect below has already announced. */
+  const seen = useRef({ started: new Set<string>(), ended: new Set<string>(), watchStart });
   const ended = useRef(false);
   const props = useRef({ announce, onEnd });
   useEffect(() => {
@@ -107,39 +107,40 @@ export function Running({
   const rows = useMemo(() => (state ? runRows(info, state) : []), [info, state]);
   const terminal = state?.terminal ?? null;
 
-  // Times and announcements as each step starts and ends.
+  // Announcements as each step starts and ends.
   useEffect(() => {
     if (!state) return;
-    const at = Date.now();
-    const next = { ...seen.current.times };
-    let changed = false;
+    const { started, ended } = seen.current;
     for (const row of rows) {
       const status = row.progress?.status;
-      const time = next[row.index];
+      const timing = row.progress?.timing;
       const numbered = /^\d+$/.test(row.index) && row.index !== "0";
-      if (status === "Running" && !time) {
-        next[row.index] = { start: at };
-        changed = true;
+      if (status === "Running" && !started.has(row.index)) {
+        started.add(row.index);
         props.current.announce(
           numbered
             ? `Step ${row.index} of ${info.steps.length} started: ${row.command}`
             : `${row.command} started`,
         );
-      } else if (status && status !== "Running" && status !== "Pending" && time && !time.end) {
-        next[row.index] = { ...time, end: at };
-        changed = true;
+      } else if (
+        status &&
+        status !== "Running" &&
+        status !== "Pending" &&
+        started.has(row.index) &&
+        !ended.has(row.index)
+      ) {
+        ended.add(row.index);
         if (status === "Ok") {
           props.current.announce(
-            `${numbered ? `Step ${row.index}` : row.command} done in ${spoken(at - time.start)}`,
+            `${numbered ? `Step ${row.index}` : row.command} done${
+              timing?.kind === "took" ? ` in ${spoken(timing.durationMs)}` : ""
+            }`,
           );
         }
       }
     }
-    if (changed) {
-      seen.current.times = next;
-      setTimes(next);
-    }
     if (watching(state) && seen.current.watchStart === null) {
+      const at = Date.now();
       seen.current.watchStart = at;
       setWatchStart(at);
       props.current.announce(`Log watch started, ${spoken(state.watchWindowMs ?? 0)}`);
@@ -201,7 +202,6 @@ export function Running({
               const status = row.progress?.status;
               const lines = log?.output.filter((line) => row.owns(line.source)) ?? [];
               const expanded = lines.length > 0 && (open[row.index] ?? status === "Running");
-              const time = times[row.index];
               return (
                 <li key={row.index}>
                   <button
@@ -215,8 +215,8 @@ export function Running({
                     </span>
                     <span className="recipe-index mono muted">{row.index}</span>
                     <code>{row.command}</code>
-                    {time && (
-                      <span className="elapsed muted">{elapsed((time.end ?? Math.max(now, time.start)) - time.start)}</span>
+                    {row.progress?.timing && (
+                      <StepTime timing={row.progress.timing} className="elapsed muted" />
                     )}
                   </button>
                   {expanded && <Output label={`Output of step ${row.index}`} lines={lines} />}

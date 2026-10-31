@@ -107,6 +107,33 @@ describe("receipt slips", () => {
     expect(screen.getByRole("button", { name: "Copy slip attach staging" })).toBeInTheDocument();
   });
 
+  test("a finished step shows how long it took", () => {
+    show(slipOf(cellAt("/Users/you/code/shop", "staging").receipt));
+    const steps = within(screen.getByRole("list")).getAllByRole("listitem");
+    expect(steps[0]).toHaveTextContent("0git merge --ff-only · 1s");
+    expect(steps[1]).toHaveTextContent(/migrate --force · 48s$/);
+  });
+
+  test("a step whose end was not seen says when it started, without alarm colour", () => {
+    show(fixtures.slips.unfinished);
+    const steps = within(screen.getByRole("list")).getAllByRole("listitem");
+    const note = within(steps[1]).getByText(
+      (_, el) => el?.tagName === "SPAN" && /^started \d\d:\d\d.*, end not known$/.test(el.textContent ?? ""),
+    );
+    expect(note).toHaveClass("muted");
+    expect(note).not.toHaveClass("tone-bad");
+    expect(note.querySelector("time")).toHaveAttribute("title", expect.stringMatching(/ UTC$/));
+  });
+
+  test("steps with no recorded times show nothing extra; maintenance shows its own", () => {
+    show(slipOf(cellAt("/Users/you/code/api", "production").lastAttempt!.receipt));
+    const steps = within(screen.getByRole("list")).getAllByRole("listitem");
+    expect(steps[0]).toHaveTextContent(/^onMaintenance on: php artisan down · 1s$/);
+    for (const step of steps.slice(1)) {
+      expect(step).not.toHaveTextContent(/\d+s$|end not known/);
+    }
+  });
+
   test("an env with shell characters gets no command box, only the copy-by-hand note", () => {
     show(fixtures.slips.copyWithheld);
     expect(screen.queryByRole("button", { name: /^Copy/ })).not.toBeInTheDocument();
