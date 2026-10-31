@@ -27,7 +27,7 @@ vi.mock("./api", () => ({
 }));
 const loadMap = vi.fn<() => Promise<LoadResult>>();
 
-const SUBTITLE = "Last recorded code on each app and environment. Deploys started here show live.";
+const SUBTITLE = "What this Mac recorded for each app and environment";
 
 /** Sentences that would claim what a server is running right now. */
 const LIVE_CLAIMS: RegExp[] = [

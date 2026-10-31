@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import * as fixtures from "./fixtures.gen";
-import { applyBatch, endSentence, OUTPUT_LINES, runRows, watching } from "./run";
+import { applyBatch, endSentence, OUTPUT_LINES, progressLine, runRows, watching } from "./run";
 import type { OutputLine, RunBatch } from "./types";
 
 const line = (sequence: number): OutputLine => ({
@@ -83,5 +83,21 @@ test("each way a run ends has one sentence", () => {
   );
   expect(endSentence({ kind: "error", reason: "The event stream closed." })).toBe(
     "The event stream closed.",
+  );
+});
+
+test("the running header says which step of how many, and what maintenance mode is", () => {
+  const info = fixtures.runInfo;
+  const line = (state: RunBatch["state"]) => progressLine(info, state, runRows(info, state));
+  const { state } = fixtures.runBatches.running;
+  expect(line(state)).toBe(`Step 1 of ${info.steps.length} · app in maintenance mode`);
+  expect(line({ ...state, steps: {}, maintenanceDown: { name: null, status: "Running", exitCode: null } })).toBe(
+    "Turning maintenance on",
+  );
+  expect(
+    line({ ...state, steps: {}, maintenanceDown: { name: null, status: "Unknown", exitCode: null } }),
+  ).toBe("maintenance mode not known");
+  expect(line({ ...state, steps: {}, maintenanceUp: { name: null, status: "Ok", exitCode: null } })).toBe(
+    "maintenance off",
   );
 });

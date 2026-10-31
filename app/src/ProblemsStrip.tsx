@@ -17,9 +17,11 @@ function summary(problems: ProblemView[]): string {
 interface Props {
   problems: ProblemView[];
   onSelect?: (row: number, col: number) => void;
+  /** Names the cell a problem's button selects, e.g. "billing · production". */
+  cellName?: (row: number, col: number) => string;
 }
 
-export function ProblemsStrip({ problems, onSelect }: Props) {
+export function ProblemsStrip({ problems, onSelect, cellName }: Props) {
   const [open, setOpen] = useState(false);
   if (problems.length === 0) {
     return null;
@@ -34,10 +36,12 @@ export function ProblemsStrip({ problems, onSelect }: Props) {
           const cell = problem.cells[0];
           return (
             <div className="banner-item" key={index}>
-              <span className="mono banner-detail">{problem.message}</span>
+              <span className="mono banner-detail" title={problem.message}>
+                {problem.message}
+              </span>
               {cell && onSelect && (
                 <button type="button" className="link" onClick={() => onSelect(cell.row, cell.col)}>
-                  Select cell
+                  {cellName ? `Select ${cellName(cell.row, cell.col)}` : "Select cell"}
                 </button>
               )}
             </div>

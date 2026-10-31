@@ -25,10 +25,12 @@ vi.mock("./api", () => ({
 
 const map = fixtures.map.kind === "loaded" ? fixtures.map.map : (null as never);
 
+/** The receipt a cell opens on: its failed latest attempt, else its code run. */
 function runId(repoRoot: string, env: string): string {
   const cell = map.rows.find((r) => r.repoRoot === repoRoot)!.cells[map.envs.indexOf(env)];
   if (cell.kind !== "present") throw new Error("absent");
-  const opened = fixtures.receipts[String(cell.receipt)];
+  const risky = cell.lastAttempt?.outcome.tone === "bad";
+  const opened = fixtures.receipts[String(risky ? cell.lastAttempt!.receipt : cell.receipt)];
   if (opened.kind !== "opened" || opened.slip.kind !== "receipt") throw new Error("no receipt");
   return opened.slip.runId;
 }

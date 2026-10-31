@@ -3,10 +3,11 @@ import { useAnnouncer } from "./Announcer";
 import { ComparePicker } from "./ComparePicker";
 import { liveText } from "./Cell";
 import { DeployEntryBar, useDeployEntry, type EntryChoice } from "./DeployEntry";
-import { Footer } from "./Footer";
+import { InspectorHead } from "./Inspector";
 import { MapArea } from "./MapArea";
 import { useNarrow, usePaneWidth } from "./pane";
 import { ReceiptPane, type SlipMeta } from "./ReceiptPane";
+import { Sidebar } from "./Sidebar";
 import { target, type PaneView } from "./slipTarget";
 import { useCompare } from "./useCompare";
 import { useReceipt, type Request } from "./useReceipt";
@@ -15,6 +16,8 @@ import { useSeen } from "./useSeen";
 import { useLiveRuns } from "./useLiveRuns";
 import { useSelection } from "./useSelection";
 import { Workspace, type DeployTarget, type Leave, type Start } from "./Workspace";
+import { notify } from "./notify";
+import { twinFolder } from "./text";
 import { deploy } from "./deployApi";
 import type { RunInfo } from "./types";
 
@@ -31,21 +34,22 @@ export default function App() {
   const { selected, select } = useSelection(map);
   const { pair, setPair, lines } = useCompare(loaded);
   const { width, resize } = usePaneWidth();
-  const narrow = useNarrow();
+  const narrow = useNarrow(width);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [paneView, setPaneView] = useState<{ key: string; view: PaneView } | null>(null);
+  /** The cell whose run just ended: its new receipt slides up into the pane. */
+  const [printFor, setPrintFor] = useState<string | null>(null);
   /** Set by a keyboard open; the pane focuses the slip once it shows that receipt. */
   const [focusReceipt, setFocusReceipt] = useState(false);
   const [workspace, setWorkspace] = useState<{ target: DeployTarget; start: Start } | null>(null);
-  /** Leaving the workspace returns focus to "Review deploy…", or to the
-   * toolbar's run link when a run keeps going. */
+  /** Leaving the workspace returns focus to the deploy button, or to the
+   * sidebar's run link when a run keeps going. */
   const [focusEntry, setFocusEntry] = useState<"entry" | "runs" | null>(null);
   const entryButton = useRef<HTMLButtonElement>(null);
   const runsButton = useRef<HTMLButtonElement>(null);
-  /** Asks "Review deploy…" again after approvals and runs. */
+  /** Asks for the deploy entry again after approvals and runs. */
   const [entryVersion, setEntryVersion] = useState(0);
   const [approved, setApproved] = useState<{ key: string; env: string } | null>(null);
-  const [runsMenu, setRunsMenu] = useState(false);
   const { announce, regions } = useAnnouncer();
   const selectedRef = useRef(selected);
   const narrowRef = useRef(narrow);
@@ -57,9 +61,11 @@ export default function App() {
   }, [selected, narrow, workspace]);
 
   const selectedKey = selected ? cellKey(selected.repoRoot, selected.env) : null;
-  const view = paneView?.key === selectedKey ? paneView.view : "code";
   const row = selected && map ? map.rows[selected.row] : undefined;
   const cell = selected ? row?.cells[selected.col] : undefined;
+  // Latest risk first: a failed last attempt opens before the older success.
+  const riskFirst: PaneView = cell?.kind === "present" && cell.lastAttempt?.outcome.tone === "bad" ? "last" : "code";
+  const view = paneView?.key === selectedKey ? paneView.view : riskFirst;
   let request: Request<SlipMeta> | null = null;
   if (loaded && selected && row && cell?.kind === "present") {
     const opens = target(cell, view);
@@ -79,10 +85,18 @@ export default function App() {
   );
   // A run that ended away from the workspace shows on its cell; the selection stays.
   const { live, now } = useLiveRuns(
-    useCallback(() => {
-      refresh();
-      setEntryVersion((v) => v + 1);
-    }, [refresh]),
+    useCallback(
+      (ended: RunInfo[]) => {
+        refresh();
+        setEntryVersion((v) => v + 1);
+        // A run followed in the workspace tells its own end.
+        if (workspaceRef.current) return;
+        for (const run of ended) {
+          void notify(`${run.project} → ${run.env}`, "The run ended. Its receipt is on the release map.");
+        }
+      },
+      [refresh],
+    ),
   );
   const liveLines: Record<string, string> = {};
   for (const run of live.runs) liveLines[cellKey(run.checkout, run.env)] = liveText(run, now);
@@ -105,6 +119,7 @@ export default function App() {
       row: selected.row,
       env: selected.env,
       label: row.label,
+      folder: map ? twinFolder(map.rows.map((x) => x.label), row.label, row.repoRoot) : null,
       production: entry.production,
     };
     let start: Start;
@@ -118,7 +133,6 @@ export default function App() {
   };
   /** The toolbar's way back to a run: its cell is selected, then its run shown. */
   const follow = (run: RunInfo) => {
-    setRunsMenu(false);
     const r = map?.rows.findIndex((x) => x.repoRoot === run.checkout) ?? -1;
     const col = map?.envs.indexOf(run.env) ?? -1;
     if (map && r >= 0 && col >= 0 && map.rows[r].cells[col].kind === "present") select(r, col);
@@ -128,6 +142,7 @@ export default function App() {
         row: r,
         env: run.env,
         label: r >= 0 && map ? map.rows[r].label : run.project,
+        folder: map ? twinFolder(map.rows.map((x) => x.label), run.project, run.checkout) : null,
         production: run.production,
       },
       start: { kind: "follow", info: run },
@@ -143,7 +158,9 @@ export default function App() {
         setApproved({ key: selectedKey ?? "", env: left.target.env });
       }
       if (how === "finished") {
-        // The new receipt opens in the pane, on the same cell.
+        // The new receipt opens in the pane, on the same cell, risk first.
+        setPaneView(null);
+        setPrintFor(selectedKey);
         setDrawerOpen(true);
         refresh();
       }
@@ -158,10 +175,11 @@ export default function App() {
   }, [focusEntry, entry, live]);
 
   const onSelect = useCallback(
-    (r: number, col: number, next: PaneView = "code") => {
+    (r: number, col: number, next?: PaneView) => {
       if (!map) return;
       select(r, col);
-      setPaneView({ key: cellKey(map.rows[r].repoRoot, map.envs[col]), view: next });
+      setPrintFor(null);
+      setPaneView(next ? { key: cellKey(map.rows[r].repoRoot, map.envs[col]), view: next } : null);
       setDrawerOpen(true);
       setFocusReceipt(false);
     },
@@ -213,58 +231,41 @@ export default function App() {
   useSeen(shown?.opened.kind === "receipt" ? shown.opened.runId : null);
   return (
     <div className="window">
+      <Sidebar
+        state={state}
+        onRetry={refresh}
+        runs={live.runs}
+        busy={workspace !== null}
+        now={now}
+        onFollow={follow}
+        runsButton={runsButton}
+        onProblem={onProblem}
+        live={liveLines}
+      />
       <main className="main">
-        <header className="toolbar">
-          <span className="wordmark">Shipslip</span>
-          {map?.screen === "map" && !workspace && (
-            <ComparePicker envs={map.envs} pair={pair} onChange={setPair} />
-          )}
-          {!workspace && live.runs.length === 1 && (
-            <button
-              type="button"
-              ref={runsButton}
-              className="toolbar-button"
-              onClick={() => follow(live.runs[0])}
-            >
-              1 deploy running · {live.runs[0].project} → {live.runs[0].env}
-            </button>
-          )}
-          {!workspace && live.runs.length > 1 && (
-            <div className="runs-menu">
+        {!workspace && (
+          <header className="toolbar" data-tauri-drag-region>
+            <h1 className="toolbar-title" data-tauri-drag-region>
+              Release map
+            </h1>
+            <p className="toolbar-subtitle muted" data-tauri-drag-region>
+              What this Mac recorded for each app and environment
+            </p>
+            {map?.screen === "map" && (
+              <ComparePicker envs={map.envs} pair={pair} onChange={setPair} />
+            )}
+            {narrow && request && (
               <button
                 type="button"
-                ref={runsButton}
                 className="toolbar-button"
-                aria-expanded={runsMenu}
-                aria-controls="runs-menu-list"
-                onClick={() => setRunsMenu(!runsMenu)}
+                aria-expanded={drawerOpen}
+                onClick={() => setDrawerOpen(!drawerOpen)}
               >
-                {live.runs.length} deploys running <span aria-hidden>▾</span>
+                Receipt <kbd className="muted">⌘I</kbd>
               </button>
-              {runsMenu && (
-                <ul id="runs-menu-list" className="runs-menu-list">
-                  {live.runs.map((run) => (
-                    <li key={run.handle}>
-                      <button type="button" className="toolbar-button" onClick={() => follow(run)}>
-                        {run.project} → {run.env}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          )}
-          {narrow && request && !workspace && (
-            <button
-              type="button"
-              className="toolbar-button"
-              aria-expanded={drawerOpen}
-              onClick={() => setDrawerOpen(!drawerOpen)}
-            >
-              Receipt <kbd className="muted">⌘I</kbd>
-            </button>
-          )}
-        </header>
+            )}
+          </header>
+        )}
         {workspace ? (
           <Workspace
             target={workspace.target}
@@ -274,12 +275,6 @@ export default function App() {
           />
         ) : (
           <>
-            <div className="title">
-              <h1>Release map</h1>
-              <p className="muted">
-                Last recorded code on each app and environment. Deploys started here show live.
-              </p>
-            </div>
             <div className="map-area">
               <MapArea
                 state={state}
@@ -287,13 +282,11 @@ export default function App() {
                 selected={selected}
                 onSelect={onSelect}
                 onEnter={onEnter}
-                onProblem={onProblem}
                 onCellFocus={onCellFocus}
                 compare={pair ? { pair, lines } : null}
                 live={liveLines}
               />
             </div>
-            <Footer state={state} onRetry={refresh} />
           </>
         )}
       </main>
@@ -303,14 +296,24 @@ export default function App() {
           focusSlip={focusReceipt}
           onSlipFocused={() => setFocusReceipt(false)}
           opening={request.meta}
+          print={printFor === selectedKey}
           receipt={receipt}
           onView={onView}
           width={width}
           onResize={resize}
           drawer={narrow}
+          head={
+            <InspectorHead
+              cell={request.meta.cell}
+              label={request.meta.label}
+              env={request.meta.env}
+              production={entry?.kind === "ready" && entry.production}
+            />
+          }
           entry={
             <DeployEntryBar
               entry={entry}
+              target={{ label: request.meta.label, env: request.meta.env }}
               notice={notice}
               onChoose={onChoose}
               onOpenConfig={() =>

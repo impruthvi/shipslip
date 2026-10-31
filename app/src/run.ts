@@ -57,13 +57,13 @@ export function runRows(info: RunInfo, state: RunState): RunRow[] {
   const rows: RunRow[] = [];
   const on: RunRow = {
     index: "on",
-    command: "Maintenance on: php artisan down",
+    command: "php artisan down",
     progress: state.maintenanceDown,
     owns: (s) => s.kind === "maintenance" && s.phase === "Down",
   };
   const off: RunRow = {
     index: "off",
-    command: "Maintenance off: php artisan up",
+    command: "php artisan up",
     progress: state.maintenanceUp,
     owns: (s) => s.kind === "maintenance" && s.phase === "Up",
   };
@@ -87,6 +87,23 @@ export function runRows(info: RunInfo, state: RunState): RunRow[] {
 /** The log watch is on: started, not yet finished. */
 export function watching(state: RunState): boolean {
   return state.watchWindowMs !== null && state.watch === null && state.terminal === null;
+}
+
+/** Where a run is, e.g. "Step 2 of 3 · app in maintenance mode". */
+export function progressLine(info: RunInfo, state: RunState, rows: RunRow[]): string {
+  const parts: string[] = [];
+  const current = rows.find((row) => row.progress?.status === "Running");
+  if (current?.index === "on") parts.push("Turning maintenance on");
+  else if (current?.index === "off") parts.push("Turning maintenance off");
+  else if (current?.index === "0") parts.push("Updating the code (step 0)");
+  else if (current) parts.push(`Step ${current.index} of ${info.steps.length}`);
+  else if (watching(state)) parts.push("Watching the log");
+  const down = state.maintenanceDown?.status;
+  const up = state.maintenanceUp?.status;
+  if (up === "Ok") parts.push("maintenance off");
+  else if (down === "Unknown" || up === "Unknown") parts.push("maintenance mode not known");
+  else if (down === "Ok") parts.push("app in maintenance mode");
+  return parts.join(" · ");
 }
 
 /** The one sentence a finished, stopped or lost run ends with. */

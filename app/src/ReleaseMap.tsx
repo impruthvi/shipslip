@@ -6,7 +6,7 @@ import { first, move, type Pos } from "./gridKeys";
 import { Legend } from "./Legend";
 import type { PaneView } from "./slipTarget";
 import type { Selection } from "./selection";
-import { shortPath } from "./text";
+import { parentDir, shortPath, tailPath } from "./text";
 import type { MapView } from "./types";
 
 export interface Compare {
@@ -57,6 +57,8 @@ export function ReleaseMap({
   const grid = useRef<HTMLDivElement>(null);
   const [focusKey, setFocusKey] = useState<FocusKey | null>(null);
   const active = resolve(map, focusKey, selected);
+  const labels = map.rows.map((row) => row.label);
+  const twin = (label: string) => labels.indexOf(label) !== labels.lastIndexOf(label);
 
   const focusCell = ({ row, col }: Pos) => {
     grid.current?.querySelector<HTMLElement>(`[data-row="${row}"][data-col="${col}"]`)?.focus();
@@ -91,19 +93,32 @@ export function ReleaseMap({
               App
             </div>
             {map.envs.map((env, col) => (
-              <div className="grid-env caps grid-head" role="columnheader" key={env}>
-                {col === source && <SourceMarker />}
-                {col === target && <TargetMarker />}
-                {env}
+              <div className="grid-env grid-head" role="columnheader" key={env}>
+                <span className="grid-head-env caps">
+                  {col === source && <SourceMarker />}
+                  {col === target && <TargetMarker />}
+                  {env}
+                </span>
+                <span className="grid-subheads muted" aria-hidden>
+                  <span />
+                  <span>Status</span>
+                  <span>Commit</span>
+                  <span>Age</span>
+                </span>
               </div>
             ))}
           </div>
           {map.rows.map((row, r) => (
-            <div className={`grid-row${row.pathMissing ? " row-gone" : ""}`} role="row" key={row.repoRoot}>
+            <div
+              className={`grid-row${row.pathMissing ? " row-gone" : ""}${selected?.row === r ? " grid-row-open" : ""}${twin(row.label) ? " grid-row-twin" : ""}`}
+              role="row"
+              key={row.repoRoot}
+            >
               <div className="grid-app" role="rowheader">
                 <div className="app-name">{row.label}</div>
                 <div className="mono muted app-path" title={row.repoRoot}>
-                  {shortPath(row.repoRoot)}
+                  {/* Same-named apps differ by the folder they sit in. */}
+                  {twin(row.label) ? `in ${tailPath(parentDir(row.repoRoot))}` : shortPath(row.repoRoot)}
                 </div>
                 {row.pathMissing && <div className="muted app-gone">checkout not found</div>}
               </div>
@@ -132,13 +147,18 @@ export function ReleaseMap({
                     }
                     onClick={isPresent ? () => onSelect?.(r, col) : undefined}
                   >
+                    {cell.kind === "absent" && (
+                      <span className="cell-absent muted" aria-hidden>
+                        —
+                      </span>
+                    )}
                     {cell.kind === "present" && (
                       <Cell
                         cell={cell}
                         selected={isSelected}
                         compareLine={compareLine}
-                        onOpen={onSelect && ((view) => onSelect(r, col, view))}
                         live={liveLine}
+                        expanded={selected?.row === r}
                       />
                     )}
                   </div>

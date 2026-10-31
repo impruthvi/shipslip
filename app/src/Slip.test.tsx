@@ -45,14 +45,15 @@ function show(opened: Opened, cell = cellAt("/Users/you/code/shop", "staging")) 
 }
 
 describe("receipt slips", () => {
-  test("failed at a step: ✗ on it, later steps not run, the step output, two command boxes", () => {
+  test("failed at a step: failed mark on it, later steps not run, the step output, two command boxes", () => {
     const failed = slipOf(cellAt("/Users/you/code/billing", "staging").receipt);
     show(failed);
     expect(screen.getByRole("heading", { name: "billing · staging" })).toBeInTheDocument();
     expect(screen.getByText("Failed at step 1")).toHaveClass("tone-bad");
     expect(screen.getByText("Deploy failed at step 1.")).toBeInTheDocument();
     const steps = within(screen.getByRole("list")).getAllByRole("listitem");
-    expect(steps[1]).toHaveTextContent("✗1php artisan migrate --force · failed · exit 1");
+    expect(steps[1]).toHaveTextContent("1php artisan migrate --force · failed · exit 1");
+    expect(within(steps[1]).getByRole("img", { hidden: true, name: "failed" })).toBeInTheDocument();
     expect(steps[1]).toHaveTextContent("SQLSTATE[42000]");
     expect(screen.getAllByRole("button", { name: /^Copy / }).map((b) => b.getAttribute("aria-label"))).toEqual([
       "Copy slip from-step staging 1",

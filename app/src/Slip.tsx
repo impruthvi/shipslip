@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { CommandBox } from "./CommandBox";
+import { StepIcon } from "./Mark";
 import type { Context, PaneView } from "./slipTarget";
 import { isTime, stamp, utcStamp } from "./time";
 import type {
@@ -7,8 +8,8 @@ import type {
   FlagView,
   GroupView,
   Guidance,
+  OutcomeView,
   ReceiptView,
-  StepStatus,
   StepView,
   Tone,
   WatchView,
@@ -19,14 +20,12 @@ const toneClass: Record<Tone, string> = { good: "tone-good", bad: "tone-bad", ne
 
 const COMMITS_SHOWN = 5;
 
-const stepGlyph: Record<StepStatus, { glyph: string; className: string }> = {
-  ok: { glyph: "✓", className: "tone-good" },
-  failed: { glyph: "✗", className: "tone-bad" },
-  unknown: { glyph: "◌", className: "tone-bad" },
-  running: { glyph: "◌", className: "muted" },
-  notRun: { glyph: "–", className: "muted" },
-  skipped: { glyph: "↷", className: "muted" },
-};
+/** Red only for a step that failed; a stop or a lost result is amber. */
+function outcomeClass(outcome: OutcomeView): string {
+  if (outcome.tone === "bad" && outcome.kind !== "failed") return "tone-attention";
+  return toneClass[outcome.tone];
+}
+
 
 interface Props {
   opened: Opened;
@@ -199,7 +198,7 @@ function Facts({ receipt }: { receipt: ReceiptView }) {
     <section className="slip-section">
       <dl className="facts">
         <Fact name="Outcome">
-          <span className={`slip-outcome ${toneClass[receipt.outcome.tone]}`}>
+          <span className={`slip-outcome ${outcomeClass(receipt.outcome)}`}>
             {receipt.outcome.text}
           </span>
         </Fact>
@@ -242,17 +241,18 @@ function Steps({ steps }: { steps: StepView[] }) {
     <section className="slip-section">
       <ol className="steps mono">
         {steps.map((step) => {
-          const { glyph, className } = stepGlyph[step.status];
           const words = step.label.split(" ").slice(1).join(" ");
           const loud = step.status === "failed" || step.status === "unknown";
           return (
             <li key={step.index} className={`step${step.status === "notRun" ? " muted" : ""}`}>
-              <span className={`step-glyph ${className}`} aria-hidden>
-                {glyph}
+              <span className="step-glyph" aria-hidden>
+                <StepIcon kind={step.status} />
               </span>
               <span className="step-index muted">{step.index}</span>
               <div className="step-body">
-                <span className={loud ? "tone-bad step-loud" : ""}>{step.command}</span>
+                <span className={loud ? `${step.status === "unknown" ? "tone-attention" : "tone-bad"} step-loud` : ""}>
+                  {step.command}
+                </span>
                 {step.status !== "ok" && (
                   <span className="muted">
                     {" · "}

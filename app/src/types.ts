@@ -24,9 +24,20 @@ export type Mark = "recorded" | "incomplete" | "observed" | "notKnown" | "noCode
 
 export type Tone = "good" | "bad" | "neutral";
 
+export type OutcomeKind =
+  | "succeeded"
+  | "failed"
+  | "stopped"
+  | "stoppedInMaintenance"
+  | "cancelled"
+  | "unknown"
+  | "unfinished";
+
 export interface OutcomeView {
   text: string;
   tone: Tone;
+  /** How the run ended, for the map's status word. */
+  kind: OutcomeKind;
 }
 
 export interface FlagView {
@@ -34,7 +45,16 @@ export interface FlagView {
   newErrors: boolean;
   /** New errors, a failed smoke check, or the app left in maintenance mode. */
   bad: boolean;
+  kind: FlagKind;
 }
+
+export type FlagKind =
+  | "newErrors"
+  | "logNotFullyObserved"
+  | "logNotRecorded"
+  | "smokeFailed"
+  | "smokeNotRecorded"
+  | "appLeftDown";
 
 export interface EnvCellView {
   mark: Mark;

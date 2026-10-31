@@ -8,7 +8,7 @@ const VERB: Record<QuitRun["operation"], string> = {
   attach: "finishing a resumed run",
 };
 
-/** Asks before Quit, Cmd-Q or Dock Quit cuts a live run short. */
+/** Asks before Quit, Cmd-Q or Dock Quit cuts a run short. */
 export default function QuitDialog() {
   const [runs, setRuns] = useState<QuitRun[] | null>(null);
   const [leaving, setLeaving] = useState(false);
@@ -61,7 +61,7 @@ export default function QuitDialog() {
     ? "Finishing safely…"
     : runs.length === 1
       ? `Quit while ${first.project} → ${first.env} is ${VERB[first.operation]}?`
-      : `Quit while ${runs.length} runs are live?`;
+      : `Quit while ${runs.length} runs are going?`;
   const detach = () => {
     leavingRef.current = true;
     setLeaving(true);

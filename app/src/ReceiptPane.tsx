@@ -1,6 +1,6 @@
 import { useEffect, useRef, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { PANE_MAX, PANE_MIN } from "./pane";
-import { context, type PaneView, type Target } from "./slipTarget";
+import { context, type Context, type PaneView, type Target } from "./slipTarget";
 import { Slip } from "./Slip";
 import type { EnvCellView } from "./types";
 import type { Opened, ReceiptState } from "./useReceipt";
@@ -21,15 +21,20 @@ interface Props {
   /** A keyboard open asked for focus on the slip. */
   focusSlip: boolean;
   onSlipFocused: () => void;
-  /** The cell being opened, named while a slow read is under way. */
-  opening: { label: string; env: string };
+  /** The cell being opened: named while a slow read is under way, and its
+   * receipts offered as tabs. */
+  opening: SlipMeta;
   receipt: ReceiptState<SlipMeta>;
   onView: (view: PaneView) => void;
   width: number;
   onResize: (width: number) => void;
   /** Drawer mode: over the map instead of beside it. */
   drawer: boolean;
-  /** "Review deploy…", above the slip. */
+  /** A run just ended here: its receipt slides up as it shows. */
+  print?: boolean;
+  /** Which app and env, its target and warnings, at the top. */
+  head?: ReactNode;
+  /** The deploy button and recovery choices, above the slip. */
   entry?: ReactNode;
 }
 
@@ -48,6 +53,8 @@ export function ReceiptPane({
   width,
   onResize,
   drawer,
+  print = false,
+  head,
   entry,
 }: Props) {
   const drag = useRef<{ x: number; width: number } | null>(null);
@@ -85,6 +92,7 @@ export function ReceiptPane({
       style={{ width }}
       aria-label="Receipt"
     >
+      {!drawer && <div className="pane-drag" data-tauri-drag-region />}
       <div
         className="pane-handle"
         role="separator"
@@ -101,25 +109,98 @@ export function ReceiptPane({
         onLostPointerCapture={onPointerUp}
         onKeyDown={onKeyDown}
       />
+      {head}
       {entry}
+      <ReceiptTabs cell={next.cell} role={next.role} onView={onView} />
       {opening && (
         <p className="pane-opening muted">
           Opening receipt for {next.label} · {next.env}…
         </p>
       )}
       {shown && (
-        <div className={`pane-slip${opening ? " pane-slip-dim" : ""}`} aria-busy={opening}>
+        <div
+          id="receipt-panel"
+          className={`pane-slip${opening ? " pane-slip-dim" : ""}${print ? " pane-slip-print" : ""}`}
+          aria-busy={opening}
+          role={tabs(next.cell).length > 1 ? "tabpanel" : undefined}
+          aria-labelledby={tabs(next.cell).length > 1 ? `receipt-tab-${next.role}` : undefined}
+        >
           <Slip
             key={slipKey(shown.key, shown.opened)}
             opened={shown.opened}
             cell={shown.meta.cell}
             label={shown.meta.label}
             env={shown.meta.env}
-            context={context(shown.meta.cell, shown.meta.role)}
+            context={withoutLinks(context(shown.meta.cell, shown.meta.role), shown.meta.cell)}
             onView={onView}
           />
         </div>
       )}
     </aside>
+  );
+}
+
+interface Tab {
+  role: "last" | "code" | "stale";
+  view: PaneView;
+  text: string;
+}
+
+/** The cell's receipts, latest risk first. */
+function tabs(cell: EnvCellView): Tab[] {
+  const all: [boolean, Tab][] = [
+    [cell.lastAttempt !== null, { role: "last", view: "last", text: "Latest attempt" }],
+    [cell.receipt !== null && cell.mark !== "noCode", { role: "code", view: "code", text: "Recorded code" }],
+    [cell.staleReceipt !== null, { role: "stale", view: "stale", text: "Unreadable newer" }],
+  ];
+  return all.flatMap(([ok, tab]) => (ok ? [tab] : []));
+}
+
+/** The tabs already lead to the other receipts; the slip keeps its words. */
+function withoutLinks(found: Context | null, cell: EnvCellView): Context | null {
+  return found && tabs(cell).length > 1 ? { ...found, links: [] } : found;
+}
+
+function ReceiptTabs({
+  cell,
+  role,
+  onView,
+}: {
+  cell: EnvCellView;
+  role: Target["role"];
+  onView: (view: PaneView) => void;
+}) {
+  const list = tabs(cell);
+  if (list.length < 2) return null;
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const at = list.findIndex((tab) => tab.role === role);
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+    if (step === undefined) return;
+    event.preventDefault();
+    const next = list[(at + step + list.length) % list.length];
+    onView(next.view);
+    event.currentTarget.querySelector<HTMLElement>(`#receipt-tab-${next.role}`)?.focus();
+  };
+  return (
+    <div className="tabs" role="tablist" aria-label="Receipts for this cell" onKeyDown={onKeyDown}>
+      {list.map((tab) => {
+        const selected = tab.role === role;
+        return (
+          <button
+            type="button"
+            role="tab"
+            id={`receipt-tab-${tab.role}`}
+            key={tab.role}
+            className="tab"
+            aria-selected={selected}
+            aria-controls="receipt-panel"
+            tabIndex={selected ? 0 : -1}
+            onClick={() => onView(tab.view)}
+          >
+            {tab.text}
+          </button>
+        );
+      })}
+    </div>
   );
 }

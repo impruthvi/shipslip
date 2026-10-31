@@ -64,30 +64,40 @@ async function settle() {
 
 const pane = () => screen.getByRole("complementary", { name: "Receipt" });
 
-test("the selected cell's code-run receipt opens with the map's generation", async () => {
+test("a failed latest attempt opens before the older success; other cells open their code run", async () => {
   render(<App />);
   await settle();
   const first = at("/Users/you/code/api", "production");
-  expect(loadReceipt).toHaveBeenLastCalledWith(loaded.generation, first.cell.receipt);
-  expect(within(pane()).getByText("Receipt behind the recorded code")).toBeInTheDocument();
+  expect(loadReceipt).toHaveBeenLastCalledWith(loaded.generation, first.cell.lastAttempt!.receipt);
+  expect(within(pane()).getByText(/^Latest attempt · /)).toBeInTheDocument();
+  expect(within(pane()).getByRole("tab", { name: "Latest attempt" })).toHaveAttribute("aria-selected", "true");
 
   fireEvent.click(gridcell("/Users/you/code/billing", "staging"));
   await settle();
+  const billing = at("/Users/you/code/billing", "staging");
+  expect(loadReceipt).toHaveBeenLastCalledWith(loaded.generation, billing.cell.receipt);
   expect(within(pane()).getByRole("heading", { name: "billing · staging" })).toBeInTheDocument();
+  expect(within(pane()).queryByRole("tablist")).not.toBeInTheDocument();
 });
 
-test("Last: opens the latest attempt; open goes back to the code run", async () => {
+test("tabs switch between the latest attempt and the recorded code; arrows move along them", async () => {
   render(<App />);
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: /^Last: stopped in maintenance/ }));
-  await settle();
   const { cell } = at("/Users/you/code/api", "production");
-  expect(loadReceipt).toHaveBeenLastCalledWith(loaded.generation, cell.lastAttempt!.receipt);
-  expect(within(pane()).getByText(/^Latest attempt/)).toBeInTheDocument();
-  fireEvent.click(within(pane()).getByRole("button", { name: "Open the receipt behind the recorded code" }));
+  const tabs = within(within(pane()).getByRole("tablist", { name: "Receipts for this cell" }));
+  expect(tabs.getAllByRole("tab").map((tab) => tab.textContent)).toEqual(["Latest attempt", "Recorded code"]);
+  expect(within(pane()).queryByRole("button", { name: "Open the receipt behind the recorded code" })).toBeNull();
+
+  fireEvent.click(tabs.getByRole("tab", { name: "Recorded code" }));
   await settle();
   expect(loadReceipt).toHaveBeenLastCalledWith(loaded.generation, cell.receipt);
   expect(within(pane()).getByText("Receipt behind the recorded code")).toBeInTheDocument();
+  expect(within(pane()).getByRole("tabpanel")).toHaveAccessibleName("Recorded code");
+
+  fireEvent.keyDown(tabs.getByRole("tab", { name: "Recorded code" }), { key: "ArrowLeft" });
+  await settle();
+  expect(loadReceipt).toHaveBeenLastCalledWith(loaded.generation, cell.lastAttempt!.receipt);
+  expect(tabs.getByRole("tab", { name: "Latest attempt" })).toHaveFocus();
 });
 
 test("an expanded error on one receipt does not stay expanded on the next", async () => {

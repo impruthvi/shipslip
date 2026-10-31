@@ -11,7 +11,7 @@ use shipslip::receipt::{
 };
 use shipslip::{ErrorGroup, WatchResult, WatchStatus};
 
-use crate::view::{flags, guidance, tone, FlagView, Guidance, OutcomeView};
+use crate::view::{flags, guidance, outcome, FlagView, Guidance, OutcomeView};
 
 /// Error groups listed before "and N more groups".
 const TOP_GROUPS: usize = 5;
@@ -179,10 +179,7 @@ fn receipt_view(receipt: &Receipt) -> ReceiptView {
     }
     ReceiptView {
         run_id: escape_field(&receipt.run_id),
-        outcome: OutcomeView {
-            text: escape_field(&badge.headline()),
-            tone: tone(&badge),
-        },
+        outcome: outcome(&badge),
         summary: receipt
             .summary()
             .filter(|_| !badge.unfinished)

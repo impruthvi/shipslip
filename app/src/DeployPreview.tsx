@@ -16,6 +16,26 @@ export function planAction(plan: RunPlan, env: string): string {
   return `Run from step ${plan.FromStep}`;
 }
 
+/** Schema changes Shipslip cannot take back. */
+const MIGRATES = /\bartisan\s+migrate\b/;
+
+/** What confirming risks, said before the confirm button. */
+export function risks(review: DeployReview): string[] {
+  const first = firstStep(review.runPlan);
+  const lines: string[] = [];
+  if (review.maintenance) {
+    lines.push(
+      "The app is in maintenance mode from before the first step until every step succeeds. If a step fails, it stays in maintenance mode.",
+    );
+  }
+  review.steps.forEach((step, i) => {
+    if (i + 1 >= first && MIGRATES.test(step)) {
+      lines.push(`Step ${i + 1} changes the database (${step}). Shipslip cannot undo it.`);
+    }
+  });
+  return lines;
+}
+
 /** What the reviewed deploy will do, and the typed confirm for production. */
 export function Preview({
   review,
@@ -108,6 +128,18 @@ export function Preview({
             Steps
           </h2>
           <ol className="recipe mono">
+            {review.maintenance && (
+              <li>
+                <span className="recipe-index muted">on</span>
+                <code>php artisan down</code>
+              </li>
+            )}
+            {deploying && (
+              <li>
+                <span className="recipe-index muted">0</span>
+                <code>git merge --ff-only {review.targetSha.slice(0, 7)}</code>
+              </li>
+            )}
             {review.steps.map((step, i) => {
               const skipped = i + 1 < first;
               return (
@@ -118,8 +150,36 @@ export function Preview({
                 </li>
               );
             })}
+            {review.maintenance && (
+              <li>
+                <span className="recipe-index muted">off</span>
+                <code>php artisan up</code>
+                <span className="muted recipe-note">once every step succeeds</span>
+              </li>
+            )}
+            {review.watchMs !== null && (
+              <li>
+                <span className="recipe-index muted">log</span>
+                <span className="recipe-watch">watch the Laravel log for {Math.round(review.watchMs / 60_000)} min</span>
+              </li>
+            )}
           </ol>
         </section>
+        {canRun && (
+          <section className="workspace-section preview-risks" aria-labelledby="preview-risks">
+            <h2 id="preview-risks" className="caps">
+              Before you confirm
+            </h2>
+            {risks(review).length > 0 && (
+              <ul>
+                {risks(review).map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            )}
+            <p className="muted">A failed step stops the run. Nothing is retried or rolled back automatically.</p>
+          </section>
+        )}
         <p className="workspace-section muted">
           Server lock held since {clock(lockedAt)} · Back releases it
         </p>

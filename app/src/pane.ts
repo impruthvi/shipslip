@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
 
-export const PANE_MIN = 360;
+export const PANE_MIN = 340;
 export const PANE_MAX = 560;
-export const PANE_DEFAULT = 460;
-/** Below this window width the pane becomes a drawer. */
-export const DRAWER_BELOW = 1200;
+export const PANE_DEFAULT = 380;
+/** Sidebar (200), main padding (40), app column (150), two environment
+ * columns (232 each), and their gaps (16). Keep in sync with styles.css. */
+const BOARD_WIDTH = 870;
 
 const WIDTH_KEY = "shipslip.paneWidth";
 
@@ -27,21 +28,18 @@ export function usePaneWidth() {
   return { width, resize };
 }
 
-function query(): MediaQueryList | null {
+function query(width: number): MediaQueryList | null {
   return typeof window.matchMedia === "function"
-    ? window.matchMedia(`(max-width: ${DRAWER_BELOW - 1}px)`)
+    ? window.matchMedia(`(max-width: ${BOARD_WIDTH + width - 1}px)`)
     : null;
 }
 
 /** True while the window is too narrow for the pane beside the map. */
-export function useNarrow(): boolean {
-  const [narrow, setNarrow] = useState(() => query()?.matches ?? false);
-  useEffect(() => {
-    const list = query();
-    if (!list) return;
-    const onChange = () => setNarrow(list.matches);
-    list.addEventListener("change", onChange);
-    return () => list.removeEventListener("change", onChange);
-  }, []);
-  return narrow;
+export function useNarrow(width = PANE_DEFAULT): boolean {
+  const list = useMemo(() => query(width), [width]);
+  const subscribe = useCallback((onChange: () => void) => {
+    list?.addEventListener("change", onChange);
+    return () => list?.removeEventListener("change", onChange);
+  }, [list]);
+  return useSyncExternalStore(subscribe, () => list?.matches ?? false, () => false);
 }

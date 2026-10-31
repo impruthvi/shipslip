@@ -45,7 +45,8 @@ export const map: LoadResult = {
             "evidence": [],
             "outcome": {
               "text": "Succeeded",
-              "tone": "good"
+              "tone": "good",
+              "kind": "succeeded"
             },
             "flags": [],
             "target": "production1:/var/www/api",
@@ -57,13 +58,15 @@ export const map: LoadResult = {
               "receipt": 1,
               "outcome": {
                 "text": "Stopped in maintenance mode, no steps ran",
-                "tone": "bad"
+                "tone": "bad",
+                "kind": "stoppedInMaintenance"
               },
               "flags": [
                 {
                   "text": "app may be in maintenance mode",
                   "newErrors": false,
-                  "bad": true
+                  "bad": true,
+                  "kind": "appLeftDown"
                 }
               ],
               "atMs": 1791793800000,
@@ -86,7 +89,8 @@ export const map: LoadResult = {
             ],
             "outcome": {
               "text": "Failed at step 1",
-              "tone": "bad"
+              "tone": "bad",
+              "kind": "failed"
             },
             "flags": [],
             "target": "staging1:/var/www/api",
@@ -117,7 +121,8 @@ export const map: LoadResult = {
             "evidence": [],
             "outcome": {
               "text": "Succeeded",
-              "tone": "good"
+              "tone": "good",
+              "kind": "succeeded"
             },
             "flags": [],
             "target": "production1:/var/www/billing",
@@ -141,7 +146,8 @@ export const map: LoadResult = {
             ],
             "outcome": {
               "text": "Failed at step 1",
-              "tone": "bad"
+              "tone": "bad",
+              "kind": "failed"
             },
             "flags": [],
             "target": "staging1:/var/www/billing",
@@ -173,7 +179,8 @@ export const map: LoadResult = {
             ],
             "outcome": {
               "text": "Failed at step 0",
-              "tone": "bad"
+              "tone": "bad",
+              "kind": "failed"
             },
             "flags": [],
             "target": "production1:/var/www/blog",
@@ -228,7 +235,8 @@ export const map: LoadResult = {
             "evidence": [],
             "outcome": {
               "text": "Succeeded",
-              "tone": "good"
+              "tone": "good",
+              "kind": "succeeded"
             },
             "flags": [],
             "target": "staging1:/var/www/shop",
@@ -257,7 +265,8 @@ export const map: LoadResult = {
             "evidence": [],
             "outcome": {
               "text": "Succeeded",
-              "tone": "good"
+              "tone": "good",
+              "kind": "succeeded"
             },
             "flags": [],
             "target": "production1:/var/www/shop",
@@ -269,7 +278,8 @@ export const map: LoadResult = {
               "receipt": 9,
               "outcome": {
                 "text": "Cancelled before changes",
-                "tone": "neutral"
+                "tone": "neutral",
+                "kind": "cancelled"
               },
               "flags": [],
               "atMs": 1791792300000,
@@ -288,13 +298,15 @@ export const map: LoadResult = {
             "evidence": [],
             "outcome": {
               "text": "Succeeded",
-              "tone": "good"
+              "tone": "good",
+              "kind": "succeeded"
             },
             "flags": [
               {
                 "text": "2 new error groups after this run",
                 "newErrors": true,
-                "bad": true
+                "bad": true,
+                "kind": "newErrors"
               }
             ],
             "target": "staging1:/var/www/shop",
@@ -446,7 +458,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "runId": "00000007-0",
       "outcome": {
         "text": "Succeeded",
-        "tone": "good"
+        "tone": "good",
+        "kind": "succeeded"
       },
       "summary": "Deploy run succeeded.",
       "flags": [],
@@ -513,14 +526,16 @@ export const receipts: Record<string, ReceiptResult> = {
       "runId": "00000008-0",
       "outcome": {
         "text": "Stopped in maintenance mode, no steps ran",
-        "tone": "bad"
+        "tone": "bad",
+        "kind": "stoppedInMaintenance"
       },
       "summary": "Deploy stopped after maintenance mode was turned on; no deploy steps ran: the deploy lock was taken over.",
       "flags": [
         {
           "text": "app may be in maintenance mode",
           "newErrors": false,
-          "bad": true
+          "bad": true,
+          "kind": "appLeftDown"
         }
       ],
       "project": "api",
@@ -617,14 +632,16 @@ export const receipts: Record<string, ReceiptResult> = {
       "runId": "00000001-0",
       "outcome": {
         "text": "Succeeded",
-        "tone": "good"
+        "tone": "good",
+        "kind": "succeeded"
       },
       "summary": "Deploy run succeeded.",
       "flags": [
         {
           "text": "2 new error groups after this run",
           "newErrors": true,
-          "bad": true
+          "bad": true,
+          "kind": "newErrors"
         }
       ],
       "project": "shop",
@@ -734,7 +751,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "runId": "00000009-0",
       "outcome": {
         "text": "Failed at step 1",
-        "tone": "bad"
+        "tone": "bad",
+        "kind": "failed"
       },
       "summary": "Deploy failed at step 1.",
       "flags": [],
@@ -843,7 +861,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "runId": "00000005-0",
       "outcome": {
         "text": "Succeeded",
-        "tone": "good"
+        "tone": "good",
+        "kind": "succeeded"
       },
       "summary": "Deploy run succeeded.",
       "flags": [],
@@ -919,7 +938,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "runId": "00000004-0",
       "outcome": {
         "text": "Failed at step 1",
-        "tone": "bad"
+        "tone": "bad",
+        "kind": "failed"
       },
       "summary": "Deploy failed at step 1.",
       "flags": [],
@@ -1033,7 +1053,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "runId": "00000006-0",
       "outcome": {
         "text": "Failed at step 0",
-        "tone": "bad"
+        "tone": "bad",
+        "kind": "failed"
       },
       "summary": "Deploy failed at step 0.",
       "flags": [],
@@ -1110,7 +1131,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "runId": "0000000a-0",
       "outcome": {
         "text": "Succeeded",
-        "tone": "good"
+        "tone": "good",
+        "kind": "succeeded"
       },
       "summary": "Deploy run succeeded.",
       "flags": [],
@@ -1177,7 +1199,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "runId": "00000002-0",
       "outcome": {
         "text": "Succeeded",
-        "tone": "good"
+        "tone": "good",
+        "kind": "succeeded"
       },
       "summary": "Deploy run succeeded.",
       "flags": [],
@@ -1244,7 +1267,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "runId": "00000003-0",
       "outcome": {
         "text": "Cancelled before changes",
-        "tone": "neutral"
+        "tone": "neutral",
+        "kind": "cancelled"
       },
       "summary": "Deploy was cancelled before changes.",
       "flags": [],
@@ -1341,6 +1365,7 @@ export const slips: Record<string, SlipView> = {
     "flags": [
       {
         "bad": true,
+        "kind": "appLeftDown",
         "newErrors": false,
         "text": "app may be in maintenance mode"
       }
@@ -1368,6 +1393,7 @@ export const slips: Record<string, SlipView> = {
     },
     "notes": [],
     "outcome": {
+      "kind": "succeeded",
       "text": "Succeeded",
       "tone": "good"
     },
@@ -1453,6 +1479,7 @@ export const slips: Record<string, SlipView> = {
     },
     "notes": [],
     "outcome": {
+      "kind": "unfinished",
       "text": "Unfinished",
       "tone": "bad"
     },

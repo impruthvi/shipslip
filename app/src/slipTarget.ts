@@ -1,7 +1,7 @@
 import type { EnvCellView } from "./types";
 
-/** Which of a cell's receipts the pane shows. Cells open the code run;
- * the "Last:" line and the unreadable-newer qualifier open the others. */
+/** Which of a cell's receipts the pane shows. The inspector's tabs switch
+ * between these; App chooses the latest risk when a cell first opens. */
 export type PaneView = "code" | "last" | "stale";
 
 export interface Target {

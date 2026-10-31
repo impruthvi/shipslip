@@ -46,7 +46,7 @@ describe("which receipt a cell opens", () => {
     const blog = cellAt("/Users/you/code/blog", "staging");
     const attemptOnly: EnvCellView = {
       ...blog,
-      lastAttempt: { receipt: 7, outcome: { text: "Cancelled before changes", tone: "neutral" }, flags: [], atMs: 0, age: "1m ago" },
+      lastAttempt: { receipt: 7, outcome: { text: "Cancelled before changes", tone: "neutral", kind: "cancelled" }, flags: [], atMs: 0, age: "1m ago" },
     };
     expect(target(attemptOnly, "code")).toEqual({ id: 7, role: "last" });
     expect(context(attemptOnly, "last")).toEqual({ text: "Latest attempt", links: [] });

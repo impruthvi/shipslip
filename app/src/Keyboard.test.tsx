@@ -53,7 +53,7 @@ function tabStops(): HTMLElement[] {
 
 const name = (el: HTMLElement) => el.getAttribute("aria-label") ?? el.textContent?.trim() ?? "";
 
-test("Tab goes picker → problems → grid (one stop) → footer → receipt", async () => {
+test("Tab goes sidebar → problems → picker → grid (one stop) → receipt", async () => {
   render(<App />);
   await settle();
   const stops = tabStops();
@@ -61,7 +61,9 @@ test("Tab goes picker → problems → grid (one stop) → footer → receipt", 
   expect(gridStops).toHaveLength(1);
   expect(gridStops[0]).toHaveAttribute("aria-selected", "true");
   const order = stops.map((el) =>
-    el.id === "compare-pair"
+    el.classList.contains("side-item")
+      ? "sidebar"
+      : el.id === "compare-pair"
       ? "picker"
       : el.closest("[aria-label=Problems]")
         ? "problems"
@@ -73,7 +75,7 @@ test("Tab goes picker → problems → grid (one stop) → footer → receipt", 
               ? "receipt"
               : `other: ${name(el)}`,
   );
-  expect([...new Set(order)]).toEqual(["picker", "problems", "grid", "receipt"]);
+  expect([...new Set(order)]).toEqual(["sidebar", "problems", "picker", "grid", "receipt"]);
   for (const button of within(screen.getByRole("grid")).queryAllByRole("button")) {
     expect(button).toHaveAttribute("tabindex", "-1");
   }
@@ -173,36 +175,26 @@ test("⌘I closing the drawer from inside it puts focus back on the cell", async
   expect(shop).toHaveFocus();
 });
 
-test("Enter on a link inside a cell is the link's, not the cell's", async () => {
+test("Select in the problems strip selects and focuses that cell", async () => {
   render(<App />);
   await settle();
-  const last = screen.getByRole("button", { name: /^Last: stopped in maintenance/ });
-  last.focus();
-  fireEvent.keyDown(last, { key: "Enter" });
-  await settle();
-  expect(screen.queryByRole("heading", { name: "api · production" })).not.toHaveFocus();
-});
-
-test("Select cell in the problems strip selects and focuses that cell", async () => {
-  render(<App />);
-  await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Select cell" }));
+  fireEvent.click(screen.getByRole("button", { name: "Select billing · production" }));
   const billingProd = cell("/Users/you/code/billing", "production");
   expect(billingProd).toHaveAttribute("aria-selected", "true");
   expect(billingProd).toHaveFocus();
 });
 
-test("the latest attempt and the unreadable receipt are reachable from the receipt", async () => {
+test("the recorded code and the unreadable receipt are reachable from the receipt", async () => {
   render(<App />);
   await settle();
   const pane = screen.getByRole("complementary", { name: "Receipt" });
-  fireEvent.click(within(pane).getByRole("button", { name: "Open the latest attempt" }));
+  fireEvent.click(within(pane).getByRole("tab", { name: "Recorded code" }));
   await settle();
-  expect(within(pane).getByText(/^Latest attempt/)).toBeInTheDocument();
+  expect(within(pane).getByText("Receipt behind the recorded code")).toBeInTheDocument();
 
   fireEvent.click(cell("/Users/you/code/billing", "production"));
   await settle();
-  fireEvent.click(within(pane).getByRole("button", { name: "Open the newer receipt that could not be read" }));
+  fireEvent.click(within(pane).getByRole("tab", { name: "Unreadable newer" }));
   await settle();
   expect(within(pane).getByText("Can't read this receipt.")).toBeInTheDocument();
 });

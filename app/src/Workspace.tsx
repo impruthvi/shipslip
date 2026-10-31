@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import type { Announce } from "./Announcer";
+import { notify } from "./notify";
 import { deploy } from "./deployApi";
-import { Mark } from "./Mark";
+import { StepIcon } from "./Mark";
 import { Preview, type PreviewBusy } from "./DeployPreview";
 import { RecoveryConfirm, type RecoveryBusy } from "./RecoveryConfirm";
 import { Refusal, refusalWording } from "./Refusal";
@@ -27,6 +28,8 @@ export interface DeployTarget {
   env: string;
   /** The app's name on the map. */
   label: string;
+  /** Set when another app on the map has the same name. */
+  folder?: string | null;
   production: boolean;
 }
 
@@ -70,6 +73,12 @@ export function phaseText(progress: PrepareProgress): string {
     case "locking":
       return "Taking the deploy lock…";
   }
+}
+
+function planVerb(plan: RunPlan | null): string {
+  if (plan === "Rerun") return "Rerun";
+  if (plan !== null && typeof plan === "object") return `Run from step ${plan.FromStep} ·`;
+  return "Deploy";
 }
 
 /** A thrown value from a command, as the refusal it carries. */
@@ -335,6 +344,17 @@ export function Workspace({
       : start.kind === "follow"
         ? start.info.operation
         : "deploy";
+  // The verb follows the plan being run: a rerun is not called a deploy.
+  const plan: RunPlan | null =
+    screen.kind === "preparing" || screen.kind === "taken"
+      ? screen.plan
+      : screen.kind === "preview"
+        ? screen.review.runPlan
+        : screen.kind === "running"
+          ? screen.info.runPlan
+          : start.kind === "deploy"
+            ? start.plan
+            : null;
   const title =
     start.kind === "trust" || screen.kind === "trust"
       ? `Review configuration · ${target.label} · ${target.env}`
@@ -342,27 +362,20 @@ export function Workspace({
         ? `Bring ${target.label} → ${target.env} out of maintenance`
         : operation === "attach"
           ? `Attach to ${target.label} → ${target.env}`
-          : `Deploy ${target.label} → ${target.env}`;
+          : `${planVerb(plan)} ${target.label} → ${target.env}`;
 
   return (
     <div className="workspace">
-      <header className="workspace-header">
-        <div className="workspace-heading">
+      <header className="workspace-header" data-tauri-drag-region>
+        <div className="workspace-heading" data-tauri-drag-region>
           <h1 ref={heading} tabIndex={-1}>
             {title}
           </h1>
+          {target.folder && <span className="workspace-folder muted">in {target.folder}</span>}
           {production && <span className="production-chip">PRODUCTION</span>}
-          <button
-            type="button"
-            className="link"
-            disabled={!idle && screen.kind !== "running"}
-            onClick={back}
-          >
-            Release map
-          </button>
         </div>
         {sub && (
-          <p className="workspace-target mono muted">
+          <p className="workspace-target mono muted" data-tauri-drag-region>
             {sub.sshAlias} · {sub.path}
           </p>
         )}
@@ -382,11 +395,9 @@ export function Workspace({
                   <li key={i} className="phase">
                     <span className="phase-mark">
                       {next ? (
-                        <span className="tone-good" aria-label="done">
-                          ✓
-                        </span>
+                        <StepIcon kind="ok" />
                       ) : (
-                        <Mark kind="live" />
+                        <StepIcon kind="running" />
                       )}
                     </span>
                     <span>{phaseText(progress)}</span>
@@ -472,6 +483,7 @@ export function Workspace({
         <Running
           info={screen.info}
           announce={announce}
+          onLeave={() => onLeave("away")}
           onEnd={(terminal) => {
             const plan = screen.info.runPlan;
             if (terminal.kind === "finished" && terminal.lockTaken && plan !== null) {
@@ -480,6 +492,7 @@ export function Workspace({
               return;
             }
             announce(endSentence(terminal), true);
+            void notify(`${target.label} → ${target.env}`, endSentence(terminal));
             onLeave("finished");
           }}
         />

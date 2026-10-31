@@ -123,6 +123,9 @@ function selectedCell() {
   return { row, env: envs[Number(cell.dataset.col)], label: rows[row].label };
 }
 
+/** The panel's deploy button names its app and env. */
+const DEPLOY = /^Deploy \S+ → \S+…$/;
+
 async function openWorkspace() {
   render(<App />);
   await settle();
@@ -133,7 +136,7 @@ async function openWorkspace() {
     progress = onProgress;
     return pending.promise;
   });
-  fireEvent.click(screen.getByRole("button", { name: "Review deploy…" }));
+  fireEvent.click(screen.getByRole("button", { name: DEPLOY }));
   await settle();
   return { cell, pending, progress: (phase: PrepareProgress) => act(() => progress(phase)) };
 }
@@ -145,7 +148,7 @@ test("review deploy shows only for envs with a config, and says why it is off", 
   const { unmount } = render(<App />);
   await settle();
   expect(entry).toHaveBeenCalledWith(1, selectedCell().row, selectedCell().env);
-  expect(screen.queryByRole("button", { name: "Review deploy…" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: DEPLOY })).not.toBeInTheDocument();
   unmount();
 
   for (const [answer, reason] of [
@@ -155,7 +158,7 @@ test("review deploy shows only for envs with a config, and says why it is off", 
     entry.mockResolvedValue(answer);
     const view = render(<App />);
     await settle();
-    const button = screen.getByRole("button", { name: "Review deploy…" });
+    const button = screen.getByRole("button", { name: DEPLOY });
     expect(button).toBeDisabled();
     expect(button).toHaveAccessibleDescription(reason);
     view.unmount();
@@ -185,7 +188,7 @@ test("preparing names each phase, then cancel releases the lock and returns to t
   await act(async () => pending.resolve(production));
   expect(cancel).toHaveBeenCalledWith("review-1");
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Review deploy…" })).toHaveFocus();
+  expect(screen.getByRole("button", { name: DEPLOY })).toHaveFocus();
 });
 
 test("escape cancels preparing; a prepare that fails after cancel just closes", async () => {
@@ -228,9 +231,18 @@ test("preview shows what ships; production deploys only once its name is typed",
   expect(screen.getByText("and 5 more")).toBeInTheDocument();
   const steps = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("listitem");
   expect(steps.map((s) => s.textContent)).toEqual([
+    "onphp artisan down",
+    "0git merge --ff-only bbbbbbb",
     "1composer install --no-dev",
     "2php artisan migrate --force",
     "3php artisan optimize",
+    "offphp artisan uponce every step succeeds",
+    "logwatch the Laravel log for 2 min",
+  ]);
+  const risks = within(screen.getByRole("region", { name: "Before you confirm" })).getAllByRole("listitem");
+  expect(risks.map((r) => r.textContent)).toEqual([
+    "The app is in maintenance mode from before the first step until every step succeeds. If a step fails, it stays in maintenance mode.",
+    "Step 2 changes the database (php artisan migrate --force). Shipslip cannot undo it.",
   ]);
 
   const deploy = screen.getByRole("button", { name: "Deploy to production" });
@@ -322,13 +334,15 @@ test("running lists every step with its mark and follows the running step's outp
   const steps = within(screen.getByRole("region", { name: "Steps" }));
   const heads = steps.getAllByRole("button").map((b) => b.textContent);
   expect(heads).toEqual([
-    "✓doneonMaintenance on: php artisan down",
-    "✓done0git fast-forward",
+    "onphp artisan down",
+    "0git fast-forward",
     expect.stringMatching(/^1composer install --no-dev\d+s$/),
-    "·not started2php artisan migrate --force",
-    "·not started3php artisan optimize",
-    "·not startedoffMaintenance off: php artisan up",
+    "2php artisan migrate --force",
+    "3php artisan optimize",
+    "offphp artisan up",
   ]);
+  expect(steps.getAllByRole("img", { name: "done" })).toHaveLength(2);
+  expect(steps.getAllByRole("img", { name: "not started" })).toHaveLength(3);
   expect(steps.getByRole("img", { name: "running now" })).toBeInTheDocument();
   expect(screen.getByRole("region", { name: "Output of step 1" })).toHaveTextContent(
     "composer install --no-dev: working",
@@ -390,9 +404,16 @@ test("when the run ends the workspace closes, the map re-reads and the end is an
   await startRun();
   await act(async () => send(fixtures.runBatches.running));
   const reads = loadMap.mock.calls.length;
+  expect(screen.getByText(/^Step 1 of 3 · app in maintenance mode · \d/)).toBeInTheDocument();
   await act(async () => send(fixtures.runBatches.failed));
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
   expect(loadMap.mock.calls.length).toBe(reads + 1);
+  await settle();
+  // The new receipt slides up into the pane once, then later selections open plainly.
+  expect(document.querySelector(".pane-slip-print")).not.toBeNull();
+  fireEvent.click(screen.getAllByRole("gridcell").find((c) => c.getAttribute("aria-selected") === "false")!);
+  await settle();
+  expect(document.querySelector(".pane-slip-print")).toBeNull();
   expect(screen.getByTestId("announce-assertive")).toHaveTextContent("Deploy failed at step 1.");
   expect(unfollow).toHaveBeenCalled();
 });
@@ -427,7 +448,7 @@ test("changed settings open the trust review; approving returns to the pane with
   entry.mockResolvedValue(ready({ needsTrust: true }));
   reviewTrust.mockResolvedValue(fixtures.trustReview);
   const cell = await renderApp();
-  fireEvent.click(screen.getByRole("button", { name: "Review deploy…" }));
+  fireEvent.click(screen.getByRole("button", { name: DEPLOY }));
   await settle();
   expect(prepare).not.toHaveBeenCalled();
   expect(reviewTrust).toHaveBeenCalledWith(1, cell.row, cell.env);
@@ -459,7 +480,7 @@ test("changed settings open the trust review; approving returns to the pane with
   expect(approveTrust).toHaveBeenCalledWith("trust-1", "production");
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
   expect(screen.getByText(`Configuration approved for ${cell.env}`)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Review deploy…" })).toHaveFocus();
+  expect(screen.getByRole("button", { name: DEPLOY })).toHaveFocus();
   // Approval alone never prepares a deploy.
   expect(prepare).not.toHaveBeenCalled();
 });
@@ -468,7 +489,7 @@ test("a config that changed during the review must be reviewed again; escape goe
   entry.mockResolvedValue(ready({ needsTrust: true }));
   reviewTrust.mockResolvedValue(fixtures.trustReview);
   await renderApp();
-  fireEvent.click(screen.getByRole("button", { name: "Review deploy…" }));
+  fireEvent.click(screen.getByRole("button", { name: DEPLOY }));
   await settle();
   fireEvent.change(screen.getByLabelText("Type production to approve"), {
     target: { value: "production" },
@@ -498,7 +519,7 @@ test("a failed approval for another reason shows the refusal screen", async () =
   entry.mockResolvedValue(ready({ needsTrust: true }));
   reviewTrust.mockResolvedValue(fixtures.trustReview);
   await renderApp();
-  fireEvent.click(screen.getByRole("button", { name: "Review deploy…" }));
+  fireEvent.click(screen.getByRole("button", { name: DEPLOY }));
   await settle();
   fireEvent.change(screen.getByLabelText("Type production to approve"), {
     target: { value: "production" },
@@ -630,14 +651,15 @@ test("Open config in More opens the selected env's config, and says why when it 
   const cell = await renderApp();
   fireEvent.click(screen.getByRole("button", { name: /^More/ }));
   openConfig.mockResolvedValue(undefined);
-  fireEvent.click(screen.getByRole("button", { name: "Open config" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Open config" }));
   await settle();
   expect(openConfig).toHaveBeenCalledWith(1, cell.row, cell.env);
   expect(prepare).not.toHaveBeenCalled();
   expect(screen.queryByRole("status")).toBeNull();
 
   openConfig.mockRejectedValue({ code: "notFound", message: "This checkout has no .shipslip.toml." });
-  fireEvent.click(screen.getByRole("button", { name: "Open config" }));
+  fireEvent.click(screen.getByRole("button", { name: /^More/ }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Open config" }));
   await settle();
   expect(screen.getByText("This checkout has no .shipslip.toml.")).toBeInTheDocument();
 });
@@ -646,7 +668,7 @@ test("the trust review can open the config in the editor without approving anyth
   entry.mockResolvedValue(ready({ needsTrust: true }));
   reviewTrust.mockResolvedValue(fixtures.trustReview);
   const cell = await renderApp();
-  fireEvent.click(screen.getByRole("button", { name: "Review deploy…" }));
+  fireEvent.click(screen.getByRole("button", { name: DEPLOY }));
   await settle();
   openConfig.mockResolvedValue(undefined);
   fireEvent.click(screen.getByRole("button", { name: "Edit .shipslip.toml in your editor" }));
@@ -669,7 +691,7 @@ const upReview: RecoveryReview = {
   remainingSteps: [{ index: null, command: "php artisan up" }],
 };
 
-test("a failed run's recovery: one recommended action, each with its command", async () => {
+test("a failed run's recovery: one recommended action, each with what it does", async () => {
   entry.mockResolvedValue(ready({ recovery: fixtures.recoveries[0] }));
   await renderApp();
   const pane = within(screen.getByRole("complementary", { name: "Receipt" }));
@@ -678,8 +700,13 @@ test("a failed run's recovery: one recommended action, each with its command", a
   const from = pane.getByRole("button", { name: "Run from step 1…" });
   expect(up).toHaveClass("button-primary");
   expect(from).not.toHaveClass("button-primary");
-  expect(pane.getByText("slip up production")).toBeInTheDocument();
-  expect(pane.getByText("slip from-step production 1")).toBeInTheDocument();
+  expect(up).toHaveAccessibleDescription("Runs php artisan up to end maintenance mode. No deploy steps run.");
+  expect(from).toHaveAccessibleDescription(
+    "Runs step 1 and the steps after it on the commit already checked out. No fast-forward.",
+  );
+  expect(pane.getByText("Each choice opens a review. Nothing runs until you confirm.")).toBeInTheDocument();
+  // With a recovery to make first, the deploy button steps back from primary.
+  expect(pane.getByRole("button", { name: DEPLOY })).not.toHaveClass("button-primary");
 });
 
 test("bring the app up: a confirm shows the one step and needs the name typed", async () => {
@@ -704,7 +731,7 @@ test("bring the app up: a confirm shows the one step and needs the name typed", 
   expect(confirm).toHaveBeenCalledWith("up-1", "production");
   await act(async () => send({ ...fixtures.runBatches.running, handle: "up-1" }));
   const rows = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("button");
-  expect(rows.map((r) => r.textContent)).toEqual(["·not startedoffMaintenance off: php artisan up"]);
+  expect(rows.map((r) => r.textContent)).toEqual(["offphp artisan up"]);
   // One step: nothing after it to stop before.
   expect(screen.queryByRole("button", { name: "Stop after this step" })).toBeNull();
 });
@@ -800,15 +827,33 @@ test("run from step: pick first, then the preview strikes skipped steps", async 
   await act(async () => pending.resolve({ ...production, runPlan: { FromStep: 3 } }));
   const steps = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("listitem");
   expect(steps.filter((s) => s.classList.contains("step-skipped"))).toHaveLength(2);
+  // Step 2's migration is skipped, so it is not named as a risk.
+  expect(screen.getByRole("region", { name: "Before you confirm" })).not.toHaveTextContent("changes the database");
   expect(screen.getByText("1 step · maintenance on · log watch 2 min")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Run from step 3" })).toBeDisabled();
 });
 
 test("the More menu offers Rerun and Run from step", async () => {
   await renderApp();
-  fireEvent.click(screen.getByRole("button", { name: /^More/ }));
+  const more = screen.getByRole("button", { name: /^More/ });
+  fireEvent.click(more);
+  expect(more).toHaveAttribute("aria-expanded", "true");
+  const menu = within(screen.getByRole("menu", { name: "More" }));
+  expect(menu.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    "Rerun…",
+    "Run from step…",
+    "Open config",
+  ]);
+  expect(menu.getByRole("menuitem", { name: "Rerun…" })).toHaveFocus();
+  fireEvent.keyDown(menu.getByRole("menuitem", { name: "Rerun…" }), { key: "ArrowDown" });
+  expect(menu.getByRole("menuitem", { name: "Run from step…" })).toHaveFocus();
+  fireEvent.keyDown(menu.getByRole("menuitem", { name: "Run from step…" }), { key: "Escape" });
+  expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  expect(more).toHaveFocus();
+
+  fireEvent.click(more);
   prepare.mockReturnValue(new Promise(() => {}));
-  fireEvent.click(screen.getByRole("button", { name: "Rerun…" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Rerun…" }));
   expect(prepare).toHaveBeenCalledWith(1, expect.any(Number), expect.any(String), "Rerun", expect.any(Function));
   fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 });
@@ -816,7 +861,7 @@ test("the More menu offers Rerun and Run from step", async () => {
 test("run from step in the menu defaults to step 1 with no recovery", async () => {
   await renderApp();
   fireEvent.click(screen.getByRole("button", { name: /^More/ }));
-  fireEvent.click(screen.getByRole("button", { name: "Run from step…" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Run from step…" }));
   expect(screen.getByRole("radio", { name: /1\s*composer install/ })).toBeChecked();
   fireEvent.keyDown(window, { key: "Escape" });
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
@@ -882,7 +927,7 @@ test("a preview closed by a reload is noted on its cell", async () => {
   ).toBeInTheDocument();
 });
 
-test("a live run shows on its cell and in the toolbar, which leads back to it", async () => {
+test("a live run shows on its cell and in the sidebar, which leads back to it", async () => {
   const first = render(<App />);
   await settle();
   const cell = selectedCell();
@@ -893,24 +938,26 @@ test("a live run shows on its cell and in the toolbar, which leads back to it", 
   const grid = within(screen.getByRole("grid", { name: "Release map" }));
   expect(grid.getByText(/^Deploying… 2m 1\ds$/)).toBeInTheDocument();
   expect(grid.getByRole("img", { name: "running now" })).toBeInTheDocument();
-  const link = screen.getByRole("button", { name: `1 deploy running · ${cell.label} → ${cell.env}` });
+  const sidebar = () => within(screen.getByRole("navigation"));
+  expect(grid.getByText("Running")).toHaveClass("flap");
+  const link = sidebar().getByRole("button", { name: new RegExp(`^${cell.label} ${cell.env} · 2m 1\\ds$`) });
 
   fireEvent.click(link);
   await settle();
   expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(`Deploy ${cell.label} → ${cell.env}`);
   expect(screen.getByText("Connecting to shop-prod…")).toBeInTheDocument();
 
-  // Release map leaves the run going and returns focus to the toolbar link.
-  fireEvent.click(screen.getByRole("button", { name: "Release map" }));
+  // Leave running goes back to the map and returns focus to the sidebar link.
+  fireEvent.click(screen.getByRole("button", { name: "Leave running" }));
   await settle();
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
   expect(stop).not.toHaveBeenCalled();
   expect(cancel).not.toHaveBeenCalled();
   expect(unfollow).toHaveBeenCalled();
-  expect(screen.getByRole("button", { name: /^1 deploy running/ })).toHaveFocus();
+  expect(sidebar().getByRole("button", { name: new RegExp(`^${cell.label} ${cell.env} · `) })).toHaveFocus();
 });
 
-test("several live runs share one toolbar menu", async () => {
+test("several live runs each get a sidebar line", async () => {
   const first = render(<App />);
   await settle();
   const cell = selectedCell();
@@ -921,9 +968,9 @@ test("several live runs share one toolbar menu", async () => {
   });
   render(<App />);
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: /^2 deploys running/ }));
-  expect(screen.getByRole("button", { name: `${cell.label} → ${cell.env}` })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "other → staging" })).toBeInTheDocument();
+  const sidebar = within(screen.getByRole("navigation"));
+  expect(sidebar.getByRole("button", { name: new RegExp(`^${cell.label} ${cell.env} · `) })).toBeInTheDocument();
+  expect(sidebar.getByRole("button", { name: /^other staging · / })).toBeInTheDocument();
 });
 
 test("a run that ends in the background re-reads the map and the entry", async () => {
@@ -934,14 +981,16 @@ test("a run that ends in the background re-reads the map and the entry", async (
     const cell = selectedCell();
     liveRuns.mockResolvedValue({ runs: [liveRun(cell, 1000)], closedPreviews: [] });
     await act(async () => vi.advanceTimersByTimeAsync(2000));
-    expect(screen.getByRole("button", { name: /^1 deploy running/ })).toBeInTheDocument();
+    const runs = () => within(screen.getByRole("region", { name: "Deploys running" }));
+    expect(runs().getByRole("button", { name: new RegExp(`^${cell.label} ${cell.env} · `) })).toBeInTheDocument();
     const reads = loadMap.mock.calls.length;
     const asks = entry.mock.calls.length;
     liveRuns.mockResolvedValue({ runs: [], closedPreviews: [] });
     await act(async () => vi.advanceTimersByTimeAsync(2000));
     expect(loadMap.mock.calls.length).toBe(reads + 1);
     expect(entry.mock.calls.length).toBeGreaterThan(asks);
-    expect(screen.queryByRole("button", { name: /deploy running/ })).not.toBeInTheDocument();
+    expect(runs().queryByRole("button")).not.toBeInTheDocument();
+    expect(runs().getByText("None started here")).toBeInTheDocument();
   } finally {
     vi.useRealTimers();
   }
