@@ -57,7 +57,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::{StepStatus, WatchResult, WatchStatus};
+    use crate::{StepStatus, StepTimes, WatchResult, WatchStatus};
 
     fn watch_finished(status: WatchStatus) -> DeployEvent {
         let mut result = WatchResult::not_run();
@@ -107,6 +107,7 @@ mod tests {
                     phase: MaintenancePhase::Up,
                     status: StepStatus::Ok,
                     exit_code: Some(0),
+                    times: StepTimes::default(),
                 }
             ),
             Stage::Finishing

@@ -302,6 +302,7 @@ impl RunFeed {
                 phase,
                 status,
                 exit_code,
+                ..
             } => {
                 history.stage = match phase {
                     MaintenancePhase::Up => "finishing",

@@ -334,7 +334,7 @@ fn render_show(receipt: &Receipt) -> String {
             "Maintenance on: php artisan down",
             status.clone().into(),
             receipt.maintenance_down_exit_code,
-            StepTimes::default(),
+            receipt.maintenance_down_times(),
         );
     }
     for step in &receipt.steps {
@@ -358,7 +358,7 @@ fn render_show(receipt: &Receipt) -> String {
                 "Maintenance off: php artisan up",
                 status.clone().into(),
                 receipt.maintenance_up_exit_code,
-                StepTimes::default(),
+                receipt.maintenance_up_times(),
             );
         }
     }

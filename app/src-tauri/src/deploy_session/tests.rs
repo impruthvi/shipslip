@@ -1587,6 +1587,7 @@ fn quit_text_for_a_running_step_says_maintenance_stays_on() {
         phase: shipslip::MaintenancePhase::Down,
         status: shipslip::StepStatus::Ok,
         exit_code: Some(0),
+        times: StepTimes::default(),
     });
     feed.record(DeployEvent::StepStarted {
         index: 1,

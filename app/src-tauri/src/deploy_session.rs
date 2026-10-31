@@ -1817,7 +1817,7 @@ impl RunInfo {
 /// and a run still connecting.
 #[cfg(test)]
 pub(crate) fn sample_quit_runs() -> Vec<QuitRun> {
-    use shipslip::{DeployEvent, MaintenancePhase, StepStatus};
+    use shipslip::{DeployEvent, MaintenancePhase, StepStatus, StepTimes};
     let info = |handle: &str, operation| RunInfo {
         run_id: None,
         target_sha: None,
@@ -1831,6 +1831,7 @@ pub(crate) fn sample_quit_runs() -> Vec<QuitRun> {
         phase: MaintenancePhase::Down,
         status: StepStatus::Ok,
         exit_code: Some(0),
+        times: StepTimes::default(),
     });
     feed.record(DeployEvent::StepStarted {
         index: 2,
@@ -1916,6 +1917,7 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         phase: MaintenancePhase::Down,
         status: StepStatus::Ok,
         exit_code: Some(0),
+        times: StepTimes::default(),
     });
     step(0, "git fast-forward", Some(StepStatus::Ok));
     step(1, "composer install --no-dev", None);

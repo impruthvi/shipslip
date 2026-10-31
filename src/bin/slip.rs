@@ -538,16 +538,11 @@ async fn follow_events(
                 phase,
                 status,
                 exit_code,
-            } => {
-                println!(
-                    "Maintenance {}: {}{}",
-                    phase_name(phase),
-                    status_name(&status),
-                    exit_code
-                        .map(|code| format!(" (exit {code})"))
-                        .unwrap_or_default()
-                );
-            }
+                times,
+            } => println!(
+                "{}",
+                maintenance_result_line(phase, &status, exit_code, times)
+            ),
             DeployEvent::AppLeftDown => {
                 eprintln!("The app may still be in maintenance mode.");
             }
@@ -1644,6 +1639,23 @@ fn step_result_line(
     )
 }
 
+fn maintenance_result_line(
+    phase: MaintenancePhase,
+    status: &StepStatus,
+    exit_code: Option<i32>,
+    times: StepTimes,
+) -> String {
+    format!(
+        "Maintenance {}: {}{}{}",
+        phase_name(phase),
+        status_name(status),
+        exit_code
+            .map(|code| format!(" (exit {code})"))
+            .unwrap_or_default(),
+        duration_suffix(times)
+    )
+}
+
 fn show_outcome(outcome: &DeployOutcome) {
     if *outcome == DeployOutcome::Succeeded {
         println!("{}", outcome.summary());
@@ -1995,6 +2007,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn finished_maintenance_line_shows_the_recorded_duration() {
+        let timed = StepTimes {
+            started_at_ms: Some(1_000),
+            finished_at_ms: Some(3_400),
+        };
+        assert_eq!(
+            maintenance_result_line(MaintenancePhase::Down, &StepStatus::Ok, Some(0), timed),
+            format!(
+                "Maintenance {}: succeeded (exit 0) in 2s",
+                phase_name(MaintenancePhase::Down)
+            )
+        );
+        let started = StepTimes {
+            finished_at_ms: None,
+            ..timed
+        };
+        assert_eq!(
+            maintenance_result_line(MaintenancePhase::Up, &StepStatus::Unknown, None, started),
+            format!(
+                "Maintenance {}: {}",
+                phase_name(MaintenancePhase::Up),
+                status_name(&StepStatus::Unknown)
+            )
+        );
+    }
+
     fn step_started() -> DeployEvent {
         DeployEvent::StepStarted {
             index: 1,
@@ -2063,6 +2102,7 @@ mod tests {
                 phase: MaintenancePhase::Up,
                 status: StepStatus::Ok,
                 exit_code: Some(0),
+                times: StepTimes::default(),
             }),
             Input::Event(DeployEvent::Finished(DeployOutcome::Succeeded)),
         ])
