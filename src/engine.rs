@@ -5219,6 +5219,8 @@ mod tests {
             Some(&DeployEvent::Detached { index: 0 })
         );
         assert_eq!(journal.snapshot().phase, ReceiptPhase::Step(0));
+        let sent_at = journal.snapshot().steps[0].started_at_ms;
+        assert!(sent_at.is_some());
         tokio::time::timeout(Duration::from_secs(2), async {
             while Arc::strong_count(&journal) != 1 {
                 tokio::task::yield_now().await;
@@ -5248,7 +5250,7 @@ mod tests {
         // Step 0's end was first seen by this later attach, so it stays empty;
         // step 1 was sent and seen by the attach itself.
         let observed = receipt.steps[0].times();
-        assert!(observed.started_at_ms.is_some());
+        assert_eq!(observed.started_at_ms, sent_at);
         assert_eq!(observed.finished_at_ms, None);
         assert!(events.contains(&DeployEvent::StepFinished {
             index: 0,
@@ -5404,8 +5406,12 @@ mod tests {
         );
     }
 
-    async fn timed_run(fake: Fake, steps: &[&str], plan: RunPlan) -> (Receipt, Vec<DeployEvent>) {
-        let fake = Arc::new(fake);
+    async fn timed_run(
+        fake: impl Into<Arc<Fake>>,
+        steps: &[&str],
+        plan: RunPlan,
+    ) -> (Receipt, Vec<DeployEvent>) {
+        let fake = fake.into();
         let preview = prepared_with_plan(&fake, false, steps, plan).await;
         let dir = TempReceipts::new();
         let journal =
@@ -5513,6 +5519,58 @@ mod tests {
             DeployEvent::StepFinished { index: 1, times: sent, .. } if *sent == times
         )));
         assert_step_times(&receipt, &events, &[0]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn step_reattached_in_the_same_run_is_timed_when_its_result_is_seen() {
+        let fake = Arc::new(preflight().on("git merge --ff-only", &[], 0).drops(
+            "migrate",
+            &["a", "b", "c"],
+            3,
+            1,
+        ));
+        let (receipt, events) = timed_run(
+            fake.clone(),
+            &["php artisan migrate --force"],
+            RunPlan::Deploy,
+        )
+        .await;
+        assert_eq!(fake.reconnects.load(Ordering::SeqCst), 1);
+        assert_eq!(fake.launched("migrate"), 1);
+        assert_eq!(receipt.steps[1].status, ReceiptStepStatus::Failed);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DeployEvent::StepFinished {
+                index: 1,
+                status: StepStatus::Failed,
+                exit_code: Some(3),
+                ..
+            }
+        )));
+        assert_step_times(&receipt, &events, &[0, 1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn step_lost_with_the_connection_keeps_its_start_without_an_end() {
+        let fake = preflight()
+            .on("git merge --ff-only", &[], 0)
+            .drops("migrate", &["a"], 0, 0)
+            .unreachable_after_drop();
+        let (receipt, events) =
+            timed_run(fake, &["php artisan migrate --force"], RunPlan::Deploy).await;
+        assert!(matches!(
+            events.last(),
+            Some(DeployEvent::Interrupted { index: 1, .. })
+        ));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, DeployEvent::StepFinished { index: 1, .. })));
+        assert_eq!(receipt.steps[1].status, ReceiptStepStatus::Running);
+        let times = receipt.steps[1].times();
+        assert!(times
+            .started_at_ms
+            .is_some_and(|start| start >= receipt.started_at_ms));
+        assert_eq!(times.finished_at_ms, None);
     }
 
     #[tokio::test]

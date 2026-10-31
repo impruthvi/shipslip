@@ -108,14 +108,35 @@ fn show_gives_a_finished_step_duration_only() {
     let text = render_show(&receipt(|value| {
         value["steps"][0]["started_at_ms"] = json!(1500);
         value["steps"][0]["finished_at_ms"] = json!(3500);
-        value["steps"][1]["started_at_ms"] = json!(3600);
     }));
     assert!(
         text.contains("1  php artisan migrate --force (exit 0) in 2s\n"),
         "{text}"
     );
+}
+
+#[test]
+fn show_gives_a_start_without_an_end_as_end_not_known() {
+    let started = 1_790_943_136_408u128;
+    let text = render_show(&receipt(|value| {
+        value["steps"][0]["status"] = json!("Unknown");
+        value["steps"][0]["exit_code"] = json!(null);
+        value["steps"][0]["started_at_ms"] = json!(started as u64);
+        value["steps"][1]["started_at_ms"] = json!(started as u64 + 4000);
+    }));
+    let first = time_of_day(started);
+    assert!(first.len() >= 8 && first.as_bytes()[2] == b':', "{first}");
     assert!(
-        text.contains("2  php artisan optimize (exit 0)\n"),
+        text.contains(&format!(
+            "1  php artisan migrate --force, started {first}, end not known\n"
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "2  php artisan optimize (exit 0), started {}, end not known\n",
+            time_of_day(started + 4000)
+        )),
         "{text}"
     );
 }

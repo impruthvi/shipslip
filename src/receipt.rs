@@ -840,6 +840,15 @@ pub fn duration_suffix(times: StepTimes) -> String {
         .unwrap_or_default()
 }
 
+/// The duration for a step with both times, or `, started 14:02:11Z, end not
+/// known` for one whose end this Mac did not see.
+pub fn timing_suffix(times: StepTimes, time_of_day: impl Fn(u128) -> String) -> String {
+    match (times.started_at_ms, times.finished_at_ms) {
+        (Some(started), None) => format!(", started {}, end not known", time_of_day(started)),
+        _ => duration_suffix(times),
+    }
+}
+
 pub(crate) fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

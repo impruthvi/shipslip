@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use shipslip::config::LoadedConfig;
 use shipslip::logs::{escape, escape_field};
 use shipslip::receipt::{
-    self, describe_smoke, describe_watch, duration_suffix, format_duration, strip_color, Found,
+    self, describe_smoke, describe_watch, format_duration, strip_color, timing_suffix, Found,
     Listed, Receipt, ReceiptError, ReceiptKind, ReceiptStatus, ReceiptStepStatus,
 };
 use shipslip::{DeployOutcome, StepTimes, WatchStatus};
@@ -535,7 +535,7 @@ fn step_line(
         exit_code
             .map(|code| format!(" (exit {code})"))
             .unwrap_or_default(),
-        duration_suffix(times)
+        timing_suffix(times, time_of_day)
     );
 }
 
@@ -553,6 +553,15 @@ fn local_zone() -> Option<String> {
     let zone = local_time(now, true);
     // `2026-10-08 16:30:00 IST`: the zone is the third field.
     zone.split(' ').nth(2).map(str::to_string)
+}
+
+/// `19:32:11 IST`.
+fn time_of_day(millis: u128) -> String {
+    let shown = local_time(millis, true);
+    match shown.split_once(' ') {
+        Some((_, time)) => time.to_string(),
+        None => shown,
+    }
 }
 
 /// Local time, `2026-10-07 19:32` or with seconds and zone.
