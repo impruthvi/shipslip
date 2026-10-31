@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     DeployOutcome, DeployTarget, MaintenancePhase, Preview, RunPlan, SmokeResult, StepStatus,
-    WatchResult,
+    StepTimes, WatchResult,
 };
 
 mod history;
@@ -105,6 +105,20 @@ pub struct ReceiptStep {
     pub status: ReceiptStepStatus,
     pub exit_code: Option<i32>,
     pub output: Vec<String>,
+    /// This Mac's clock; missing in receipts written before step times.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at_ms: Option<u128>,
+}
+
+impl ReceiptStep {
+    pub fn times(&self) -> StepTimes {
+        StepTimes {
+            started_at_ms: self.started_at_ms,
+            finished_at_ms: self.finished_at_ms,
+        }
+    }
 }
 
 /// What a run did on the server.
@@ -214,6 +228,8 @@ impl Receipt {
                 },
                 exit_code: None,
                 output: Vec::new(),
+                started_at_ms: None,
+                finished_at_ms: None,
             })
             .collect();
         Self {
@@ -291,6 +307,8 @@ impl Receipt {
                 status: ReceiptStepStatus::NotStarted,
                 exit_code: None,
                 output: Vec::new(),
+                started_at_ms: None,
+                finished_at_ms: None,
             }],
             maintenance_down_done: false,
             maintenance_up_done: false,
@@ -446,12 +464,13 @@ impl ReceiptJournal {
         })
     }
 
-    pub fn begin_step(&self, index: usize) -> Result<(), ReceiptError> {
+    pub fn begin_step(&self, index: usize, started_at_ms: u128) -> Result<(), ReceiptError> {
         self.update(|receipt| {
             receipt.phase = ReceiptPhase::Step(index);
             receipt.mutation_started = true;
             if let Some(step) = receipt.steps.iter_mut().find(|step| step.index == index) {
                 step.status = ReceiptStepStatus::Running;
+                step.started_at_ms = Some(started_at_ms);
             }
         })
     }
@@ -461,12 +480,15 @@ impl ReceiptJournal {
         index: usize,
         status: StepStatus,
         exit_code: Option<i32>,
+        times: StepTimes,
     ) -> Result<(), ReceiptError> {
         self.update(|receipt| {
             receipt.phase = ReceiptPhase::BetweenSteps;
             if let Some(step) = receipt.steps.iter_mut().find(|step| step.index == index) {
                 step.status = status.into();
                 step.exit_code = exit_code;
+                step.started_at_ms = times.started_at_ms;
+                step.finished_at_ms = times.finished_at_ms;
             }
         })
     }
@@ -810,7 +832,15 @@ pub fn format_duration(millis: u128) -> String {
     }
 }
 
-fn now_ms() -> u128 {
+/// ` in 2m 44s` for a step with both times, otherwise nothing.
+pub fn duration_suffix(times: StepTimes) -> String {
+    times
+        .duration_ms()
+        .map(|millis| format!(" in {}", format_duration(millis)))
+        .unwrap_or_default()
+}
+
+pub(crate) fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())

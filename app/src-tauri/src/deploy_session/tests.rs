@@ -1,6 +1,6 @@
 use super::*;
 use crate::fixture::Fixture;
-use shipslip::DeployEvent;
+use shipslip::{DeployEvent, StepTimes};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]
@@ -1183,6 +1183,7 @@ fn event_replay_preserves_step_results_and_untrusted_text_as_display_data() {
         index: 2,
         status: shipslip::StepStatus::Failed,
         exit_code: Some(9),
+        times: StepTimes::default(),
     });
     feed.record(DeployEvent::RunError {
         reason: "journal\nfailed".into(),

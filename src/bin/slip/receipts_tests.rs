@@ -98,6 +98,29 @@ fn show_escapes_server_text_and_cannot_forge_fields() {
 }
 
 #[test]
+fn show_gives_a_finished_step_duration_only() {
+    let untimed = render_show(&receipt(|_| {}));
+    assert!(
+        untimed.contains("1  php artisan migrate --force (exit 0)\n"),
+        "{untimed}"
+    );
+
+    let text = render_show(&receipt(|value| {
+        value["steps"][0]["started_at_ms"] = json!(1500);
+        value["steps"][0]["finished_at_ms"] = json!(3500);
+        value["steps"][1]["started_at_ms"] = json!(3600);
+    }));
+    assert!(
+        text.contains("1  php artisan migrate --force (exit 0) in 2s\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("2  php artisan optimize (exit 0)\n"),
+        "{text}"
+    );
+}
+
+#[test]
 fn show_counts_commits_past_the_preview_list() {
     let text = render_show(&receipt(|value| {
         value["commits"] = serde_json::json!(["2222222 Add billing"]);

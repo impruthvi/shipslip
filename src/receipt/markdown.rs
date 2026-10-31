@@ -8,7 +8,7 @@
 
 use std::fmt::Write;
 
-use super::{describe_watch, format_duration, format_utc, strip_color, Receipt};
+use super::{describe_watch, duration_suffix, format_duration, format_utc, strip_color, Receipt};
 use crate::logs::{escape, escape_field};
 use crate::{SmokeResult, StepStatus};
 
@@ -125,10 +125,11 @@ pub fn markdown(receipt: &Receipt, details: bool) -> String {
     for step in &receipt.steps {
         let _ = writeln!(
             out,
-            "| {} | {} | {} | {} |",
+            "| {} | {} | {}{} | {} |",
             step.index,
             code(&step.command),
             step.status.label(),
+            duration_suffix(step.times()),
             exit(step.exit_code)
         );
     }

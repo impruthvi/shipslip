@@ -12,13 +12,14 @@ use tokio::sync::{mpsc, watch, Semaphore};
 
 use crate::config::TrustedTarget;
 use crate::event::{
-    down_may_have_started, DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StopReason,
+    down_may_have_started, DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StepTimes,
+    StopReason,
 };
 use crate::lock::{self, Acquire, Break, LockInfo, LockOwner};
 use crate::observation::{self, LogObserver, SmokeResult, WatchResult, WatchStatus};
 use crate::preflight::{self, AbortReason, BlockReason, State};
 use crate::receipt::{
-    Receipt, ReceiptJournal, ReceiptKind, ReceiptPhase, ReceiptStatus, ReceiptStepStatus,
+    now_ms, Receipt, ReceiptJournal, ReceiptKind, ReceiptPhase, ReceiptStatus, ReceiptStepStatus,
 };
 use crate::runner::{self, run_collect, run_collect_each, StepResult};
 use crate::script::{is_full_sha, is_safe_branch, wrap_step};
@@ -1801,6 +1802,15 @@ async fn run_steps_locked<T: Transport>(
                 watching = true;
             }
         }
+        let sent_at_ms = now_ms();
+        // A step resumed by a later attach keeps the start its own run saved.
+        let started_at_ms = if active_step {
+            resume
+                .and_then(|receipt| receipt.steps.iter().find(|step| step.index == index))
+                .and_then(|step| step.started_at_ms)
+        } else {
+            Some(sent_at_ms)
+        };
         if !active_step {
             if stop.load(Ordering::SeqCst) || *detach.borrow() {
                 return End::Finished(stopped_before_plan(
@@ -1811,7 +1821,7 @@ async fn run_steps_locked<T: Transport>(
                 ));
             }
             if let Some(journal) = journal {
-                if let Err(error) = journal.begin_step(index) {
+                if let Err(error) = journal.begin_step(index, sent_at_ms) {
                     return End::Finished(stopped_before_plan(
                         index,
                         first_index,
@@ -1846,7 +1856,12 @@ async fn run_steps_locked<T: Transport>(
             Followed::Detached => return End::Detached(index),
             Followed::NotLaunched => {
                 if let Some(journal) = journal {
-                    if let Err(error) = journal.finish_step(index, StepStatus::NotStarted, None) {
+                    if let Err(error) = journal.finish_step(
+                        index,
+                        StepStatus::NotStarted,
+                        None,
+                        StepTimes::default(),
+                    ) {
                         return End::RunError(format!("could not save step result: {error}"));
                     }
                 }
@@ -1854,6 +1869,7 @@ async fn run_steps_locked<T: Transport>(
                     index,
                     status: StepStatus::NotStarted,
                     exit_code: None,
+                    times: StepTimes::default(),
                 });
                 return End::Finished(stopped_before_plan(
                     index,
@@ -1907,13 +1923,26 @@ async fn run_steps_locked<T: Transport>(
             }
             StepResult::Interrupted(reason) => return End::Interrupted { index, reason },
         };
+        let times = match status {
+            StepStatus::NotStarted => StepTimes::default(),
+            StepStatus::Ok | StepStatus::Failed if !active_step => StepTimes {
+                started_at_ms,
+                finished_at_ms: Some(now_ms()),
+            },
+            // Unknown, or a result first seen by a later attach: no end this
+            // Mac saw.
+            _ => StepTimes {
+                started_at_ms,
+                finished_at_ms: None,
+            },
+        };
         if let Some(journal) = journal {
             if let Some(DeployEvent::ServerState { head, tree_dirty }) = &server_state {
                 if let Err(error) = journal.server_state(head.clone(), *tree_dirty) {
                     return End::RunError(format!("could not save server state: {error}"));
                 }
             }
-            if let Err(error) = journal.finish_step(index, status.clone(), exit_code) {
+            if let Err(error) = journal.finish_step(index, status.clone(), exit_code, times) {
                 return End::RunError(format!("could not save step result: {error}"));
             }
         }
@@ -1921,6 +1950,7 @@ async fn run_steps_locked<T: Transport>(
             index,
             status,
             exit_code,
+            times,
         });
         if let Some(event) = server_state {
             let _ = events.send(event);
@@ -2864,10 +2894,21 @@ mod tests {
             .unwrap()
     }
 
-    async fn collect(mut rx: RunEvents) -> Vec<DeployEvent> {
+    async fn collect_timed(mut rx: RunEvents) -> Vec<DeployEvent> {
         let mut out = Vec::new();
         while let Some(e) = rx.recv().await {
             out.push(e);
+        }
+        out
+    }
+
+    /// Events without step times, which come from the real clock.
+    async fn collect(rx: RunEvents) -> Vec<DeployEvent> {
+        let mut out = collect_timed(rx).await;
+        for event in &mut out {
+            if let DeployEvent::StepFinished { times, .. } = event {
+                *times = StepTimes::default();
+            }
         }
         out
     }
@@ -3054,7 +3095,8 @@ mod tests {
                 DeployEvent::StepFinished {
                     index: 0,
                     status: StepStatus::Ok,
-                    exit_code: Some(0)
+                    exit_code: Some(0),
+                    times: StepTimes::default(),
                 },
                 DeployEvent::StepStarted {
                     index: 1,
@@ -3071,7 +3113,8 @@ mod tests {
                 DeployEvent::StepFinished {
                     index: 1,
                     status: StepStatus::Ok,
-                    exit_code: Some(0)
+                    exit_code: Some(0),
+                    times: StepTimes::default(),
                 },
                 DeployEvent::Finished(DeployOutcome::Succeeded),
             ]
@@ -3123,6 +3166,7 @@ mod tests {
             index: 1,
             status: StepStatus::Failed,
             exit_code: Some(255),
+            times: StepTimes::default(),
         }));
         assert_eq!(
             events.last(),
@@ -3814,6 +3858,7 @@ mod tests {
             index: 1,
             status: StepStatus::Failed,
             exit_code: Some(3),
+            times: StepTimes::default(),
         }));
         assert_eq!(fake.reconnects.load(Ordering::SeqCst), 1);
         assert_eq!(fake.launched("migrate"), 1);
@@ -3966,7 +4011,7 @@ mod tests {
             .finish_maintenance(MaintenancePhase::Down, StepStatus::Ok, Some(0))
             .unwrap();
         // Shipslip exited before step 1 was launched.
-        journal.begin_step(1).unwrap();
+        journal.begin_step(1, now_ms()).unwrap();
         let path = journal.path().to_path_buf();
         drop(journal);
 
@@ -4105,6 +4150,7 @@ mod tests {
             index: 1,
             status: StepStatus::NotStarted,
             exit_code: None,
+            times: StepTimes::default(),
         }));
         assert_eq!(
             events.last(),
@@ -4427,8 +4473,10 @@ mod tests {
         let dir = TempReceipts::new();
         let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
         journal.confirm().unwrap();
-        journal.begin_step(0).unwrap();
-        journal.finish_step(0, StepStatus::Ok, Some(0)).unwrap();
+        journal.begin_step(0, now_ms()).unwrap();
+        journal
+            .finish_step(0, StepStatus::Ok, Some(0), StepTimes::default())
+            .unwrap();
         journal.record_outcome(DeployOutcome::Succeeded).unwrap();
         let mut watch = WatchResult::not_run();
         watch.status = WatchStatus::Complete;
@@ -4529,6 +4577,7 @@ mod tests {
             index: 1,
             status: StepStatus::Ok,
             exit_code: Some(0),
+            times: StepTimes::default(),
         }));
         assert_eq!(
             events.last(),
@@ -4555,6 +4604,7 @@ mod tests {
                     index: 0,
                     status: StepStatus::NotStarted,
                     exit_code: None,
+                    times: StepTimes::default(),
                 },
                 DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
                     AbortReason::ConnectFailed("could not connect: refused".into())
@@ -4579,6 +4629,7 @@ mod tests {
             index: 1,
             status: StepStatus::NotStarted,
             exit_code: None,
+            times: StepTimes::default(),
         }));
         assert_eq!(
             events.last(),
@@ -5185,13 +5236,27 @@ mod tests {
         )
         .unwrap();
         gate.notify_one();
+        let events = collect_timed(events).await;
         assert_eq!(
-            collect(events).await.last(),
+            events.last(),
             Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
         );
         assert_eq!(fake.launched("git merge --ff-only"), 1);
         assert_eq!(fake.launched("deploy command"), 1);
-        assert_eq!(resumed.snapshot().status, ReceiptStatus::Final);
+        let receipt = resumed.snapshot();
+        assert_eq!(receipt.status, ReceiptStatus::Final);
+        // Step 0's end was first seen by this later attach, so it stays empty;
+        // step 1 was sent and seen by the attach itself.
+        let observed = receipt.steps[0].times();
+        assert!(observed.started_at_ms.is_some());
+        assert_eq!(observed.finished_at_ms, None);
+        assert!(events.contains(&DeployEvent::StepFinished {
+            index: 0,
+            status: StepStatus::Ok,
+            exit_code: Some(0),
+            times: observed,
+        }));
+        assert_step_times(&receipt, &events, &[1]);
         assert_eq!(fake.lock_owner(), None);
     }
 
@@ -5202,10 +5267,14 @@ mod tests {
         let dir = TempReceipts::new();
         let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
         journal.confirm().unwrap();
-        journal.begin_step(0).unwrap();
-        journal.finish_step(0, StepStatus::Ok, Some(0)).unwrap();
-        journal.begin_step(1).unwrap();
-        journal.finish_step(1, StepStatus::Ok, Some(0)).unwrap();
+        journal.begin_step(0, now_ms()).unwrap();
+        journal
+            .finish_step(0, StepStatus::Ok, Some(0), StepTimes::default())
+            .unwrap();
+        journal.begin_step(1, now_ms()).unwrap();
+        journal
+            .finish_step(1, StepStatus::Ok, Some(0), StepTimes::default())
+            .unwrap();
         journal
             .record_outcome(DeployOutcome::StoppedAfterStep {
                 step: 1,
@@ -5235,7 +5304,7 @@ mod tests {
         let dir = TempReceipts::new();
         let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
         journal.confirm().unwrap();
-        journal.begin_step(0).unwrap();
+        journal.begin_step(0, now_ms()).unwrap();
         let path = journal.path().to_path_buf();
         drop(journal);
 
@@ -5333,6 +5402,141 @@ mod tests {
             error.contains("1-older-run.json") && error.contains("cannot be resumed"),
             "{error}"
         );
+    }
+
+    async fn timed_run(fake: Fake, steps: &[&str], plan: RunPlan) -> (Receipt, Vec<DeployEvent>) {
+        let fake = Arc::new(fake);
+        let preview = prepared_with_plan(&fake, false, steps, plan).await;
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, _handle) = execute_recorded(preview, confirmation, fake, journal.clone()).unwrap();
+        let events = collect_timed(rx).await;
+        (journal.snapshot(), events)
+    }
+
+    /// Each `timed` step has both times inside the run and the finished event
+    /// carries the times the receipt saved; steps that never ran have none.
+    fn assert_step_times(receipt: &Receipt, events: &[DeployEvent], timed: &[usize]) {
+        let run_end = receipt.finished_at_ms.expect("run finished");
+        for step in &receipt.steps {
+            let times = step.times();
+            if !timed.contains(&step.index) {
+                if matches!(
+                    step.status,
+                    ReceiptStepStatus::Pending
+                        | ReceiptStepStatus::Skipped
+                        | ReceiptStepStatus::NotStarted
+                ) {
+                    assert_eq!(times, StepTimes::default(), "step {}", step.index);
+                }
+                continue;
+            }
+            let (Some(start), Some(end)) = (times.started_at_ms, times.finished_at_ms) else {
+                panic!("step {} has no times: {times:?}", step.index);
+            };
+            assert!(receipt.started_at_ms <= start && start <= end && end <= run_end);
+            let sent = events.iter().find_map(|event| match event {
+                DeployEvent::StepFinished { index, times, .. } if *index == step.index => {
+                    Some(*times)
+                }
+                _ => None,
+            });
+            assert_eq!(sent, Some(times), "step {}", step.index);
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_deploy_times_each_step() {
+        let fake = preflight()
+            .on("git merge --ff-only", &[], 0)
+            .on("composer install", &[], 0);
+        let (receipt, events) =
+            timed_run(fake, &["composer install --no-dev"], RunPlan::Deploy).await;
+        assert_eq!(receipt.outcome, Some(DeployOutcome::Succeeded));
+        assert_step_times(&receipt, &events, &[0, 1]);
+    }
+
+    #[tokio::test]
+    async fn failed_step_is_timed_and_later_steps_are_not() {
+        let fake =
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .on("migrate", &["SQLSTATE[42S22]"], 1);
+        let (receipt, events) = timed_run(
+            fake,
+            &["php artisan migrate --force", "php artisan optimize"],
+            RunPlan::Deploy,
+        )
+        .await;
+        assert!(matches!(
+            receipt.outcome,
+            Some(DeployOutcome::FailedAtStep { step: 1, .. })
+        ));
+        assert_eq!(receipt.steps[1].status, ReceiptStepStatus::Failed);
+        assert_step_times(&receipt, &events, &[0, 1]);
+    }
+
+    #[tokio::test]
+    async fn step_that_never_started_has_no_times() {
+        let fake = preflight()
+            .on("git merge --ff-only", &[], 0)
+            .launch("migrate", Launch::Unreachable);
+        let (receipt, events) =
+            timed_run(fake, &["php artisan migrate --force"], RunPlan::Deploy).await;
+        assert_eq!(receipt.steps[1].status, ReceiptStepStatus::NotStarted);
+        assert!(events.contains(&DeployEvent::StepFinished {
+            index: 1,
+            status: StepStatus::NotStarted,
+            exit_code: None,
+            times: StepTimes::default(),
+        }));
+        assert_step_times(&receipt, &events, &[0]);
+    }
+
+    #[tokio::test]
+    async fn unknown_step_keeps_its_start_without_an_end() {
+        let fake = preflight()
+            .on("git merge --ff-only", &[], 0)
+            .vanishes("migrate");
+        let (receipt, events) =
+            timed_run(fake, &["php artisan migrate --force"], RunPlan::Deploy).await;
+        assert_eq!(receipt.steps[1].status, ReceiptStepStatus::Unknown);
+        let times = receipt.steps[1].times();
+        assert!(times
+            .started_at_ms
+            .is_some_and(|start| start >= receipt.started_at_ms));
+        assert_eq!(times.finished_at_ms, None);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DeployEvent::StepFinished { index: 1, times: sent, .. } if *sent == times
+        )));
+        assert_step_times(&receipt, &events, &[0]);
+    }
+
+    #[tokio::test]
+    async fn rerun_times_its_steps_and_not_skipped_ones() {
+        let fake = preflight()
+            .server(|s| {
+                s.head = TO.into();
+                s.target = TO.into();
+            })
+            .on("optimize", &[], 0)
+            .on("queue:restart", &[], 0);
+        let (receipt, events) = timed_run(
+            fake,
+            &[
+                "php artisan migrate --force",
+                "php artisan optimize",
+                "php artisan queue:restart",
+            ],
+            RunPlan::FromStep(2),
+        )
+        .await;
+        assert_eq!(receipt.outcome, Some(DeployOutcome::Succeeded));
+        assert_eq!(receipt.steps[0].status, ReceiptStepStatus::Skipped);
+        assert_step_times(&receipt, &events, &[2, 3]);
     }
 
     #[tokio::test]
