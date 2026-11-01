@@ -11,6 +11,7 @@ fn forbidden_paths(source: &str) -> Vec<String> {
         .filter_map(|(index, token)| {
             let next = tokens.get(index + 1).map(String::as_str);
             let segment = tokens.get(index + 2).map(String::as_str);
+            let previous = tokens.get(index.wrapping_sub(1)).map(String::as_str);
             let forbidden = match token.as_str() {
                 "shipslip" => {
                     next == Some("::") && segment != Some("read_only")
@@ -22,6 +23,10 @@ fn forbidden_paths(source: &str) -> Vec<String> {
                 }
                 "super" => next == Some("::"),
                 "crate" => next == Some("::") && segment != Some("mcp") || next == Some("as"),
+                "include" => next == Some("!"),
+                "path" => next == Some("=") && matches!(previous, Some("[" | ",")),
+                // Reject identifiers too, so grouped imports and aliases cannot hide spawning.
+                "process" | "Command" => true,
                 _ => false,
             };
             forbidden.then(|| tokens[index..tokens.len().min(index + 3)].join(" "))
@@ -51,6 +56,11 @@ fn tokens(mut source: &str) -> Vec<String> {
             source = rest;
         } else if let Some(len) = character_literal_len(source) {
             source = &source[len..];
+        } else if let Some(rest) = source
+            .strip_prefix("r#")
+            .filter(|rest| rest.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_'))
+        {
+            source = rest;
         } else if source.starts_with('r') && source[1..].trim_start_matches('#').starts_with('"') {
             let hashes = source[1..].len() - source[1..].trim_start_matches('#').len();
             let rest = &source[hashes + 2..];
@@ -149,6 +159,19 @@ fn allow_list_rejects_forbidden_paths_including_new_library_apis() {
         "use r#shipslip::execute;",
         "let quote = '\"'; shipslip::execute();",
         "let quote = '\\u{22}'; shipslip::execute();",
+        "include!(\"../deploy.rs\");",
+        "std::include /* comment */ ! {\"../deploy.rs\"}",
+        "#[path = \"../deploy.rs\"] mod deploy;",
+        "#[r#path = \"../deploy.rs\"] mod deploy;",
+        "#[cfg_attr(unix, path = \"../deploy.rs\")] mod deploy;",
+        "use std::process;",
+        "use tokio::process as runner;",
+        "use std::{process::Command as Runner};",
+        "use tokio::{process::{self as runner}};",
+        "std::process::Command::new(\"ssh\").spawn();",
+        "tokio::process::Command::new(\"slip\").spawn();",
+        "Command::new(\"ssh\").spawn();",
+        "use std as system; system::process::Command::new(\"ssh\");",
     ] {
         assert!(!forbidden_paths(source).is_empty(), "accepted {source}");
     }
@@ -158,6 +181,9 @@ fn allow_list_rejects_forbidden_paths_including_new_library_apis() {
         "// use shipslip::execute;\nuse shipslip::read_only::Reader;",
         "let text = \"shipslip::execute()\";",
         "let text = r###\"shipslip::execute()\"###;",
+        "// include!(\"../deploy.rs\"); Command::new(\"ssh\");",
+        "/* #[path = \"../deploy.rs\"] mod deploy; use std::process; */",
+        "let text = r###\"include!(\"../deploy.rs\"); #[path = \"deploy.rs\"] mod deploy; Command::new(\"ssh\");\"###;",
     ] {
         assert!(forbidden_paths(source).is_empty(), "rejected {source}");
     }

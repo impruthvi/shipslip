@@ -1,4 +1,5 @@
-//! The MCP server's only library boundary: records already held on this Mac.
+//! The MCP server's only library boundary: records from this Mac and log
+//! snapshots for approved environments.
 
 use crate::config::LoadedConfig;
 use crate::logs;
@@ -12,11 +13,18 @@ use crate::records::{self, ReceiptList, ReceiptRecord, Status};
 pub use crate::records::{versioned, versioned_error, ReceiptQueryError};
 
 /// A connection factory, injectable at the transport boundary for protocol tests.
+/// Connections require a target checked by this module, not an arbitrary alias.
+///
+/// ```compile_fail,E0308
+/// use shipslip::read_only::{Connector, SshConnector};
+///
+/// let _connection = SshConnector.connect("unapproved-host");
+/// ```
 pub trait Connector {
     type Connection: Transport;
     fn connect(
         &self,
-        alias: &str,
+        target: &ApprovedTarget,
     ) -> impl Future<Output = Result<Self::Connection, TransportError>> + Send;
 }
 
@@ -25,14 +33,28 @@ pub struct SshConnector;
 #[cfg(unix)]
 impl Connector for SshConnector {
     type Connection = crate::transport::SshTransport;
-    async fn connect(&self, alias: &str) -> Result<Self::Connection, TransportError> {
-        crate::transport::SshTransport::connect(alias).await
+    async fn connect(&self, target: &ApprovedTarget) -> Result<Self::Connection, TransportError> {
+        crate::transport::SshTransport::connect(target.ssh_alias()).await
     }
 }
 
 /// A target checked against both the release map and the current approval.
 /// It has no public constructor and carries no mutation capability.
-struct ApprovedTarget(DeployTarget);
+///
+/// ```compile_fail,E0423
+/// use shipslip::read_only::ApprovedTarget;
+///
+/// fn forge(target: shipslip::DeployTarget) -> ApprovedTarget {
+///     ApprovedTarget(target)
+/// }
+/// ```
+pub struct ApprovedTarget(DeployTarget);
+
+impl ApprovedTarget {
+    pub fn ssh_alias(&self) -> &str {
+        &self.0.ssh_alias
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct LogQuery {
@@ -139,7 +161,7 @@ impl<C: Connector> Reader<C> {
         query: &LogQuery,
     ) -> Result<logs::Snapshot, LogsQueryError> {
         let approved = self.approved_target(checkout, environment)?;
-        let transport = self.connector.connect(&approved.0.ssh_alias).await?;
+        let transport = self.connector.connect(&approved).await?;
         let request = logs::Request {
             since: query.since.clone(),
             allow_outside: true,
