@@ -1456,7 +1456,21 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
     assert!(summary_json.stderr.is_empty());
     let summary_json: serde_json::Value = serde_json::from_slice(&summary_json.stdout).unwrap();
     assert_eq!(summary_json["schema"], 1);
-    assert!(!summary_json["groups"].as_array().unwrap().is_empty());
+    assert_eq!(
+        summary_json["window"]["anchor"],
+        serde_json::json!({"kind": "default", "seconds": 86400})
+    );
+    assert_eq!(
+        summary_json["window"]["anchor_fallbacks"],
+        serde_json::json!([
+            {"kind": "last_run_marker", "reason": {"kind": "missing"}},
+            {"kind": "checkout_change", "reason": {"kind": "reflog_missing"}}
+        ])
+    );
+    let groups = summary_json["groups"].as_array().unwrap();
+    assert!(groups
+        .iter()
+        .any(|group| group["exception"] == "RuntimeException"));
     for query in [
         "1",
         summary_json["groups"][0]["id"].as_str().unwrap(),
@@ -1532,6 +1546,37 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
     assert_eq!(ambiguous.status.code(), Some(2));
     assert!(ambiguous.stdout.is_empty());
     assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("matches several groups"));
+    let earlier = server.exec("date -u -d '-2 hours' '+%F %T'", "");
+    let now = server.exec("date -u '+%F %T'", "");
+    server.exec(
+        &format!("cat > {path}/storage/logs/laravel.log"),
+        &format!(
+            "[{earlier}] production.ERROR: OldException: before\n\
+             [{now}] production.ERROR: OldException: again\n\
+             [{now}] production.ERROR: FreshException: after\n"
+        ),
+    );
+    let since = run_cli(&["logs", "staging", "--since", "1h", "--json"]);
+    assert!(
+        since.status.success(),
+        "{}",
+        String::from_utf8_lossy(&since.stdout)
+    );
+    let since: serde_json::Value = serde_json::from_slice(&since.stdout).unwrap();
+    assert_eq!(
+        since["window"]["anchor"],
+        serde_json::json!({"kind": "since", "since": {"kind": "ago", "value": 3600}})
+    );
+    let badge = |exception: &str| {
+        since["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|group| group["exception"] == exception)
+            .map(|group| group["badge"].clone())
+    };
+    assert_eq!(badge("FreshException"), Some("new".into()));
+    assert_eq!(badge("OldException"), Some("seen".into()));
 }
 
 #[cfg(unix)]

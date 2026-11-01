@@ -152,6 +152,13 @@ fn summary_preserves_every_group_badge_count_variant_and_overflow() {
                 "new"
             }
         );
+        let expected = match group.badge {
+            Badge::New => "new",
+            Badge::Seen => "seen",
+            Badge::Unknown => "no_baseline",
+        };
+        assert_eq!(record["badge"], expected);
+        assert_eq!(record["variants"][0]["badge"], expected);
         assert_eq!(record["variants"][0]["count"], 1);
         assert_eq!(record["variants"][0]["file"], "/srv/app/app/Job.php");
         assert_eq!(record["variants"][0]["line"], 17);
@@ -163,6 +170,11 @@ fn summary_preserves_every_group_badge_count_variant_and_overflow() {
     let record =
         serde_json::to_value(logs_summary(&snapshot, &groups, Level::Error, None)).unwrap();
     assert!(record["groups"][0]["overflow_variants"].as_u64().unwrap() > 0);
+    assert!(record["groups"][0]["variants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|variant| variant["badge"] == "no_baseline"));
 }
 
 #[test]
@@ -224,6 +236,18 @@ fn channels_report_all_formats_coverage_samples_and_empty_snapshots() {
             }
         );
         assert_eq!(value["channels"][0]["omitted_files"], 2);
+        assert_eq!(value["channels"][0]["name"], "laravel");
+        assert_eq!(
+            value["channels"][0]["files"],
+            json!(["storage/logs/laravel.log"])
+        );
+        assert_eq!(value["channels"][0]["size"], 0);
+        assert_eq!(value["channels"][0]["last_write"], json!(null));
+        assert_eq!(
+            value["channels"][0]["baseline"],
+            json!({"available":false,"coverage":{"kind":"partial","from":null},"to":null})
+        );
+        assert_eq!(value["bytes_transferred"], 42);
         assert_eq!(
             value["channels"][0]["changed_during_read"],
             json!(["rotated.log"])
