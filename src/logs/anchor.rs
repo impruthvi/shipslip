@@ -23,7 +23,6 @@ pub(super) struct Probe {
 }
 
 pub(super) struct Choice {
-    pub label: String,
     pub anchor: Anchor,
     pub time: WindowTime,
     pub marker: Option<Marker>,
@@ -39,7 +38,6 @@ impl Choice {
         fallbacks: Vec<AnchorFallback>,
     ) -> Self {
         Self {
-            label: anchor.label(),
             warnings: fallbacks
                 .iter()
                 .filter_map(AnchorFallback::warning)
@@ -369,30 +367,48 @@ mod tests {
         probe.head = Some(Ok("b".repeat(40)));
         probe.active = Some(("r-one".into(), Some(2)));
         let choice = probe.choose(time());
-        assert!(choice
-            .label
-            .contains("deploy in progress (run r-one, step 2)"));
+        assert_eq!(
+            choice.anchor,
+            Anchor::RunInProgress {
+                run_id: "r-one".into(),
+                step: Some(2)
+            }
+        );
         assert!(choice.marker.is_some());
     }
     #[test]
     fn verifies_tip_and_labels_git_errors_and_missing_tips() {
         let mut probe = probe();
-        assert!(probe.choose(time()).label.contains("succeeded"));
+        assert!(matches!(
+            probe.choose(time()).anchor,
+            Anchor::Run {
+                check: RunCheck::Verified,
+                reflog_recorded: true,
+                ..
+            }
+        ));
         probe.reflog = Some(Ok(format!(
             "{} HEAD@{{900}} checkout: moved back",
             "a".repeat(40)
         )));
         let choice = probe.choose(time());
-        assert!(choice.label.starts_with("since checkout change"));
+        assert!(matches!(choice.anchor, Anchor::CheckoutChange { .. }));
         assert!(choice.warnings[0].contains("checkout changed after run"));
         probe.head = Some(Err("dubious ownership".into()));
-        assert!(probe
-            .choose(time())
-            .label
-            .contains("unverified: dubious ownership"));
+        assert!(matches!(
+            probe.choose(time()).anchor,
+            Anchor::Run { check: RunCheck::Unverified { reason }, .. }
+                if reason.raw() == "dubious ownership"
+        ));
         probe.head = Some(Ok("a".repeat(40)));
         probe.marker.as_mut().unwrap().as_mut().unwrap().reflog_tip = None;
-        assert!(probe.choose(time()).label.contains("outcome unknown"));
+        assert!(matches!(
+            probe.choose(time()).anchor,
+            Anchor::Run {
+                reflog_recorded: false,
+                ..
+            }
+        ));
     }
     #[test]
     fn corrupt_markers_and_failed_reflogs_are_not_silently_missing() {
@@ -401,7 +417,7 @@ mod tests {
         assert!(probe.choose(time()).warnings[0].contains("corrupt"));
         probe.reflog = Some(Err("git refused".into()));
         let choice = probe.choose(time());
-        assert_eq!(choice.label, "since 24h (default)");
+        assert!(matches!(choice.anchor, Anchor::Default { .. }));
         assert!(choice
             .warnings
             .iter()

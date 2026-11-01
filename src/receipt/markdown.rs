@@ -280,7 +280,7 @@ fn short(sha: &str) -> &str {
 }
 
 /// Text inside a table cell or list item: one line, no Markdown syntax.
-pub(crate) fn inline(text: &str) -> String {
+pub fn inline(text: &str) -> String {
     let mut out = String::new();
     for c in escape_field(text).chars() {
         if matches!(
@@ -308,7 +308,7 @@ pub(crate) fn inline(text: &str) -> String {
 }
 
 /// Inline code that no backtick in `text` can close early.
-pub(crate) fn code(text: &str) -> String {
+pub fn code(text: &str) -> String {
     let text = escape_field(text).replace('|', "\\|");
     let ticks = "`".repeat(longest_run(&text, '`') + 1);
     let pad = if text.starts_with('`') || text.ends_with('`') {
@@ -320,7 +320,7 @@ pub(crate) fn code(text: &str) -> String {
 }
 
 /// A fenced block longer than any backtick run inside it.
-pub(crate) fn fence(text: &str) -> String {
+pub fn fence(text: &str) -> String {
     let text = escape(text);
     let ticks = "`".repeat((longest_run(&text, '`') + 1).max(3));
     format!("{ticks}text\n{text}\n{ticks}")

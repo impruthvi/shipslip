@@ -74,18 +74,11 @@ async fn read(probe: &str, request: Request) -> shipslip::logs::Snapshot {
 async fn default_anchor_exposes_the_24_hour_window() {
     let snapshot = read("@marker missing\n@reflog missing", Request::default()).await;
     assert_eq!(snapshot.anchor, Anchor::Default { seconds: 86400 });
-    assert_eq!(snapshot.since_label, "since 24h (default)");
 }
 
 #[tokio::test]
 async fn explicit_since_keeps_the_users_relative_or_local_time() {
-    for (since, label) in [
-        (Since::Ago(7200), "since 2h"),
-        (
-            Since::At("2026-10-01 14:00".into()),
-            "since 2026-10-01 14:00",
-        ),
-    ] {
+    for since in [Since::Ago(7200), Since::At("2026-10-01 14:00".into())] {
         let snapshot = read(
             "@marker missing",
             Request {
@@ -95,7 +88,6 @@ async fn explicit_since_keeps_the_users_relative_or_local_time() {
         )
         .await;
         assert_eq!(snapshot.anchor, Anchor::Since { since });
-        assert_eq!(snapshot.since_label, label);
     }
 }
 
@@ -112,10 +104,6 @@ async fn verified_run_keeps_marker_outcome_as_server_text() {
             server_marker_outcome: Some(Untrusted::new("succeeded")),
             reflog_recorded: true,
         }
-    );
-    assert_eq!(
-        snapshot.since_label,
-        "since slip deploy r-one (aaaaaaa, succeeded)"
     );
 }
 
@@ -136,14 +124,6 @@ async fn an_active_run_exposes_its_id_and_optional_step() {
                 step
             }
         );
-        assert_eq!(
-            snapshot.since_label,
-            if step.is_some() {
-                "deploy in progress (run r-one, step 2); since run start"
-            } else {
-                "deploy in progress (run r-one); since run start"
-            }
-        );
     }
 }
 
@@ -158,7 +138,6 @@ async fn checkout_change_exposes_the_full_commit() {
         snapshot.anchor,
         Anchor::CheckoutChange { commit: SHA.into() }
     );
-    assert_eq!(snapshot.since_label, "since checkout change aaaaaaa");
 }
 
 #[tokio::test]
@@ -394,10 +373,6 @@ async fn git_read_errors_keep_the_run_but_mark_its_check_unverified() {
         );
         assert_eq!(server_marker_outcome, Some(Untrusted::new("succeeded")));
         assert!(snapshot.anchor_fallbacks.is_empty());
-        assert_eq!(
-            snapshot.since_label,
-            format!("since slip deploy r-one (aaaaaaa, unverified: {reason})")
-        );
     }
 }
 
@@ -418,10 +393,6 @@ async fn an_outcome_without_recorded_reflog_stays_server_text_but_the_label_is_u
     assert_eq!(check, RunCheck::Verified);
     assert_eq!(server_marker_outcome, Some(Untrusted::new("succeeded")));
     assert!(!reflog_recorded);
-    assert_eq!(
-        snapshot.since_label,
-        "since slip deploy r-one (aaaaaaa, outcome unknown)"
-    );
 }
 
 #[tokio::test]
@@ -436,10 +407,6 @@ async fn an_unfinished_marker_has_no_server_outcome() {
             ..
         }
     ));
-    assert_eq!(
-        snapshot.since_label,
-        "since slip deploy r-one (aaaaaaa, outcome unknown)"
-    );
 }
 
 #[tokio::test]
@@ -458,7 +425,6 @@ async fn explicit_since_bypasses_anchor_failures() {
             since: Since::Ago(86400)
         }
     );
-    assert_eq!(snapshot.since_label, "since 1d");
     assert!(snapshot.anchor_fallbacks.is_empty());
     assert!(!snapshot
         .warnings

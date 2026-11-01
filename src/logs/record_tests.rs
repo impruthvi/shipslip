@@ -6,7 +6,6 @@ fn fixture(text: &str) -> Snapshot {
     Snapshot {
         env: "production".into(),
         zone: "UTC".into(),
-        since_label: "ignored text label".into(),
         anchor: Anchor::Default { seconds: 86400 },
         anchor_fallbacks: vec![],
         start: "2026-10-01 00:00:00".into(),

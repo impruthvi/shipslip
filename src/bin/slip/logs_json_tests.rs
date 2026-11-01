@@ -76,7 +76,7 @@ fn every_logs_failure_has_a_schema_one_kind_and_the_text_commands_exit_code() {
     }
 }
 
-struct LogReply(String);
+pub(super) struct LogReply(pub(super) String);
 
 impl shipslip::transport::Transport for LogReply {
     async fn run(
@@ -104,7 +104,7 @@ impl shipslip::transport::Transport for LogReply {
     }
 }
 
-async fn read(text: &str) -> logs::Snapshot {
+pub(super) async fn read(text: &str) -> logs::Snapshot {
     let target = DeployTarget {
         env: "production".into(),
         production: true,

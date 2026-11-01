@@ -17,6 +17,12 @@ pub struct LogsSummary {
     pub warnings: Vec<Untrusted>,
     pub bytes_transferred: u64,
     pub text_fields: Vec<LogTextField>,
+    /// Entries in the window by level, most severe first, ignoring any filter.
+    #[serde(skip)]
+    pub level_counts: Vec<(Level, u64)>,
+    /// Off only when grouping skipped the comparison; the text says so.
+    #[serde(skip)]
+    pub baseline_enabled: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,6 +87,14 @@ pub struct LogChannel {
     pub last_write: Option<Untrusted>,
     pub format: LogFormat,
     pub baseline: LogBaseline,
+    /// The channel's config key, which differs from `name` after a rename.
+    #[serde(skip)]
+    pub key: Untrusted,
+    /// What was configured or looked for, for messages when nothing is found.
+    #[serde(skip)]
+    pub source: Untrusted,
+    #[serde(skip)]
+    pub bytes_read: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +127,13 @@ pub struct LogBaseline {
     pub available: bool,
     pub coverage: LogCoverage,
     pub to: Option<Untrusted>,
+    /// The oldest baseline entry read, even when the read was complete.
+    #[serde(skip)]
+    pub from: Option<Untrusted>,
+    #[serde(skip)]
+    pub bytes_read: u64,
+    #[serde(skip)]
+    pub format: Option<LogFormat>,
 }
 
 /// Size describes the full recorded text, before any MCP clipping.
@@ -168,18 +189,18 @@ pub fn logs_summary(
                 changed_during_read: channel.changed.iter().cloned().map(Into::into).collect(),
                 size: channel.size,
                 last_write: channel.last_write.clone().map(Into::into),
-                format: match channel.format {
-                    logs::Format::Recognized => LogFormat::Recognized,
-                    logs::Format::Partial(percent) => LogFormat::Partial { percent },
-                    logs::Format::Unrecognized => LogFormat::Unrecognized,
-                    logs::Format::Empty => LogFormat::Empty,
-                    logs::Format::NotRead => LogFormat::NotRead,
-                },
+                format: format(&channel.format),
                 baseline: LogBaseline {
                     available: channel.baseline.available,
                     coverage: coverage(channel.baseline.complete, &channel.baseline.covered_from),
                     to: channel.baseline.covered_to.clone().map(Into::into),
+                    from: channel.baseline.covered_from.clone().map(Into::into),
+                    bytes_read: channel.baseline.bytes_read,
+                    format: channel.baseline.format.as_ref().map(format),
                 },
+                key: channel.key.clone().into(),
+                source: channel.source.clone().into(),
+                bytes_read: channel.bytes_read,
             })
             .collect(),
         unrecognized_samples: snapshot
@@ -196,10 +217,22 @@ pub fn logs_summary(
         warnings: snapshot.warnings.iter().cloned().map(Into::into).collect(),
         bytes_transferred: snapshot.bytes_transferred,
         text_fields: Vec::new(),
+        level_counts: logs::level_counts(snapshot),
+        baseline_enabled: snapshot.baseline_enabled,
     };
     record.text_fields =
         text_fields(&serde_json::to_value(&record).expect("JSON-safe logs record"));
     record
+}
+
+fn format(format: &logs::Format) -> LogFormat {
+    match format {
+        logs::Format::Recognized => LogFormat::Recognized,
+        logs::Format::Partial(percent) => LogFormat::Partial { percent: *percent },
+        logs::Format::Unrecognized => LogFormat::Unrecognized,
+        logs::Format::Empty => LogFormat::Empty,
+        logs::Format::NotRead => LogFormat::NotRead,
+    }
 }
 
 fn coverage(complete: bool, from: &Option<String>) -> LogCoverage {
@@ -391,6 +424,9 @@ pub struct LogEntry {
     pub truncated: bool,
     pub clipped: bool,
     pub bytes: usize,
+    /// The message's first line without Laravel's context and extra JSON.
+    #[serde(skip)]
+    pub headline: Untrusted,
 }
 
 #[derive(Debug, Serialize)]
@@ -426,7 +462,7 @@ pub fn logs_detail(
     level: Level,
     text: Option<&str>,
 ) -> LogsDetail {
-    let same_request = match logs::related_with_limit(snapshot, group.latest, usize::MAX) {
+    let same_request = match logs::related(snapshot, group.latest) {
         logs::Correlation::Shared(related) => SameRequest::Shared {
             key: related.id.key,
             value: related.id.value.into(),
@@ -441,7 +477,7 @@ pub fn logs_detail(
                 .iter()
                 .map(|i| entry_record(snapshot, *i))
                 .collect(),
-            more: related.more,
+            more: 0,
             may_be_missing: related.partial,
         },
         logs::Correlation::NoId => SameRequest::NoId,
@@ -472,6 +508,7 @@ fn entry_record(snapshot: &Snapshot, index: usize) -> LogEntry {
         truncated: entry.truncated,
         clipped: false,
         bytes: entry.text.len(),
+        headline: logs::headline(entry).into(),
     }
 }
 

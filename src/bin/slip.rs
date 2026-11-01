@@ -17,6 +17,7 @@ use shipslip::logs::{self, Level, Lookup, Since};
 use shipslip::receipt::{
     default_receipts_root, duration_suffix, find_open, strip_color, ReceiptJournal, ReceiptKind,
 };
+use shipslip::records;
 use shipslip::transport::SshTransport;
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, check_resumable, execute_recorded, lock_status,
@@ -39,6 +40,8 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 mod github_token;
 use github_token::{LocalTokens, TokenSource};
 
+#[path = "slip/logs_words.rs"]
+mod logs_words;
 #[path = "slip/mcp.rs"]
 mod mcp;
 #[path = "slip/new.rs"]
@@ -135,8 +138,6 @@ fn record_json_requested(args: &[String]) -> bool {
 }
 
 fn render_record_error_json(message: &str, invalid: bool) -> String {
-    use shipslip::records;
-
     #[derive(serde::Serialize)]
     struct Error {
         kind: &'static str,
@@ -1090,19 +1091,20 @@ async fn logs_command(
     );
     let transport = SshTransport::connect(&target.ssh_alias).await?;
     let request = logs::Request {
-        since: options.since,
+        since: options.since.clone(),
         max_bytes: options.max_bytes,
         allow_outside: trusted,
     };
     let snapshot = logs::snapshot(&transport, &target, &request).await?;
-    if options.channels {
-        print!("{}", logs::render_channels(&snapshot));
-        return Ok(ExitCode::SUCCESS);
-    }
     let grep = options.grep.as_deref();
-    if options.raw {
+    if options.channels || options.raw {
         let level = options.level.unwrap_or(Level::Debug);
-        print!("{}", logs::render_raw(&snapshot, level, grep));
+        let summary = records::logs_summary(&snapshot, &logs::Groups::default(), level, grep);
+        if options.channels {
+            print!("{}", logs_words::channels(&summary));
+        } else {
+            print!("{}", logs_words::raw_entries(&summary, &snapshot.entries));
+        }
         return Ok(ExitCode::SUCCESS);
     }
     let level = options.level.unwrap_or(Level::Error);
@@ -1113,37 +1115,50 @@ async fn logs_command(
         println!("{}", serde_json::to_string(&record)?);
         return Ok(ExitCode::from(code));
     }
-    let Some(query) = options.query else {
-        print!(
-            "{}",
-            logs::render_summary(&snapshot, &groups, level, grep, options.all)
-        );
-        return Ok(ExitCode::SUCCESS);
+    let (text, code) = logs_text(&snapshot, &groups, level, grep, &options);
+    if code == 0 {
+        print!("{text}");
+    } else {
+        eprint!("{text}");
+    }
+    Ok(ExitCode::from(code))
+}
+
+/// `slip logs` text and its exit code. A failed lookup goes to standard error.
+fn logs_text(
+    snapshot: &logs::Snapshot,
+    groups: &logs::Groups,
+    level: Level,
+    grep: Option<&str>,
+    options: &LogsOptions,
+) -> (String, u8) {
+    let Some(query) = options.query.as_deref() else {
+        let summary = records::logs_summary(snapshot, groups, level, grep);
+        return (logs_words::summary(&summary, options.all), 0);
     };
-    match logs::find(&groups, &query) {
+    match logs::find(groups, query) {
         Lookup::Found(group) => {
-            if options.md {
-                let filter = logs::DetailFilter { level, grep };
-                print!(
-                    "{}",
-                    logs::render_detail_md(&snapshot, group, &filter, options.full)
-                );
+            let detail = records::logs_detail(snapshot, group, level, grep);
+            let text = if options.md {
+                logs_words::detail_md(&detail, options.full)
             } else {
-                print!("{}", logs::render_detail(&snapshot, group, options.full));
-                print!(
-                    "{}",
-                    logs::render_related(&snapshot, group, &options.window_args)
-                );
-            }
-            Ok(ExitCode::SUCCESS)
+                logs_words::detail(&detail, options.full)
+                    + &logs_words::related(&detail, &options.window_args)
+            };
+            (text, 0)
         }
         Lookup::Ambiguous(matches) => {
-            eprint!("{}", logs::render_ambiguous(&matches));
-            Ok(ExitCode::from(2))
+            let summary = records::logs_summary(snapshot, groups, level, grep);
+            let matches: Vec<_> = summary
+                .groups
+                .iter()
+                .filter(|group| matches.iter().any(|m| group.id.raw() == m.id))
+                .collect();
+            (logs_words::ambiguous(&matches), 2)
         }
         Lookup::Missing => {
-            eprint!("{}", logs::render_miss(&snapshot, &query));
-            Ok(ExitCode::FAILURE)
+            let summary = records::logs_summary(snapshot, &logs::Groups::default(), level, grep);
+            (logs_words::miss(&summary, query), 1)
         }
     }
 }
@@ -1155,7 +1170,7 @@ fn logs_json_record(
     level: Level,
     grep: Option<&str>,
 ) -> Result<(serde_json::Value, u8), serde_json::Error> {
-    use shipslip::records::{self, LogsQueryError};
+    use shipslip::records::LogsQueryError;
     let result = match query.map(|query| logs::find(groups, query)) {
         None => serde_json::to_value(records::versioned(records::logs_summary(
             snapshot, groups, level, grep,
@@ -2462,3 +2477,7 @@ mod tests {
 #[cfg(test)]
 #[path = "slip/logs_json_tests.rs"]
 mod logs_json_tests;
+
+#[cfg(test)]
+#[path = "slip/logs_words_tests.rs"]
+mod logs_words_tests;
