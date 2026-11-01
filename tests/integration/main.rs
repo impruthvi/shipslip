@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 const IMAGE: &str = "shipslip-test-sshd";
 
 mod github_token;
+mod mcp;
 
 fn docker(args: &[&str]) -> String {
     let out = Command::new("docker")
@@ -1446,6 +1447,34 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
     let detail = run_cli(&["logs", "staging", &id.to_uppercase()]);
     assert!(detail.status.success());
     assert!(String::from_utf8_lossy(&detail.stdout).contains("[stacktrace]"));
+    let summary_json = run_cli(&["logs", "staging", "--json", "--full"]);
+    assert!(
+        summary_json.status.success(),
+        "{}",
+        String::from_utf8_lossy(&summary_json.stderr)
+    );
+    assert!(summary_json.stderr.is_empty());
+    let summary_json: serde_json::Value = serde_json::from_slice(&summary_json.stdout).unwrap();
+    assert_eq!(summary_json["schema"], 1);
+    assert!(!summary_json["groups"].as_array().unwrap().is_empty());
+    for query in [
+        "1",
+        summary_json["groups"][0]["id"].as_str().unwrap(),
+        summary_json["groups"][0]["full_id"].as_str().unwrap(),
+    ] {
+        let detail_json = run_cli(&["logs", "staging", query, "--json"]);
+        assert!(detail_json.status.success());
+        let detail_json: serde_json::Value = serde_json::from_slice(&detail_json.stdout).unwrap();
+        assert_eq!(
+            detail_json["group"]["full_id"],
+            summary_json["groups"][0]["full_id"]
+        );
+        assert_eq!(detail_json["latest"]["clipped"], false);
+    }
+    let missing_json = run_cli(&["logs", "staging", "zzzzzzzzzzzzzzzz", "--json"]);
+    assert_eq!(missing_json.status.code(), Some(1));
+    let missing_json: serde_json::Value = serde_json::from_slice(&missing_json.stdout).unwrap();
+    assert_eq!(missing_json["error"]["kind"], "missing");
     let channels = run_cli(&["logs", "staging", "--channels"]);
     assert!(channels.status.success());
     let table = String::from_utf8(channels.stdout).unwrap();

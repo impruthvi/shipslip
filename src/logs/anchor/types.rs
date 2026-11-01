@@ -2,9 +2,11 @@
 
 use super::super::Since;
 use crate::records::Untrusted;
+use serde::Serialize;
 
 /// The evidence selected for a snapshot's window start.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Anchor {
     CheckoutChange {
         commit: Untrusted,
@@ -21,6 +23,7 @@ pub enum Anchor {
         /// What the server's last-run marker says, never a receipt outcome.
         server_marker_outcome: Option<Untrusted>,
         /// Without a recorded reflog, the text label keeps the outcome unknown.
+        #[serde(skip)]
         reflog_recorded: bool,
     },
     Since {
@@ -32,7 +35,8 @@ pub enum Anchor {
 }
 
 /// Whether the checkout confirmed the run named by the server's marker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunCheck {
     Verified,
     Unverified { reason: Untrusted },
@@ -40,7 +44,8 @@ pub enum RunCheck {
 
 /// An anchor candidate that could not be used. Missing candidates are kept
 /// even when the existing text output has no warning for them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AnchorFallback {
     Run {
         run_id: Untrusted,
@@ -55,7 +60,8 @@ pub enum AnchorFallback {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CheckoutFallbackReason {
     ReflogMissing,
     ReflogReadFailed { message: Untrusted },
@@ -63,7 +69,8 @@ pub enum CheckoutFallbackReason {
     InvalidStartTime { commit: Untrusted },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum MarkerFallbackReason {
     Missing,
     Corrupt,
@@ -78,7 +85,8 @@ impl From<&str> for MarkerFallbackReason {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum RunFallbackReason {
     ReflogMissing,
     TargetNotReached { target_commit: Untrusted },

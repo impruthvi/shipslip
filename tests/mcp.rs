@@ -361,14 +361,13 @@ fn mcp_rejects_config_options_but_ignores_the_config_environment_variable() {
         vec!["mcp", "--config", "X"],
         vec!["--config", "X", "mcp"],
         vec!["mcp", "--config=X"],
-        vec!["mcp", "--read-logs"],
     ] {
         let output = fixture.command().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{output:?}");
         assert!(output.stdout.is_empty(), "{output:?}");
         assert!(String::from_utf8(output.stderr)
             .unwrap()
-            .contains("mcp takes no arguments"));
+            .contains("mcp accepts only --read-logs"));
     }
     let mut command = fixture.command();
     command.env("SHIPSLIP_CONFIG", "/missing/config.toml");
@@ -447,8 +446,8 @@ fn invalid_methods_parameters_and_metadata_are_rpc_errors_and_do_not_end_the_loo
         ("unknown", json!({}), -32601),
         (
             "initialize",
-            json!({"protocolVersion":"2025-11-25", "capabilities":{}, "clientInfo":{"name":"old", "version":"1"}}),
-            -32601,
+            json!({"protocolVersion":"2025-11-25", "capabilities":null, "clientInfo":{"name":"old", "version":"1"}}),
+            -32602,
         ),
         (
             "tools/call",
@@ -594,4 +593,37 @@ fn malformed_json_and_requests_are_rpc_errors_and_notifications_never_call_tools
     session.send(json!({"jsonrpc":"2.0", "method":"unknown"}));
     assert_eq!(session.request(json!(99), "ping", json!({}))["id"], 99);
     session.finish();
+}
+
+#[test]
+fn read_logs_is_opt_in_and_unlisted_checkouts_are_tool_errors() {
+    let fixture = Fixture::new();
+    let mut command = fixture.command();
+    command.args(["mcp", "--read-logs"]);
+    // Session normally appends the subcommand; start directly for this one-shot exchange.
+    let input = json!({"jsonrpc":"2.0", "id":1,"method":"tools/list", "params":{"_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28", "io.modelcontextprotocol/clientCapabilities":{}
+    }}}).to_string() + "\n";
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let tools = response["result"]["tools"].as_array().unwrap();
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["status", "receipts", "receipt", "logs", "log_group"]
+    );
 }

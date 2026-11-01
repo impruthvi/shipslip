@@ -1,4 +1,4 @@
-//! Read results built from the receipts on this Mac: what a front-end shows
+//! Read results built from receipts and already-read log snapshots: what a front-end shows
 //! or prints as JSON. Nothing here touches a server, a deploy lock or a
 //! journal.
 
@@ -6,6 +6,7 @@ use serde::{Serialize, Serializer};
 
 use crate::logs::{escape, escape_field};
 
+mod logs;
 mod next_steps;
 mod outcome;
 mod receipt;
@@ -14,6 +15,7 @@ mod status;
 mod steps;
 
 pub use crate::receipt::markdown::render as markdown;
+pub use logs::*;
 pub use next_steps::{copy_is_safe, failed_step_options, NextStep, NextSteps, Part};
 pub use outcome::{describe_plan, Badge, Flag, Outcome, OutcomeKind};
 pub use receipt::{
