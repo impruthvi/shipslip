@@ -209,6 +209,211 @@ fn status_json_rejects_inherited_or_explicit_config_as_versioned_errors() {
 }
 
 #[test]
+fn receipt_list_json_argument_errors_preserve_the_text_exit_code() {
+    let fixture = Fixture::new();
+    for (args, message) in [
+        (vec!["--bogus"], "unknown receipts option --bogus"),
+        (
+            vec!["staging", "production"],
+            "receipts accepts at most one environment name",
+        ),
+    ] {
+        let text = fixture.list(&args);
+        let mut json_args = args;
+        json_args.insert(0, "--json");
+        let output = fixture.list(&json_args);
+        assert_eq!(text.status.code(), Some(2), "{text:?}");
+        assert!(text.stdout.is_empty(), "{text:?}");
+        assert_eq!(text.stderr, format!("slip: {message}\n").as_bytes());
+        assert_eq!(output.status.code(), text.status.code(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"schema": 1, "error": {"kind": "invalid_input", "message": message}})
+        );
+    }
+}
+
+#[test]
+fn receipt_show_json_argument_errors_preserve_the_text_exit_code() {
+    let fixture = Fixture::new();
+    for (args, message) in [
+        (vec!["show"], "receipts show requires a receipt ID"),
+        (
+            vec!["show", "a", "b"],
+            "receipts show accepts one receipt ID",
+        ),
+        (
+            vec!["show", "ID", "--bogus"],
+            "unknown receipts show option --bogus",
+        ),
+    ] {
+        let text = fixture.list(&args);
+        let mut json_args = args;
+        json_args.push("--json");
+        let output = fixture.list(&json_args);
+        assert_eq!(text.status.code(), Some(2), "{text:?}");
+        assert!(text.stdout.is_empty(), "{text:?}");
+        assert_eq!(text.stderr, format!("slip: {message}\n").as_bytes());
+        assert_eq!(output.status.code(), text.status.code(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"schema": 1, "error": {"kind": "invalid_input", "message": message}})
+        );
+    }
+}
+
+#[test]
+fn receipt_show_json_format_conflicts_are_versioned_errors() {
+    let fixture = Fixture::new();
+    for format in ["--md", "--with-details"] {
+        let text = fixture.list(&["show", "ID", format]);
+        let output = fixture.list(&["show", "ID", "--json", format]);
+        assert_eq!(text.status.code(), Some(2), "{text:?}");
+        assert_eq!(output.status.code(), text.status.code(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"schema": 1, "error": {
+                "kind": "invalid_input",
+                "message": "--json cannot be combined with --md or --with-details"
+            }})
+        );
+    }
+}
+
+#[test]
+fn receipt_json_reports_discovered_inherited_and_explicit_config_errors() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("app/bad.toml"), "[broken").unwrap();
+    fs::remove_file(fixture.0.join("app/.shipslip.toml")).unwrap();
+    for config in [None, Some("missing.toml"), Some("bad.toml")] {
+        for explicit in [false, true] {
+            for args in [vec![], vec!["staging"], vec!["show", "ID"]] {
+                let invoke = |json: bool| {
+                    let mut command = Command::new(env!("CARGO_BIN_EXE_slip"));
+                    command.env_remove("SHIPSLIP_CONFIG");
+                    if let Some(config) = config {
+                        if explicit {
+                            command.args(["--config", config]);
+                        } else {
+                            command.env("SHIPSLIP_CONFIG", config);
+                        }
+                    }
+                    command.arg("receipts").args(&args);
+                    if json {
+                        command.arg("--json");
+                    }
+                    command
+                        .current_dir(fixture.0.join("app"))
+                        .env("HOME", fixture.0.join("home"))
+                        .stdin(std::process::Stdio::null())
+                        .output()
+                        .unwrap()
+                };
+                let text = invoke(false);
+                let output = invoke(true);
+                assert_eq!(text.status.code(), Some(1), "{text:?}");
+                assert!(text.stdout.is_empty(), "{text:?}");
+                assert_eq!(output.status.code(), text.status.code(), "{output:?}");
+                assert!(output.stderr.is_empty(), "{output:?}");
+                let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(error["schema"], 1);
+                assert_eq!(error["error"]["kind"], "unreadable");
+                let message = error["error"]["message"].as_str().unwrap();
+                assert_eq!(text.stderr, format!("slip: {message}\n").as_bytes());
+                assert!(
+                    message.contains(match config {
+                        None => "no `.shipslip.toml` found",
+                        Some("missing.toml") => "could not access `missing.toml`",
+                        Some(_) => "TOML parse error",
+                    }),
+                    "{message}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn receipt_json_reports_path_errors_before_reading_records() {
+    let fixture = Fixture::new();
+    for args in [vec![], vec!["staging"], vec!["show", "ID"]] {
+        let invoke = |json: bool| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_slip"));
+            command.arg("receipts").args(&args);
+            if json {
+                command.arg("--json");
+            }
+            command
+                .current_dir(fixture.0.join("app"))
+                .env_remove("HOME")
+                .env_remove("SHIPSLIP_CONFIG")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
+        };
+        let text = invoke(false);
+        let output = invoke(true);
+        assert_eq!(text.status.code(), Some(1), "{text:?}");
+        assert!(text.stdout.is_empty(), "{text:?}");
+        assert_eq!(output.status.code(), text.status.code(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(error["schema"], 1);
+        assert_eq!(error["error"]["kind"], "unreadable");
+        let message = error["error"]["message"].as_str().unwrap();
+        assert!(message.contains("HOME is not set"), "{message}");
+        assert_eq!(text.stderr, format!("slip: {message}\n").as_bytes());
+    }
+}
+
+#[test]
+fn receipt_json_early_error_messages_preserve_untrusted_text() {
+    let fixture = Fixture::new();
+    let option = "--bad`\u{1b}[31m\u{7}\n\t";
+    for (args, message) in [
+        (
+            vec![option, "--json"],
+            format!("unknown receipts option {option}"),
+        ),
+        (
+            vec!["show", "ID", option, "--json"],
+            format!("unknown receipts show option {option}"),
+        ),
+    ] {
+        let output = fixture.list(&args);
+        assert_eq!(output.status.code(), Some(2), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"schema": 1, "error": {"kind": "invalid_input", "message": message}})
+        );
+        assert_eq!(
+            output.stdout.iter().filter(|&&byte| byte == b'\n').count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn receipt_help_describes_json_for_list_and_show() {
+    let fixture = Fixture::new();
+    let output = fixture.list(&["--help"]);
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let help = String::from_utf8(output.stdout).unwrap();
+    let receipts = help.split("Receipts options:\n").nth(1).unwrap();
+    let json_option = receipts
+        .lines()
+        .find(|line| line.contains("--json"))
+        .unwrap();
+    assert!(json_option.contains("list"), "{json_option}");
+    assert!(json_option.contains("show ID"), "{json_option}");
+}
+
+#[test]
 fn receipt_list_json_stdout_is_versioned_for_default_and_all_environment_forms() {
     let fixture = Fixture::new();
     for args in [vec!["--json"], vec!["staging", "--all", "--json"]] {
