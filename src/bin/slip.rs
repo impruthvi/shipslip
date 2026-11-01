@@ -71,16 +71,47 @@ async fn main_async(local_tokens: LocalTokens) -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let doctor_json = setup::json_requested(&args);
     match run(local_tokens).await {
-        Err(error) if status::json_requested(&args) => {
+        Err(error) if record_json_requested(&args) => {
             let code = error_exit_code(error.as_ref());
             println!(
                 "{}",
-                status::render_error_json(&error.to_string(), code == ExitCode::from(2))
+                render_record_error_json(&error.to_string(), code == ExitCode::from(2))
             );
             code
         }
         result => finish_run(result, doctor_json),
     }
+}
+
+fn record_json_requested(args: &[String]) -> bool {
+    let args = match args {
+        [flag, _, rest @ ..] if flag == "--config" => rest,
+        args => args,
+    };
+    matches!(
+        args.first().map(String::as_str),
+        Some("status" | "receipts")
+    ) && args[1..].iter().any(|arg| arg == "--json")
+}
+
+fn render_record_error_json(message: &str, invalid: bool) -> String {
+    use shipslip::records;
+
+    #[derive(serde::Serialize)]
+    struct Error {
+        kind: &'static str,
+        message: records::Untrusted,
+    }
+
+    serde_json::to_string(&records::versioned_error(Error {
+        kind: if invalid {
+            "invalid_input"
+        } else {
+            "unreadable"
+        },
+        message: message.into(),
+    }))
+    .expect("record error output contains only JSON-safe fields")
 }
 
 fn finish_run(result: Result<ExitCode, Box<dyn Error>>, doctor_json: bool) -> ExitCode {
@@ -1102,7 +1133,7 @@ fn print_help() {
          \x20 --max-bytes SIZE   Window read limit, like 20m (default 12m total, 4m/channel)\n\
          \x20                    Baseline has a separate 6m total, 2m/channel limit\n\n\
          Receipts options:\n\
-         \x20 --json             With show ID: print the record as JSON\n\
+         \x20 --json             Print the receipt list or show ID record as JSON\n\
          \x20 --all              List every receipt, not just the newest 20\n\
          \x20 show ID            Show one receipt by its ID (a prefix is enough)\n\
          \x20 --md               Print it as Markdown with statuses only\n\

@@ -14,33 +14,6 @@ use shipslip::receipt::{
 use super::invalid_input;
 use shipslip::records::{self, ReceiptQueryError, RepoRow, StaleHint, Status as Overview};
 
-pub(super) fn json_requested(args: &[String]) -> bool {
-    let args = match args {
-        [flag, _, rest @ ..] if flag == "--config" => rest,
-        args => args,
-    };
-    args.first().map(String::as_str) == Some("status")
-        && args[1..].iter().any(|arg| arg == "--json")
-}
-
-pub(super) fn render_error_json(message: &str, invalid: bool) -> String {
-    #[derive(serde::Serialize)]
-    struct Error {
-        kind: &'static str,
-        message: records::Untrusted,
-    }
-
-    serde_json::to_string(&records::versioned_error(Error {
-        kind: if invalid {
-            "invalid_input"
-        } else {
-            "unreadable"
-        },
-        message: message.into(),
-    }))
-    .expect("status error output contains only JSON-safe fields")
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Args {
     pub compare: Option<(String, String)>,
