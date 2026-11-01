@@ -104,7 +104,8 @@ impl Level {
 }
 
 /// The start of the window to show.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum Since {
     /// Seconds before the server's current time.
     Ago(u64),
@@ -197,7 +198,7 @@ pub struct Request {
     pub allow_outside: bool,
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum LogsError {
     #[error("{0}")]
     Transport(#[from] TransportError),
@@ -833,7 +834,7 @@ struct FormatStats {
 
 /// For a numbered stack frame line like `#3 /srv/app/vendor/X.php(48): f()`,
 /// its number and the text after the number.
-fn frame_rest(line: &str) -> Option<(u64, &str)> {
+pub(crate) fn frame_rest(line: &str) -> Option<(u64, &str)> {
     let rest = line.trim_start().strip_prefix('#')?;
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
     if digits == 0 {
@@ -845,7 +846,7 @@ fn frame_rest(line: &str) -> Option<(u64, &str)> {
 
 /// A frame whose file sits under a whole `vendor` path segment. Lines that
 /// are not numbered frames, or whose path can't be read, are not vendor.
-fn vendor_frame(line: &str) -> bool {
+pub(crate) fn vendor_frame(line: &str) -> bool {
     let Some((_, rest)) = frame_rest(line) else {
         return false;
     };
@@ -1480,7 +1481,7 @@ pub struct Variant {
 pub struct Group {
     pub badge: Badge,
     pub id: String,
-    full_id: String,
+    pub(crate) full_id: String,
     pub class: String,
     pub file: Option<String>,
     pub count: u64,
@@ -1847,6 +1848,10 @@ pub enum Correlation {
 /// This is correlation, not cause: it says the lines came from the same
 /// request, not that one led to the other.
 pub fn related(snapshot: &Snapshot, entry: usize) -> Correlation {
+    related_with_limit(snapshot, entry, RELATED_SIDE)
+}
+
+pub(crate) fn related_with_limit(snapshot: &Snapshot, entry: usize, limit: usize) -> Correlation {
     let chosen = &snapshot.entries[entry];
     let Some(id) = request_id(chosen) else {
         return if chosen.truncated {
@@ -1879,8 +1884,8 @@ pub fn related(snapshot: &Snapshot, entry: usize) -> Correlation {
         .iter()
         .position(|index| *index == entry)
         .unwrap_or(0);
-    let before = matches[at.saturating_sub(RELATED_SIDE)..at].to_vec();
-    let after = matches[at + 1..(at + 1 + RELATED_SIDE).min(matches.len())].to_vec();
+    let before = matches[at.saturating_sub(limit)..at].to_vec();
+    let after = matches[at + 1..(at + 1).saturating_add(limit).min(matches.len())].to_vec();
     Correlation::Shared(Related {
         more: (matches.len() - 1 - before.len() - after.len()) as u64,
         before,
@@ -4307,3 +4312,7 @@ mod tests {
             .contains("no other entry in this window has this ID"));
     }
 }
+
+#[cfg(test)]
+#[path = "logs/record_tests.rs"]
+mod record_tests;

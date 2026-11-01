@@ -186,6 +186,58 @@ impl Drop for Session {
 }
 
 #[test]
+fn initialized_clients_can_send_request_metadata_without_repeating_negotiation() {
+    let fixture = Fixture::new();
+    let mut session = Session::start(fixture.command());
+    session.send(
+        json!({"jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
+            "protocolVersion":"2026-07-28", "capabilities":{},
+            "clientInfo":{"name":"shipslip-test", "version":"1"}
+        }}),
+    );
+    assert!(session.receive().get("error").is_none());
+    session.send(json!({"jsonrpc":"2.0", "method":"notifications/initialized"}));
+    session.send(
+        json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{
+            "name":"status", "arguments":{}, "_meta":{"progressToken":"status-read"}
+        }}),
+    );
+    let response = session.receive();
+    assert_eq!(response["id"], 2);
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"],
+        fixture.cli(&["status", "--json"])
+    );
+    for meta in [
+        json!({}),
+        json!({"client/note":"data"}),
+        json!({"io.modelcontextprotocol/protocolVersion":"2026-07-28"}),
+        json!({"io.modelcontextprotocol/clientCapabilities":{}}),
+    ] {
+        session.send(json!({"jsonrpc":"2.0", "id":3, "method":"ping", "params":{"_meta":meta}}));
+        let response = session.receive();
+        assert!(response.get("error").is_none(), "{response}");
+    }
+    for meta in [
+        Value::Null,
+        json!("invalid"),
+        json!({"io.modelcontextprotocol/protocolVersion":false}),
+        json!({"io.modelcontextprotocol/clientCapabilities":null}),
+    ] {
+        session.send(json!({"jsonrpc":"2.0", "id":4, "method":"ping", "params":{"_meta":meta}}));
+        assert_eq!(session.receive()["error"]["code"], -32602);
+    }
+    session.send(json!({"jsonrpc":"2.0", "id":4, "method":"ping", "params":{
+        "_meta":{"io.modelcontextprotocol/protocolVersion":"unsupported"}
+    }}));
+    assert_eq!(session.receive()["error"]["code"], -32022);
+    let response = session.request(json!(5), "ping", json!({}));
+    assert!(response.get("error").is_none(), "{response}");
+    session.finish();
+}
+
+#[test]
 fn status_matches_cli_json_and_exits_when_stdin_closes() {
     let fixture = Fixture::new();
     let expected = fixture.cli(&["status", "--json"]);
@@ -361,14 +413,13 @@ fn mcp_rejects_config_options_but_ignores_the_config_environment_variable() {
         vec!["mcp", "--config", "X"],
         vec!["--config", "X", "mcp"],
         vec!["mcp", "--config=X"],
-        vec!["mcp", "--read-logs"],
     ] {
         let output = fixture.command().args(args).output().unwrap();
         assert_eq!(output.status.code(), Some(2), "{output:?}");
         assert!(output.stdout.is_empty(), "{output:?}");
         assert!(String::from_utf8(output.stderr)
             .unwrap()
-            .contains("mcp takes no arguments"));
+            .contains("mcp accepts only --read-logs"));
     }
     let mut command = fixture.command();
     command.env("SHIPSLIP_CONFIG", "/missing/config.toml");
@@ -447,8 +498,8 @@ fn invalid_methods_parameters_and_metadata_are_rpc_errors_and_do_not_end_the_loo
         ("unknown", json!({}), -32601),
         (
             "initialize",
-            json!({"protocolVersion":"2025-11-25", "capabilities":{}, "clientInfo":{"name":"old", "version":"1"}}),
-            -32601,
+            json!({"protocolVersion":"2025-11-25", "capabilities":null, "clientInfo":{"name":"old", "version":"1"}}),
+            -32602,
         ),
         (
             "tools/call",
@@ -594,4 +645,37 @@ fn malformed_json_and_requests_are_rpc_errors_and_notifications_never_call_tools
     session.send(json!({"jsonrpc":"2.0", "method":"unknown"}));
     assert_eq!(session.request(json!(99), "ping", json!({}))["id"], 99);
     session.finish();
+}
+
+#[test]
+fn read_logs_is_opt_in_and_unlisted_checkouts_are_tool_errors() {
+    let fixture = Fixture::new();
+    let mut command = fixture.command();
+    command.args(["mcp", "--read-logs"]);
+    // Session normally appends the subcommand; start directly for this one-shot exchange.
+    let input = json!({"jsonrpc":"2.0", "id":1,"method":"tools/list", "params":{"_meta":{
+        "io.modelcontextprotocol/protocolVersion":"2026-07-28", "io.modelcontextprotocol/clientCapabilities":{}
+    }}}).to_string() + "\n";
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let tools = response["result"]["tools"].as_array().unwrap();
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["status", "receipts", "receipt", "logs", "log_group"]
+    );
 }

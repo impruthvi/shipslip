@@ -73,6 +73,16 @@ async fn main_async(local_tokens: LocalTokens) -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let doctor_json = setup::json_requested(&args);
     match run(local_tokens).await {
+        Err(error) if logs_json_requested(&args) => {
+            let record = logs_error_record(error.as_ref());
+            let code = record.exit_code();
+            println!(
+                "{}",
+                serde_json::to_string(&shipslip::records::versioned_error(record))
+                    .expect("JSON-safe logs error")
+            );
+            ExitCode::from(code)
+        }
         Err(error) if record_json_requested(&args) => {
             let code = error_exit_code(error.as_ref());
             println!(
@@ -82,6 +92,34 @@ async fn main_async(local_tokens: LocalTokens) -> ExitCode {
             code
         }
         result => finish_run(result, doctor_json),
+    }
+}
+
+fn logs_json_requested(args: &[String]) -> bool {
+    let args = match args {
+        [flag, _, rest @ ..] if flag == "--config" => rest,
+        args => args,
+    };
+    args.first().is_some_and(|arg| arg == "logs") && args.iter().any(|arg| arg == "--json")
+}
+
+fn logs_error_record(error: &(dyn Error + 'static)) -> shipslip::records::LogsQueryError {
+    use shipslip::records::LogsQueryError;
+    if let Some(error) = error.downcast_ref::<logs::LogsError>() {
+        return error.clone().into();
+    }
+    if let Some(error) = error.downcast_ref::<shipslip::transport::TransportError>() {
+        return error.clone().into();
+    }
+    if error
+        .downcast_ref::<io::Error>()
+        .is_some_and(|error| error.kind() == io::ErrorKind::InvalidInput)
+    {
+        LogsQueryError::invalid(error.to_string())
+    } else {
+        LogsQueryError::Unreadable {
+            message: error.to_string().into(),
+        }
     }
 }
 
@@ -166,10 +204,10 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         Action::Doctor(args) => return setup::run(args).await,
         Action::Setup(args) => return setup::run_setup(args).await,
         Action::Status(args) => return status::run(args),
-        Action::Mcp => {
+        Action::Mcp { read_logs } => {
             let reader =
                 shipslip::read_only::Reader::new(default_receipts_root()?, default_trust_path()?);
-            mcp::run(reader).await?;
+            mcp::run(reader, read_logs).await?;
             return Ok(ExitCode::SUCCESS);
         }
         action => action,
@@ -196,7 +234,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         | Action::Publish(_)
         | Action::Doctor(_)
         | Action::Setup(_)
-        | Action::Mcp
+        | Action::Mcp { .. }
         | Action::Status(_) => {
             unreachable!("local commands run before the config is loaded")
         }
@@ -718,12 +756,16 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
         .ok_or_else(|| invalid_input("missing command"))?;
     index += 1;
     if action == "mcp" {
-        if index != args.len() || args.first().is_some_and(|arg| arg == "--config") {
-            return Err(invalid_input("mcp takes no arguments; omit --config").into());
+        if (index != args.len() && args[index..] != ["--read-logs"])
+            || args.first().is_some_and(|arg| arg == "--config")
+        {
+            return Err(invalid_input("mcp accepts only --read-logs; omit --config").into());
         }
         return Ok(Some(Command {
             config: None,
-            action: Action::Mcp,
+            action: Action::Mcp {
+                read_logs: index != args.len(),
+            },
         }));
     }
     if action == "init" {
@@ -810,6 +852,9 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
             .get(index)
             .ok_or_else(|| invalid_input("logs requires an environment name"))?
             .clone();
+        if environment.starts_with("--") {
+            return Err(invalid_input("logs requires an environment name").into());
+        }
         let options = parse_logs_options(&args[index + 1..])?;
         return Ok(Some(Command {
             config,
@@ -921,6 +966,7 @@ struct LogsOptions {
     full: bool,
     /// Print a group's detail as Markdown.
     md: bool,
+    json: bool,
     /// `--since` and `--max-bytes` as typed, for commands slip suggests.
     window_args: Vec<String>,
 }
@@ -966,6 +1012,7 @@ fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
             "--all" => options.all = true,
             "--full" => options.full = true,
             "--md" => options.md = true,
+            "--json" => options.json = true,
             flag if flag.starts_with("--") => {
                 return Err(invalid_input(format!(
                     "unknown logs option `{flag}`; run `slip --help` for usage"
@@ -976,13 +1023,18 @@ fn parse_logs_options(args: &[String]) -> Result<LogsOptions, Box<dyn Error>> {
             _ => return Err(invalid_input("logs accepts one group ID or row number").into()),
         }
     }
+    if options.json && (options.raw || options.channels || options.md) {
+        return Err(
+            invalid_input("--json cannot be combined with --raw, --channels or --md").into(),
+        );
+    }
     if (options.full || options.md) && (options.raw || options.channels) {
         return Err(invalid_input(
             "--full and --md change one group's detail; they don't apply to --raw or --channels",
         )
         .into());
     }
-    if (options.full || options.md) && options.query.is_none() {
+    if (options.full || options.md) && !options.json && options.query.is_none() {
         return Err(invalid_input(
             "--full and --md change one group's detail; add a group ID or row number",
         )
@@ -1055,6 +1107,35 @@ async fn logs_command(
     }
     let level = options.level.unwrap_or(Level::Error);
     let groups = logs::group(&snapshot, level, grep);
+    if options.json {
+        use shipslip::records::{self, LogsQueryError};
+        let result = match options.query.as_deref() {
+            None => Ok(serde_json::to_value(records::versioned(
+                records::logs_summary(&snapshot, &groups, level, grep),
+            ))?),
+            Some(query) => match logs::find(&groups, query) {
+                Lookup::Found(group) => Ok(serde_json::to_value(records::versioned(
+                    records::logs_detail(&snapshot, group, level, grep),
+                ))?),
+                Lookup::Ambiguous(matches) => Err(LogsQueryError::Ambiguous {
+                    ids: matches
+                        .iter()
+                        .map(|group| group.id.clone().into())
+                        .collect(),
+                }),
+                Lookup::Missing => Err(LogsQueryError::Missing),
+            },
+        };
+        let (record, code) = match result {
+            Ok(record) => (record, 0),
+            Err(error) => {
+                let code = error.exit_code();
+                (serde_json::to_value(records::versioned_error(error))?, code)
+            }
+        };
+        println!("{}", serde_json::to_string(&record)?);
+        return Ok(ExitCode::from(code));
+    }
     let Some(query) = options.query else {
         print!(
             "{}",
@@ -1108,7 +1189,7 @@ fn print_help() {
          \x20 slip [--config FILE] receipts [ENV] [--all] [--json]\n\
          \x20 slip [--config FILE] receipts show ID [--json | --md [--with-details]]\n\
          \x20 slip status [--json | --compare ENV ENV]\n\
-         \x20 slip mcp\n\
+         \x20 slip mcp [--read-logs]\n\
          \x20 slip --version\n\n\
          Commands:\n\
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\
@@ -1126,7 +1207,7 @@ fn print_help() {
          \x20 logs ENV           Group recent log errors; read-only\n\
          \x20 receipts [ENV]     List saved deploy receipts, newest first; read-only\n\
          \x20 status             Last recorded code of every app and env; read-only\n\
-         \x20 mcp                Serve local records over MCP stdio; read-only\n\n\
+         \x20 mcp                Serve records over MCP stdio; --read-logs opts into approved log reads\n\n\
          New project options:\n\
          \x20 --starter-kit none|react|vue|svelte|livewire\n\
          \x20 --auth laravel|none  --database sqlite|mysql|mariadb|pgsql|sqlsrv\n\
@@ -1145,6 +1226,7 @@ fn print_help() {
          \x20                    Default: latest run, then checkout change, then 24h\n\
          \x20 --level L          This level and more severe (default error; --raw: debug)\n\
          \x20 --grep TEXT        Only entries containing TEXT, ignoring case\n\
+         \x20 --json             Print schema-1 groups or detail JSON (always full text)\n\
          \x20 --raw              Print entries instead of groups\n\
          \x20 --channels         Show files, format, window and baseline coverage by channel\n\
          \x20 --all              Show every group, not just the first 20\n\
@@ -1800,7 +1882,9 @@ enum Action {
     },
     Receipts(receipts::Args),
     Status(status::Args),
-    Mcp,
+    Mcp {
+        read_logs: bool,
+    },
 }
 
 #[cfg(test)]
@@ -2359,3 +2443,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "slip/logs_json_tests.rs"]
+mod logs_json_tests;
