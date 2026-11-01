@@ -1451,6 +1451,8 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
     assert!(summary_json.stderr.is_empty());
     let summary_json: serde_json::Value = serde_json::from_slice(&summary_json.stdout).unwrap();
     assert_eq!(summary_json["schema"], 1);
+    assert!(summary_json.get("text_fields").is_none());
+    assert!(summary_json.get("clipped_fields").is_none());
     assert_eq!(
         summary_json["window"]["anchor"],
         serde_json::json!({"kind": "default", "seconds": 86400})
@@ -1474,6 +1476,8 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
         let detail_json = run_cli(&["logs", "staging", query, "--json"]);
         assert!(detail_json.status.success());
         let detail_json: serde_json::Value = serde_json::from_slice(&detail_json.stdout).unwrap();
+        assert!(detail_json.get("text_fields").is_none());
+        assert!(detail_json.get("clipped_fields").is_none());
         assert_eq!(
             detail_json["group"]["full_id"],
             summary_json["groups"][0]["full_id"]

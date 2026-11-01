@@ -180,27 +180,13 @@ async fn call_tool<C: Connector>(
         Some(value) => value.as_object().ok_or_else(invalid_params)?,
         None => &empty,
     };
-    let budget = arguments
-        .get("max_text_bytes")
-        .map(|value| {
-            value
-                .as_u64()
-                .filter(|size| (1024..=262144).contains(size))
-                .map(|size| size as usize)
-                .ok_or_else(invalid_params)
-        })
-        .transpose()?
-        .unwrap_or(16384);
-    let (mut record, is_error) = match params.get("name").and_then(Value::as_str) {
+    match params.get("name").and_then(Value::as_str) {
         Some("status") => {
-            only_keys(arguments, &["max_text_bytes"])?;
-            serialize_record(reader.status())?
+            only_keys(arguments, &[])?;
+            tool_result(reader.status(), None)
         }
         Some("receipts") => {
-            only_keys(
-                arguments,
-                &["project", "environment", "limit", "max_text_bytes"],
-            )?;
+            only_keys(arguments, &["project", "environment", "limit"])?;
             let project = string_argument(arguments, "project")?;
             let environment = optional_string(arguments, "environment")?;
             let limit = arguments
@@ -212,14 +198,17 @@ async fn call_tool<C: Connector>(
                         .ok_or_else(invalid_params)
                 })
                 .transpose()?;
-            serialize_record(reader.receipts(project, environment, limit))?
+            tool_result(reader.receipts(project, environment, limit), None)
         }
         Some("receipt") => {
-            only_keys(arguments, &["project", "id", "max_text_bytes"])?;
-            serialize_record(reader.receipt(
-                string_argument(arguments, "project")?,
-                string_argument(arguments, "id")?,
-            ))?
+            only_keys(arguments, &["project", "id"])?;
+            tool_result(
+                reader.receipt(
+                    string_argument(arguments, "project")?,
+                    string_argument(arguments, "id")?,
+                ),
+                None,
+            )
         }
         Some(name @ ("logs" | "log_group")) if read_logs => {
             only_keys(
@@ -245,6 +234,17 @@ async fn call_tool<C: Connector>(
                     ]
                 },
             )?;
+            let budget = arguments
+                .get("max_text_bytes")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .filter(|size| (1024..=262144).contains(size))
+                        .map(|size| size as usize)
+                        .ok_or_else(invalid_params)
+                })
+                .transpose()?
+                .unwrap_or(16384);
             let checkout = std::path::Path::new(string_argument(arguments, "checkout")?);
             let environment = string_argument(arguments, "environment")?;
             let since = optional_string(arguments, "since")?
@@ -259,10 +259,13 @@ async fn call_tool<C: Connector>(
                 level,
                 text: optional_string(arguments, "text")?.map(Into::into),
             };
-            let (mut record, is_error) = if name == "logs" {
-                serialize_record(reader.logs(checkout, environment, &query).await)?
+            if name == "logs" {
+                tool_result(
+                    reader.logs(checkout, environment, &query).await,
+                    Some(budget),
+                )
             } else {
-                serialize_record(
+                tool_result(
                     reader
                         .log_group(
                             checkout,
@@ -271,32 +274,33 @@ async fn call_tool<C: Connector>(
                             &query,
                         )
                         .await,
-                )?
-            };
-            if !is_error {
-                shipslip::read_only::limit_log_text(&mut record, budget);
+                    Some(budget),
+                )
             }
-            (record, is_error)
         }
-        _ => return Err(invalid_params()),
-    };
-    shipslip::read_only::limit_record_text(&mut record, budget);
-    let text = serde_json::to_string(&record).map_err(|_| rpc_error(-32603, "Internal error"))?;
+        _ => Err(invalid_params()),
+    }
+}
+
+fn tool_result<T: serde::Serialize, E: serde::Serialize>(
+    result: Result<T, E>,
+    log_budget: Option<usize>,
+) -> Result<Value, Value> {
+    let is_error = result.is_err();
+    let mut text = match result {
+        Ok(record) => serde_json::to_string(&versioned(record)),
+        Err(error) => serde_json::to_string(&versioned_error(error)),
+    }
+    .map_err(|_| rpc_error(-32603, "Internal error"))?;
+    let mut record: Value =
+        serde_json::from_str(&text).map_err(|_| rpc_error(-32603, "Internal error"))?;
+    if let Some(budget) = log_budget {
+        shipslip::read_only::limit_log_text(&mut record, budget);
+        text = serde_json::to_string(&record).map_err(|_| rpc_error(-32603, "Internal error"))?;
+    }
     Ok(
         json!({"content":[{"type":"text", "text":text}], "structuredContent":record, "isError":is_error}),
     )
-}
-
-fn serialize_record<T: serde::Serialize, E: serde::Serialize>(
-    result: Result<T, E>,
-) -> Result<(Value, bool), Value> {
-    let is_error = result.is_err();
-    let record = match result {
-        Ok(record) => serde_json::to_value(versioned(record)),
-        Err(error) => serde_json::to_value(versioned_error(error)),
-    }
-    .map_err(|_| rpc_error(-32603, "Internal error"))?;
-    Ok((record, is_error))
 }
 
 fn optional_string<'a>(
@@ -344,7 +348,7 @@ fn tools(read_logs: bool) -> Value {
         tool(
             "status",
             "Last recorded code per project and environment on this Mac.",
-            json!({"max_text_bytes":{"type":"integer","minimum":1024,"maximum":262144,"default":16384}}),
+            json!({}),
             json!([]),
         ),
         tool(
@@ -352,8 +356,7 @@ fn tools(read_logs: bool) -> Value {
             "List local receipts, newest first.",
             json!({
                 "project":{"type":"string"}, "environment":{"type":"string"},
-                "limit":{"type":"integer", "minimum":0, "default":20},
-                "max_text_bytes":{"type":"integer","minimum":1024,"maximum":262144,"default":16384}
+                "limit":{"type":"integer", "minimum":0, "default":20}
             }),
             json!(["project"]),
         ),
@@ -361,8 +364,7 @@ fn tools(read_logs: bool) -> Value {
             "receipt",
             "Read a local receipt by its case-insensitive ID prefix.",
             json!({
-                "project":{"type":"string"}, "id":{"type":"string"},
-                "max_text_bytes":{"type":"integer","minimum":1024,"maximum":262144,"default":16384}
+                "project":{"type":"string"}, "id":{"type":"string"}
             }),
             json!(["project", "id"]),
         ),

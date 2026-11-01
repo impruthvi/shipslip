@@ -16,8 +16,8 @@ successful read, including a read that found no log files.
 ## Logs
 
 A summary contains `environment`, `window`, `groups`, `overflow_groups`,
-`filter`, `channels`, `unrecognized_samples`, `warnings`, `bytes_transferred`,
-and `text_fields`. All tracked groups are included, without the text
+`filter`, `channels`, `unrecognized_samples`, `warnings`, and `bytes_transferred`.
+All tracked groups are included, without the text
 renderer's 20-row limit. The tracking limit is 500 groups and 50 variants
 per group. Overflow counts report what could not be tracked.
 
@@ -95,15 +95,22 @@ Unknown checkouts/environments give `invalid_input`; missing or changed
 approval gives `not_approved` before any SSH connection. An approval permits
 configured paths outside `storage/logs`, as in the CLI.
 
-All tools accept optional `max_text_bytes`; for local records the shape stays
-unchanged unless a field needs clipping. Log tools accept `max_text_bytes`: an integer from 1024 to 262144, default
-16384. Every server-text field is limited separately, preserving its head
-and tail with an explicit clipping marker. `text_fields` contains JSON
-pointers (`path`) with original `bytes` and `clipped` for each server-text
-field. CLI records have the same metadata, always `clipped: false`. Entry
-and sample `text` also have adjacent `clipped` and original `bytes`. Frames
-are parsed before clipping. MCP retains the nearest five same-request
-entries per side, adding omitted entries to `more`; CLI JSON includes all.
+`status`, `receipts`, and `receipt` return exactly the CLI JSON, without
+clipping or added fields. Only `logs` and `log_group` accept `max_text_bytes`:
+an integer from 1024 to 262144, default 16384. Each string in a log result,
+including an error result, is limited separately, preserving its head and
+tail with an explicit clipping marker. Documented fixed values are shorter
+than the minimum budget; the fixed-value registry does not select fields
+for clipping.
+
+Entry and sample `text` keep adjacent `clipped` and original `bytes`.
+Any other string that was cut is listed in top-level `clipped_fields`, an
+MCP-only addition. Each item contains a JSON pointer `path` and the original
+`bytes`; strings that were not cut are not listed. `clipped_fields` is omitted
+when no other strings were cut, even if entry or sample text was clipped.
+CLI JSON has neither `text_fields` nor `clipped_fields`. Frames are parsed
+before clipping. MCP retains the nearest five same-request entries per
+side, adding omitted entries to `more`; CLI JSON includes all.
 
 ## Fixed values
 

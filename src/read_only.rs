@@ -63,9 +63,7 @@ pub struct LogQuery {
     pub text: Option<String>,
 }
 
-pub use crate::records::{
-    limit_log_text, limit_record_text, LogsDetail, LogsQueryError, LogsSummary,
-};
+pub use crate::records::{limit_log_text, LogsDetail, LogsQueryError, LogsSummary};
 
 pub struct Reader<C = SshConnector> {
     receipts_root: PathBuf,

@@ -141,16 +141,12 @@ async fn detail_json_keeps_long_entry_text_and_its_true_size_without_clipping() 
     assert_eq!(record["latest"]["clipped"], false);
     assert_eq!(record["latest"]["truncated"], false);
     assert_eq!(record["latest"]["bytes"], text.len());
-    let metadata = record["text_fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|field| field["path"] == "/latest/text")
-        .unwrap();
-    assert_eq!(
-        metadata,
-        &json!({"path":"/latest/text","bytes":text.len(),"clipped":false})
-    );
+    assert!(record.get("text_fields").is_none());
+    assert!(record.get("clipped_fields").is_none());
+    let (summary, code) = logs_json_record(&snapshot, &groups, None, Level::Error, None).unwrap();
+    assert_eq!(code, 0);
+    assert!(summary.get("text_fields").is_none());
+    assert!(summary.get("clipped_fields").is_none());
 }
 
 #[tokio::test]
