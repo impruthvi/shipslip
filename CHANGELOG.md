@@ -6,6 +6,42 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-01
+
+### Added
+
+- `slip status --json`, `slip receipts [ENV] --json` and
+  `slip receipts show ID --json` print what this Mac recorded as versioned
+  JSON with a top-level `"schema": 1`. Within a schema number, fields are
+  only added. Outcomes, check flags, evidence marks and step states are
+  kinds, not English text; an unknown outcome stays `unknown`. Times are
+  absolute milliseconds, and a step whose end was not seen has no end time
+  and no duration. Next steps arrive as text and command parts (each command
+  as its argument list) with a flag saying whether the commands are safe to
+  copy. Server and receipt text is the raw value, encoded by JSON.
+- Errors under `--json` print `{"schema": 1, "error": {"kind": ...}}` on
+  stdout and exit with the same code as the text command. Kinds: `missing`,
+  `ambiguous` (with the matching ids), `newer_version`, `unreadable` and
+  `invalid_input` (bad arguments or config).
+- Library: a `records` module with three read-only queries, `status()`,
+  `receipts()` and `receipt()`, returning serializable records. `Untrusted`
+  holds server and receipt text raw and has no `Display`, so a front end must
+  choose an escape to print it.
+
+### Changed
+
+- Library: the receipt module no longer supplies display text. `Badge`,
+  `Flag`, the outcome summary, next steps, started-by, `describe_plan` and the
+  overview types (`EnvCell`, `CodeState`, `Mark`, ...) moved to `records`.
+  Headlines, flag and cell text, qualifiers and relative times (`code_text`,
+  `sentence`, `age`, `headline`, `Flag::text`, `describe_smoke`,
+  `describe_watch` and similar) were removed; front ends word them from the
+  kinds. Terminal text, Markdown receipts and the desktop app read the same
+  as before.
+- The desktop app reads the release map, receipts and a deploy entry's recent
+  runs through the same queries as the CLI, so copyable recovery commands
+  follow the CLI's rule.
+
 ## [0.10.0] - 2026-10-31
 
 ### Added
@@ -519,6 +555,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.11.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.11.0
 [0.10.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.10.0
 [0.9.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.9.1
 [0.9.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.9.0
