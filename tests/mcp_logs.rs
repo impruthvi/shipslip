@@ -267,64 +267,185 @@ async fn each_log_call_takes_a_fresh_snapshot_and_full_ids_cross_calls() {
 }
 
 #[tokio::test]
-async fn clipping_preserves_frames_and_counts_omitted_same_request_entries() {
+async fn long_entries_keep_head_tail_original_bytes_and_frames_with_a_raised_budget() {
+    let fixture = Fixture::new();
+    fixture.approve();
+    let text = format!(
+        "[2026-10-01 00:00:00] production.ERROR: RuntimeException: head {}\n#0 /srv/app/app/Job.php(17): Job->handle()\n{} tail",
+        "é🙂".repeat(2000),
+        "🙂é".repeat(2000),
+    );
+    for (budget, limit, clipped) in [(None, 16384, true), (Some(262144), 262144, false)] {
+        let mut arguments = fixture.arguments();
+        arguments["id"] = json!("1");
+        if let Some(budget) = budget {
+            arguments["max_text_bytes"] = json!(budget);
+        }
+        let responses = fixture
+            .exchange(vec![call("log_group", arguments)], &text, None, true)
+            .await;
+        let detail = body(&responses[0]);
+        assert_eq!(responses[0]["result"]["isError"], false);
+        assert_eq!(detail["latest"]["bytes"], text.len());
+        assert_eq!(detail["latest"]["clipped"], clipped);
+        assert_eq!(detail["latest"]["truncated"], false);
+        assert_eq!(
+            detail["latest"]["frames"],
+            json!([{"index":0,"file":"/srv/app/app/Job.php","line":17,
+                "call":"Job->handle()","vendor":false,"chain":0}])
+        );
+        let returned = detail["latest"]["text"].as_str().unwrap();
+        assert!(returned.len() <= limit);
+        if clipped {
+            assert!(
+                returned.len() >= limit - 8,
+                "only UTF-8 boundaries reduce the budget"
+            );
+            let (head, tail) = returned.split_once("\n… [clipped] …\n").unwrap();
+            assert!(!head.is_empty() && !tail.is_empty());
+            assert!(text.starts_with(head));
+            assert!(text.ends_with(tail));
+            assert!(
+                !returned.contains("Job.php"),
+                "frame was in the omitted text"
+            );
+        } else {
+            assert_eq!(returned, text);
+        }
+        let metadata = detail["text_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["path"] == "/latest/text")
+            .unwrap();
+        assert_eq!(
+            metadata,
+            &json!({"path":"/latest/text","bytes":text.len(),"clipped":clipped})
+        );
+    }
+}
+
+#[tokio::test]
+async fn both_log_tools_budget_scalar_server_text_with_original_size_metadata() {
+    let fixture = Fixture::new();
+    fixture.approve();
+    let filter = "filteré🙂".repeat(200);
+    let text = format!("[2026-10-01 00:00:00] production.ERROR: RuntimeException: {filter}");
+    for tool in ["logs", "log_group"] {
+        let mut arguments = fixture.arguments();
+        arguments["max_text_bytes"] = json!(1024);
+        arguments["text"] = json!(filter);
+        if tool == "log_group" {
+            arguments["id"] = json!("1");
+        }
+        let responses = fixture
+            .exchange(vec![call(tool, arguments)], &text, None, true)
+            .await;
+        let record = body(&responses[0]);
+        assert_eq!(responses[0]["result"]["isError"], false);
+        let returned = record["filter"]["text"].as_str().unwrap();
+        assert!(returned.len() <= 1024);
+        let (head, tail) = returned.split_once("\n… [clipped] …\n").unwrap();
+        assert!(!head.is_empty() && !tail.is_empty());
+        assert!(filter.starts_with(head));
+        assert!(filter.ends_with(tail));
+        let metadata = record["text_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|field| field["path"] == "/filter/text")
+            .unwrap();
+        assert_eq!(
+            metadata,
+            &json!({"path":"/filter/text","bytes":filter.len(),"clipped":true})
+        );
+    }
+}
+
+#[tokio::test]
+async fn same_request_keeps_the_nearest_five_entries_per_side_and_clips_their_text() {
     let fixture = Fixture::new();
     fixture.approve();
     let mut text = String::new();
     for index in 0..8 {
-        text.push_str(&format!("[2026-10-01 00:00:0{index}] production.INFO: before {{\"request_id\":\"request-one\"}}\n"));
+        text.push_str(&format!("[2026-10-01 00:00:0{index}] production.INFO: before {} {{\"request_id\":\"request-one\"}}\n", "é".repeat(1200)));
     }
-    text.push_str(&format!("[2026-10-01 00:01:00] production.ERROR: RuntimeException: {}\n#0 /srv/app/app/Job.php(17): Job->handle()\n", "é".repeat(12000)));
-    // A plain entry with ID on the first line, followed by trace lines, is not a Monolog context.
-    // Use a separate error entry with a normal context for the same-request cap.
-    text.push_str("[2026-10-01 00:02:00] production.CRITICAL: CapException: chosen {\"request_id\":\"request-one\"}\n");
+    text.push_str("[2026-10-01 00:02:00] production.ERROR: CapException: chosen {\"request_id\":\"request-one\"}\n");
     for index in 0..8 {
-        text.push_str(&format!("[2026-10-01 00:03:0{index}] production.INFO: after {{\"request_id\":\"request-one\"}}\n"));
+        text.push_str(&format!("[2026-10-01 00:03:0{index}] production.INFO: after {} {{\"request_id\":\"request-one\"}}\n", "🙂".repeat(1200)));
     }
-    let summary = fixture
-        .exchange(vec![call("logs", fixture.arguments())], &text, None, true)
+    let mut arguments = fixture.arguments();
+    arguments["id"] = json!("1");
+    arguments["max_text_bytes"] = json!(1024);
+    let responses = fixture
+        .exchange(vec![call("log_group", arguments)], &text, None, true)
         .await;
-    let groups = body(&summary[0])["groups"].as_array().unwrap();
-    for group in groups {
-        let mut arguments = fixture.arguments();
-        arguments["id"] = group["full_id"].clone();
-        arguments["max_text_bytes"] = json!(1024);
-        let response = fixture
-            .exchange(vec![call("log_group", arguments)], &text, None, true)
-            .await;
-        let detail = body(&response[0]);
-        if group["exception"] == "RuntimeException" {
-            assert_eq!(detail["latest"]["clipped"], true);
-            assert!(detail["latest"]["text"].as_str().unwrap().len() <= 1024);
-            assert!(detail["latest"]["bytes"].as_u64().unwrap() > 24000);
-            assert_eq!(detail["latest"]["frames"][0]["line"], 17);
-            assert!(detail["latest"]["text"]
-                .as_str()
-                .unwrap()
-                .ends_with("Job->handle()"));
-        } else {
+    let detail = body(&responses[0]);
+    assert_eq!(responses[0]["result"]["isError"], false);
+    assert_eq!(detail["same_request"]["kind"], "shared");
+    assert_eq!(detail["same_request"]["more"], 6);
+    let before = detail["same_request"]["before"].as_array().unwrap();
+    let after = detail["same_request"]["after"].as_array().unwrap();
+    assert_eq!(before.len(), 5);
+    assert_eq!(after.len(), 5);
+    assert_eq!(before[0]["time"], "2026-10-01 00:00:03");
+    assert_eq!(before[4]["time"], "2026-10-01 00:00:07");
+    assert_eq!(after[0]["time"], "2026-10-01 00:03:00");
+    assert_eq!(after[4]["time"], "2026-10-01 00:03:04");
+    for entry in before.iter().chain(after) {
+        let returned = entry["text"].as_str().unwrap();
+        let time = entry["time"].as_str().unwrap();
+        let original = text.lines().find(|line| line.contains(time)).unwrap();
+        assert_eq!(entry["clipped"], true);
+        assert_eq!(entry["bytes"], original.len());
+        assert!(returned.len() <= 1024);
+        let (head, tail) = returned.split_once("\n… [clipped] …\n").unwrap();
+        assert!(original.starts_with(head));
+        assert!(original.ends_with(tail));
+    }
+    for field in detail["text_fields"].as_array().unwrap() {
+        let path = field["path"].as_str().unwrap();
+        let returned = detail.pointer(path).unwrap().as_str().unwrap();
+        assert!(returned.len() <= 1024, "field over budget: {path}");
+        if path.starts_with("/same_request/") && path.ends_with("/text") {
+            assert_eq!(field["clipped"], true);
             assert_eq!(
-                detail["same_request"]["before"].as_array().unwrap().len(),
-                5
+                &field["bytes"],
+                detail.pointer(&path.replace("/text", "/bytes")).unwrap()
             );
-            assert_eq!(detail["same_request"]["after"].as_array().unwrap().len(), 5);
-            assert_eq!(detail["same_request"]["more"], 6);
         }
     }
-    for budget in [
-        json!(1023),
-        json!(262145),
-        json!("4096"),
-        json!(1.5),
-        Value::Null,
-    ] {
-        let mut arguments = fixture.arguments();
-        arguments["max_text_bytes"] = budget;
-        let response = fixture
-            .exchange(vec![call("logs", arguments)], &text, None, true)
-            .await;
-        assert_eq!(response[0]["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn both_log_tools_reject_invalid_text_budgets_before_connecting() {
+    let fixture = Fixture::new();
+    fixture.approve();
+    for tool in ["logs", "log_group"] {
+        for budget in [
+            json!(-1),
+            json!(0),
+            json!(1023),
+            json!(262145),
+            json!(u64::MAX),
+            json!("4096"),
+            json!(1.5),
+            json!(true),
+            Value::Null,
+        ] {
+            let mut arguments = fixture.arguments();
+            arguments["max_text_bytes"] = budget;
+            if tool == "log_group" {
+                arguments["id"] = json!("1");
+            }
+            let response = fixture
+                .exchange(vec![call(tool, arguments)], "", None, true)
+                .await;
+            assert_eq!(response[0]["error"]["code"], -32602);
+            assert!(response[0].get("result").is_none());
+        }
     }
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -392,6 +513,15 @@ async fn unrecognized_samples_obey_the_default_and_requested_text_budget() {
         assert_eq!(sample["bytes"], text.len());
         assert_eq!(sample["clipped"], clipped);
         assert_eq!(sample["text"].as_str().unwrap().len(), expected_size);
+        let returned = sample["text"].as_str().unwrap();
+        if clipped {
+            let (head, tail) = returned.split_once("\n… [clipped] …\n").unwrap();
+            assert!(!head.is_empty() && !tail.is_empty());
+            assert!(text.starts_with(head));
+            assert!(text.ends_with(tail));
+        } else {
+            assert_eq!(returned, text);
+        }
     }
     let response = fixture
         .exchange(vec![call("logs", fixture.arguments())], &text, None, false)

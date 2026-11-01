@@ -126,6 +126,34 @@ pub(super) async fn read(text: &str) -> logs::Snapshot {
 }
 
 #[tokio::test]
+async fn detail_json_keeps_long_entry_text_and_its_true_size_without_clipping() {
+    let text = format!(
+        "[2026-10-01 00:00:00] production.ERROR: RuntimeException: head {}\n#0 /srv/app/app/Job.php(17): Job->handle()\n{} tail",
+        "é🙂".repeat(2000),
+        "🙂é".repeat(2000),
+    );
+    let snapshot = read(&text).await;
+    let groups = logs::group(&snapshot, Level::Error, None);
+    let (record, code) =
+        logs_json_record(&snapshot, &groups, Some("1"), Level::Error, None).unwrap();
+    assert_eq!(code, 0);
+    assert_eq!(record["latest"]["text"], text);
+    assert_eq!(record["latest"]["clipped"], false);
+    assert_eq!(record["latest"]["truncated"], false);
+    assert_eq!(record["latest"]["bytes"], text.len());
+    let metadata = record["text_fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|field| field["path"] == "/latest/text")
+        .unwrap();
+    assert_eq!(
+        metadata,
+        &json!({"path":"/latest/text","bytes":text.len(),"clipped":false})
+    );
+}
+
+#[tokio::test]
 async fn detail_json_finds_a_group_by_row_short_id_or_full_id_and_reports_lookup_failures() {
     let text = (0..20)
         .map(|n| format!("[2026-10-01 02:00:00] production.ERROR: Problem{n}Exception: failed\n"))
