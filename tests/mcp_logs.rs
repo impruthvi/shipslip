@@ -375,16 +375,8 @@ async fn long_entries_keep_head_tail_original_bytes_and_frames_with_a_raised_bud
         } else {
             assert_eq!(returned, text);
         }
-        let metadata = detail["text_fields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|field| field["path"] == "/latest/text")
-            .unwrap();
-        assert_eq!(
-            metadata,
-            &json!({"path":"/latest/text","bytes":text.len(),"clipped":clipped})
-        );
+        assert!(detail.get("text_fields").is_none());
+        assert!(detail.get("clipped_fields").is_none());
     }
 }
 
@@ -412,7 +404,7 @@ async fn both_log_tools_budget_scalar_server_text_with_original_size_metadata() 
         assert!(!head.is_empty() && !tail.is_empty());
         assert!(filter.starts_with(head));
         assert!(filter.ends_with(tail));
-        let metadata = record["text_fields"]
+        let metadata = record["clipped_fields"]
             .as_array()
             .unwrap()
             .iter()
@@ -420,8 +412,10 @@ async fn both_log_tools_budget_scalar_server_text_with_original_size_metadata() 
             .unwrap();
         assert_eq!(
             metadata,
-            &json!({"path":"/filter/text","bytes":filter.len(),"clipped":true})
+            &json!({"path":"/filter/text","bytes":filter.len()})
         );
+        assert!(record["filter"].get("clipped").is_none());
+        assert!(record.get("text_fields").is_none());
     }
 }
 
@@ -466,18 +460,7 @@ async fn same_request_keeps_the_nearest_five_entries_per_side_and_clips_their_te
         assert!(original.starts_with(head));
         assert!(original.ends_with(tail));
     }
-    for field in detail["text_fields"].as_array().unwrap() {
-        let path = field["path"].as_str().unwrap();
-        let returned = detail.pointer(path).unwrap().as_str().unwrap();
-        assert!(returned.len() <= 1024, "field over budget: {path}");
-        if path.starts_with("/same_request/") && path.ends_with("/text") {
-            assert_eq!(field["clipped"], true);
-            assert_eq!(
-                &field["bytes"],
-                detail.pointer(&path.replace("/text", "/bytes")).unwrap()
-            );
-        }
-    }
+    assert!(detail.get("clipped_fields").is_none());
 }
 
 #[tokio::test]
@@ -509,6 +492,41 @@ async fn both_log_tools_reject_invalid_text_budgets_before_connecting() {
         }
     }
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn both_log_tools_budget_error_messages_and_report_the_original_bytes() {
+    let fixture = Fixture::new();
+    fixture.approve();
+    let message = format!("connection lost: {} tail", "é🙂".repeat(4000));
+    for tool in ["logs", "log_group"] {
+        let mut arguments = fixture.arguments();
+        arguments["max_text_bytes"] = json!(1024);
+        if tool == "log_group" {
+            arguments["id"] = json!("1");
+        }
+        let responses = fixture
+            .exchange(
+                vec![call(tool, arguments)],
+                "",
+                Some(TransportError::ConnectionLost(message.clone())),
+                true,
+            )
+            .await;
+        let record = body(&responses[0]);
+        assert_eq!(responses[0]["result"]["isError"], true);
+        assert_eq!(record["error"]["kind"], "connection_lost");
+        let returned = record["error"]["message"].as_str().unwrap();
+        assert!(returned.len() <= 1024);
+        let (head, tail) = returned.split_once("\n… [clipped] …\n").unwrap();
+        assert!(message.starts_with(head));
+        assert!(message.ends_with(tail));
+        assert_eq!(
+            record["clipped_fields"],
+            json!([{"path":"/error/message", "bytes":message.len()}])
+        );
+        assert!(record.get("text_fields").is_none());
+    }
 }
 
 #[tokio::test]
@@ -573,6 +591,7 @@ async fn unrecognized_samples_obey_the_default_and_requested_text_budget() {
             .exchange(vec![call("logs", arguments)], &text, None, true)
             .await;
         let sample = &body(&response[0])["unrecognized_samples"][0];
+        assert!(body(&response[0]).get("clipped_fields").is_none());
         assert_eq!(sample["bytes"], text.len());
         assert_eq!(sample["clipped"], clipped);
         assert_eq!(sample["text"].as_str().unwrap().len(), expected_size);

@@ -16,7 +16,6 @@ pub struct LogsSummary {
     pub unrecognized_samples: Vec<LogSample>,
     pub warnings: Vec<Untrusted>,
     pub bytes_transferred: u64,
-    pub text_fields: Vec<LogTextField>,
     /// Entries in the window by level, most severe first, ignoring any filter.
     #[serde(skip)]
     pub level_counts: Vec<(Level, u64)>,
@@ -153,7 +152,7 @@ pub fn logs_summary(
     level: Level,
     text: Option<&str>,
 ) -> LogsSummary {
-    let mut record = LogsSummary {
+    LogsSummary {
         environment: snapshot.env.clone().into(),
         window: LogWindow {
             start: snapshot.start.clone().into(),
@@ -216,13 +215,9 @@ pub fn logs_summary(
             .collect(),
         warnings: snapshot.warnings.iter().cloned().map(Into::into).collect(),
         bytes_transferred: snapshot.bytes_transferred,
-        text_fields: Vec::new(),
         level_counts: logs::level_counts(snapshot),
         baseline_enabled: snapshot.baseline_enabled,
-    };
-    record.text_fields =
-        text_fields(&serde_json::to_value(&record).expect("JSON-safe logs record"));
-    record
+    }
 }
 
 fn format(format: &logs::Format) -> LogFormat {
@@ -483,7 +478,7 @@ pub fn logs_detail(
         logs::Correlation::NoId => SameRequest::NoId,
         logs::Correlation::Cut => SameRequest::Cut,
     };
-    let mut record = LogsDetail {
+    LogsDetail {
         snapshot: logs_summary(snapshot, &Groups::default(), level, text),
         group: group_record(snapshot, group),
         latest: LatestEntry {
@@ -491,10 +486,7 @@ pub fn logs_detail(
             frames: frames(&snapshot.entries[group.latest].text),
         },
         same_request,
-    };
-    record.snapshot.text_fields =
-        text_fields(&serde_json::to_value(&record).expect("JSON-safe detail record"));
-    record
+    }
 }
 
 fn entry_record(snapshot: &Snapshot, index: usize) -> LogEntry {
@@ -551,52 +543,42 @@ fn frames(text: &str) -> Vec<LogFrame> {
     frames
 }
 
-/// Per-field byte counts use JSON pointers so scalar server text keeps the
-/// same JSON shape. Entry and sample text also carry adjacent size fields.
+/// Metadata for a string cut by the MCP log text budget.
 #[derive(Debug, Serialize)]
-pub struct LogTextField {
-    pub path: String,
-    pub clipped: bool,
-    pub bytes: usize,
+struct ClippedField {
+    path: String,
+    bytes: usize,
 }
 
-fn text_fields(value: &serde_json::Value) -> Vec<LogTextField> {
-    fn visit(value: &serde_json::Value, path: &str, fields: &mut Vec<LogTextField>) {
+fn oversized_log_fields(value: &serde_json::Value, budget: usize) -> Vec<ClippedField> {
+    fn visit(value: &serde_json::Value, path: &str, budget: usize, fields: &mut Vec<ClippedField>) {
         match value {
-            serde_json::Value::String(text) => {
-                let key = path.rsplit('/').next().unwrap_or("");
-                let fixed =
-                    matches!(key, "kind" | "badge" | "level" | "key") || path == "/error/reason";
-                if !fixed {
-                    fields.push(LogTextField {
-                        path: path.into(),
-                        clipped: false,
-                        bytes: text.len(),
-                    });
-                }
+            serde_json::Value::String(text) if text.len() > budget => {
+                fields.push(ClippedField {
+                    path: path.into(),
+                    bytes: text.len(),
+                });
             }
             serde_json::Value::Array(items) => {
                 for (i, item) in items.iter().enumerate() {
-                    visit(item, &format!("{path}/{i}"), fields);
+                    visit(item, &format!("{path}/{i}"), budget, fields);
                 }
             }
             serde_json::Value::Object(object) => {
                 for (key, item) in object {
-                    if key != "text_fields" {
-                        visit(item, &format!("{path}/{key}"), fields);
-                    }
+                    let key = key.replace('~', "~0").replace('/', "~1");
+                    visit(item, &format!("{path}/{key}"), budget, fields);
                 }
             }
             _ => {}
         }
     }
     let mut fields = Vec::new();
-    visit(value, "", &mut fields);
+    visit(value, "", budget, &mut fields);
     fields
 }
 
 /// Applies the MCP budget after frames have been parsed from full text.
-/// The CLI builders populate the same metadata without clipping anything.
 pub fn limit_log_text(record: &mut serde_json::Value, budget: usize) {
     if let Some(shared) = record
         .get_mut("same_request")
@@ -618,43 +600,44 @@ pub fn limit_log_text(record: &mut serde_json::Value, budget: usize) {
         }
         shared["more"] = serde_json::json!(shared["more"].as_u64().unwrap_or(0) + omitted);
     }
-    let mut fields = text_fields(record);
-    let mut clipped_text = Vec::new();
-    for field in &mut fields {
-        if field.bytes <= budget {
-            continue;
+    let mut clipped_fields = Vec::new();
+    for field in oversized_log_fields(record, budget) {
+        let value = record.pointer_mut(&field.path).expect("visited log field");
+        let text = value.as_str().expect("visited log string");
+        let marker = "\n… [clipped] …\n";
+        let kept = budget.saturating_sub(marker.len());
+        let mut head = kept / 2;
+        while head > 0 && !text.is_char_boundary(head) {
+            head -= 1;
         }
-        if let Some(value) = record.pointer_mut(&field.path) {
-            if let Some(text) = value.as_str() {
-                let marker = "\n… [clipped] …\n";
-                let kept = budget.saturating_sub(marker.len());
-                let mut head = kept / 2;
-                while head > 0 && !text.is_char_boundary(head) {
-                    head -= 1;
-                }
-                let mut tail = text.len() - (kept - kept / 2);
-                while tail < text.len() && !text.is_char_boundary(tail) {
-                    tail += 1;
-                }
-                *value = serde_json::json!(format!("{}{marker}{}", &text[..head], &text[tail..]));
-                field.clipped = true;
-                if let Some(parent) = field.path.strip_suffix("/text") {
-                    clipped_text.push(parent.to_string());
-                }
-            }
+        let mut tail = text.len() - (kept - kept / 2);
+        while tail < text.len() && !text.is_char_boundary(tail) {
+            tail += 1;
+        }
+        *value = serde_json::json!(format!("{}{marker}{}", &text[..head], &text[tail..]));
+        let entry = field.path.strip_suffix("/text").filter(|parent| {
+            *parent == "/latest"
+                || [
+                    "/same_request/before/",
+                    "/same_request/after/",
+                    "/unrecognized_samples/",
+                ]
+                .iter()
+                .any(|prefix| {
+                    parent
+                        .strip_prefix(prefix)
+                        .is_some_and(|index| index.parse::<usize>().is_ok())
+                })
+        });
+        if let Some(path) = entry {
+            record.pointer_mut(path).expect("visited log entry")["clipped"] =
+                serde_json::json!(true);
+        } else {
+            clipped_fields.push(field);
         }
     }
-    for path in clipped_text {
-        if let Some(parent) = record.pointer_mut(&path) {
-            parent["clipped"] = serde_json::json!(true);
-        }
-    }
-    record["text_fields"] = serde_json::to_value(fields).expect("JSON-safe text metadata");
-}
-
-/// Local record tools keep their existing shape unless a field needs clipping.
-pub fn limit_record_text(record: &mut serde_json::Value, budget: usize) {
-    if text_fields(record).iter().any(|field| field.bytes > budget) {
-        limit_log_text(record, budget);
+    if !clipped_fields.is_empty() {
+        record["clipped_fields"] =
+            serde_json::to_value(clipped_fields).expect("JSON-safe clipping metadata");
     }
 }
