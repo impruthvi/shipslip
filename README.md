@@ -427,12 +427,22 @@ anchors, baseline badges, lower-bound counts, channel coverage, and warnings.
 `--json` rejects `--raw`, `--channels`, and `--md`; `--full` has no effect.
 
 Configure an MCP client with command `slip` and args `["mcp"]` for local
-records only. Add `--read-logs` to expose fresh log reads for approved
-checkouts already listed in the release map. Config changes require approval
-again before an SSH connection can open. The server cannot deploy, change a
-server, take or break a lock, or approve config. It uses stdio, opens no
-socket, serializes calls, and exits when stdin closes. `--config` is rejected;
-`SHIPSLIP_CONFIG` is ignored.
+records only, or `["mcp", "--read-logs"]` to also allow fresh log reads:
+
+```json
+{ "mcpServers": { "shipslip": { "command": "slip", "args": ["mcp", "--read-logs"] } } }
+```
+
+Log reads work only for an environment approved with `slip trust ENV`, in a
+checkout the release map already lists. Any config change needs approving
+again; until then a log tool returns `not_approved` and no SSH connection
+opens. With approval, configured paths outside `storage/logs` may be read, as
+in the CLI. Each log call opens one SSH connection for a fresh snapshot and
+closes it when done.
+
+The server cannot deploy, change a server, take or break a lock, or approve
+config. It uses stdio, opens no socket, serializes calls, and exits when stdin
+closes. `--config` is rejected; `SHIPSLIP_CONFIG` is ignored.
 
 Tools return the CLI's schema-1 JSON in `structuredContent` and a single JSON
 text content item:

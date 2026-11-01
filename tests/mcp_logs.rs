@@ -99,6 +99,9 @@ impl Connector for FakeConnector {
     type Connection = FakeTransport;
     async fn connect(&self, _alias: &str) -> Result<FakeTransport, TransportError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if let Some(error @ TransportError::Connect(_)) = &self.failure {
+            return Err(error.clone());
+        }
         Ok(FakeTransport {
             text: self.text.clone(),
             failure: self.failure.clone(),
@@ -200,6 +203,42 @@ async fn unlisted_unknown_and_unapproved_targets_never_connect() {
             json!({"kind":"not_approved","environment":"production"})
         );
     }
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_unapproved_environment_in_a_listed_checkout_never_connects() {
+    let fixture = Fixture::new();
+    let config = fixture.root.join(".shipslip.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(
+        "[env.staging]\nssh='staging'\npath='/srv/staging'\nbranch='main'\nproduction=false\n",
+    );
+    std::fs::write(&config, text).unwrap();
+    fixture.approve();
+    for tool in ["logs", "log_group"] {
+        let mut arguments = fixture.arguments();
+        arguments["environment"] = json!("staging");
+        if tool == "log_group" {
+            arguments["id"] = json!("1");
+        }
+        let response = fixture
+            .exchange(vec![call(tool, arguments)], "", None, true)
+            .await;
+        assert_eq!(response[0]["result"]["isError"], true);
+        assert_eq!(
+            body(&response[0])["error"],
+            json!({"kind":"not_approved","environment":"staging"})
+        );
+    }
+    std::fs::write(&config, "[project\n").unwrap();
+    let response = fixture
+        .exchange(vec![call("logs", fixture.arguments())], "", None, true)
+        .await;
+    assert_eq!(
+        body(&response[0])["error"],
+        json!({"kind":"not_approved","environment":"production"})
+    );
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -306,6 +345,33 @@ async fn dropped_connections_are_tool_errors_without_reconnection() {
         json!({"kind":"connection_lost","message":"dropped"})
     );
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn ssh_refusals_are_tool_errors_with_a_reason() {
+    let fixture = Fixture::new();
+    fixture.approve();
+    let message = "Host key verification failed.";
+    for tool in ["logs", "log_group"] {
+        let mut arguments = fixture.arguments();
+        if tool == "log_group" {
+            arguments["id"] = json!("1");
+        }
+        let response = fixture
+            .exchange(
+                vec![call(tool, arguments)],
+                "",
+                Some(TransportError::Connect(message.into())),
+                true,
+            )
+            .await;
+        assert_eq!(response[0]["result"]["isError"], true);
+        assert_eq!(
+            body(&response[0])["error"],
+            json!({"kind":"ssh_refused","reason":"host_key_unknown","message":message})
+        );
+    }
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
