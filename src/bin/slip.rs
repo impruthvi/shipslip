@@ -1108,31 +1108,8 @@ async fn logs_command(
     let level = options.level.unwrap_or(Level::Error);
     let groups = logs::group(&snapshot, level, grep);
     if options.json {
-        use shipslip::records::{self, LogsQueryError};
-        let result = match options.query.as_deref() {
-            None => Ok(serde_json::to_value(records::versioned(
-                records::logs_summary(&snapshot, &groups, level, grep),
-            ))?),
-            Some(query) => match logs::find(&groups, query) {
-                Lookup::Found(group) => Ok(serde_json::to_value(records::versioned(
-                    records::logs_detail(&snapshot, group, level, grep),
-                ))?),
-                Lookup::Ambiguous(matches) => Err(LogsQueryError::Ambiguous {
-                    ids: matches
-                        .iter()
-                        .map(|group| group.id.clone().into())
-                        .collect(),
-                }),
-                Lookup::Missing => Err(LogsQueryError::Missing),
-            },
-        };
-        let (record, code) = match result {
-            Ok(record) => (record, 0),
-            Err(error) => {
-                let code = error.exit_code();
-                (serde_json::to_value(records::versioned_error(error))?, code)
-            }
-        };
+        let (record, code) =
+            logs_json_record(&snapshot, &groups, options.query.as_deref(), level, grep)?;
         println!("{}", serde_json::to_string(&record)?);
         return Ok(ExitCode::from(code));
     }
@@ -1169,6 +1146,44 @@ async fn logs_command(
             Ok(ExitCode::FAILURE)
         }
     }
+}
+
+fn logs_json_record(
+    snapshot: &logs::Snapshot,
+    groups: &logs::Groups,
+    query: Option<&str>,
+    level: Level,
+    grep: Option<&str>,
+) -> Result<(serde_json::Value, u8), serde_json::Error> {
+    use shipslip::records::{self, LogsQueryError};
+    let result = match query.map(|query| logs::find(groups, query)) {
+        None => serde_json::to_value(records::versioned(records::logs_summary(
+            snapshot, groups, level, grep,
+        ))),
+        Some(Lookup::Found(group)) => serde_json::to_value(records::versioned(
+            records::logs_detail(snapshot, group, level, grep),
+        )),
+        Some(Lookup::Ambiguous(matches)) => {
+            return lookup_error(LogsQueryError::Ambiguous {
+                ids: matches
+                    .iter()
+                    .map(|group| group.id.clone().into())
+                    .collect(),
+            })
+        }
+        Some(Lookup::Missing) => return lookup_error(LogsQueryError::Missing),
+    };
+    Ok((result?, 0))
+}
+
+fn lookup_error(
+    error: shipslip::records::LogsQueryError,
+) -> Result<(serde_json::Value, u8), serde_json::Error> {
+    let code = error.exit_code();
+    Ok((
+        serde_json::to_value(shipslip::records::versioned_error(error))?,
+        code,
+    ))
 }
 
 fn print_help() {

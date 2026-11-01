@@ -1485,6 +1485,50 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
         );
         assert_eq!(detail_json["latest"]["clipped"], false);
     }
+    let full_id = |exception: &str| {
+        groups
+            .iter()
+            .find(|group| group["exception"] == exception)
+            .unwrap()["full_id"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let detail_json = run_cli(&["logs", "staging", &full_id("RuntimeException"), "--json"]);
+    assert!(detail_json.status.success());
+    assert!(detail_json.stderr.is_empty());
+    let detail_json: serde_json::Value = serde_json::from_slice(&detail_json.stdout).unwrap();
+    assert_eq!(detail_json["schema"], 1);
+    assert_eq!(detail_json["group"]["exception"], "RuntimeException");
+    assert_eq!(detail_json["latest"]["level"], "critical");
+    assert_eq!(detail_json["latest"]["channel"], "laravel");
+    assert_eq!(detail_json["latest"]["truncated"], false);
+    let entry_text = detail_json["latest"]["text"].as_str().unwrap();
+    assert!(entry_text.contains("\u{1b}[2Jboom") && entry_text.contains("[stacktrace]"));
+    assert_eq!(detail_json["latest"]["bytes"], entry_text.len());
+    assert_eq!(
+        detail_json["latest"]["frames"],
+        serde_json::json!([{"index": 0, "file": "/srv/app/app/Services/Billing.php", "line": 8, "call": "charge()", "vendor": false, "chain": 0}])
+    );
+    assert_eq!(
+        detail_json["same_request"],
+        serde_json::json!({"kind": "no_id"})
+    );
+    let full_json = run_cli(&[
+        "logs",
+        "staging",
+        &full_id("RuntimeException"),
+        "--json",
+        "--full",
+    ]);
+    let full_json: serde_json::Value = serde_json::from_slice(&full_json.stdout).unwrap();
+    assert_eq!(full_json["latest"], detail_json["latest"]);
+    assert_eq!(full_json["same_request"], detail_json["same_request"]);
+    let vendor_json = run_cli(&["logs", "staging", &full_id("PaymentException"), "--json"]);
+    let vendor_json: serde_json::Value = serde_json::from_slice(&vendor_json.stdout).unwrap();
+    let frames = vendor_json["latest"]["frames"].as_array().unwrap();
+    assert_eq!(frames.len(), 13);
+    assert!(frames.iter().all(|frame| frame["vendor"] == true));
     let missing_json = run_cli(&["logs", "staging", "zzzzzzzzzzzzzzzz", "--json"]);
     assert_eq!(missing_json.status.code(), Some(1));
     let missing_json: serde_json::Value = serde_json::from_slice(&missing_json.stdout).unwrap();
@@ -1546,6 +1590,12 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
     assert_eq!(ambiguous.status.code(), Some(2));
     assert!(ambiguous.stdout.is_empty());
     assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("matches several groups"));
+    let ambiguous_json = run_cli(&["logs", "staging", prefix, "--json"]);
+    assert_eq!(ambiguous_json.status.code(), Some(2));
+    assert!(ambiguous_json.stderr.is_empty());
+    let ambiguous_json: serde_json::Value = serde_json::from_slice(&ambiguous_json.stdout).unwrap();
+    assert_eq!(ambiguous_json["error"]["kind"], "ambiguous");
+    assert!(ambiguous_json["error"]["ids"].as_array().unwrap().len() > 1);
     let earlier = server.exec("date -u -d '-2 hours' '+%F %T'", "");
     let now = server.exec("date -u '+%F %T'", "");
     server.exec(
