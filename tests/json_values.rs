@@ -1,98 +1,196 @@
 //! Fixed-value strings must agree with the schema-1 reference.
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use shipslip::logs::*;
 use shipslip::receipt::{ReceiptKind, ReceiptStepStatus};
 use shipslip::records::*;
 use shipslip::{LogPhase, RunPlan, WatchStatus};
 use std::collections::BTreeSet;
+use std::process::Command;
 
-fn check<T: Serialize>(registry: &Value, field: &str, cases: Vec<T>, tag: Option<&str>) {
-    let actual = cases
-        .into_iter()
-        .map(|case| {
-            let value = serde_json::to_value(case).unwrap();
-            let value = tag.map_or(&value, |tag| &value[tag]);
-            value.as_str().unwrap().to_string()
-        })
-        .collect::<BTreeSet<_>>();
-    let expected = registry[field]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|value| value.as_str().unwrap().to_string())
-        .collect();
-    assert_eq!(actual, expected, "{field}");
+/// One case per variant. The exhaustive match makes a new variant a compile
+/// error here, so it can't reach JSON without being listed and checked.
+macro_rules! every {
+    ($ty:ident { $($variant:ident $(($($arg:expr),*))? $({ $($field:ident: $value:expr),* $(,)? })?),+ $(,)? }) => {{
+        fn _exhaustive(value: &$ty) {
+            match value {
+                $($ty::$variant { .. } => {})+
+            }
+        }
+        vec![$($ty::$variant $(($($arg),*))? $({ $($field: $value),* })?),+]
+    }};
 }
 
-#[test]
-fn serialized_fixed_values_match_the_json_reference() {
-    let doc = include_str!("../docs/json-reference.md");
-    let registry: Value = serde_json::from_str(
-        doc.split("```json\n")
+struct Reference {
+    fields: Map<String, Value>,
+    checked: BTreeSet<String>,
+}
+
+impl Reference {
+    fn new(fields: Value) -> Self {
+        Self {
+            fields: fields.as_object().unwrap().clone(),
+            checked: BTreeSet::new(),
+        }
+    }
+
+    fn from_doc() -> Self {
+        let doc = include_str!("../docs/json-reference.md");
+        let registry = doc
+            .split("```json\n")
             .nth(1)
             .unwrap()
             .split("```")
             .next()
-            .unwrap(),
-    )
-    .unwrap();
-    check(
-        &registry,
+            .unwrap();
+        Self::new(serde_json::from_str(registry).unwrap())
+    }
+
+    fn check<T: Serialize>(&mut self, field: &str, cases: Vec<T>, tag: Option<&str>) {
+        let values = cases.into_iter().map(|case| {
+            let value = serde_json::to_value(case).unwrap();
+            match tag {
+                Some(tag) => value[tag].clone(),
+                None => value,
+            }
+        });
+        self.check_values(field, values);
+    }
+
+    fn check_values(&mut self, field: &str, values: impl IntoIterator<Item = Value>) {
+        let actual = values
+            .into_iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect::<BTreeSet<_>>();
+        let expected = self.fields[field]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(actual, expected, "{field}");
+        self.checked.insert(field.to_string());
+    }
+
+    fn assert_all_checked(&self) {
+        let listed = self.fields.keys().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(self.checked, listed, "every documented field has a check");
+    }
+}
+
+/// The first key of an externally tagged enum, or the string itself.
+fn external_tag(value: Value) -> Value {
+    match value {
+        Value::Object(object) => json!(object.keys().next().unwrap()),
+        value => value,
+    }
+}
+
+/// Runs outside any git repository so `--config` points at nothing usable.
+fn early_error_kind(args: &[&str]) -> Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_slip"))
+        .current_dir(std::env::temp_dir())
+        .env_remove("SHIPSLIP_CONFIG")
+        .args(args)
+        .output()
+        .unwrap();
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    value["error"]["kind"].clone()
+}
+
+#[test]
+#[should_panic(expected = "log.badge")]
+fn a_value_missing_from_the_reference_fails() {
+    let mut reference = Reference::new(json!({"log.badge": ["new", "seen"]}));
+    reference.check(
         "log.badge",
-        vec![LogBadge::New, LogBadge::Seen, LogBadge::NoBaseline],
+        every!(LogBadge {
+            New,
+            Seen,
+            NoBaseline
+        }),
         None,
     );
-    check(
-        &registry,
+}
+
+#[test]
+#[should_panic(expected = "every documented field has a check")]
+fn a_documented_field_without_a_check_fails() {
+    let mut reference =
+        Reference::new(json!({"log.badge": ["new", "seen", "no_baseline"], "log.extra": ["x"]}));
+    reference.check(
+        "log.badge",
+        every!(LogBadge {
+            New,
+            Seen,
+            NoBaseline
+        }),
+        None,
+    );
+    reference.assert_all_checked();
+}
+
+#[test]
+fn serialized_fixed_values_match_the_json_reference() {
+    let mut reference = Reference::from_doc();
+    reference.check(
+        "log.badge",
+        every!(LogBadge {
+            New,
+            Seen,
+            NoBaseline
+        }),
+        None,
+    );
+    reference.check(
         "log.level",
-        [
-            "debug",
-            "info",
-            "notice",
-            "warning",
-            "error",
-            "critical",
-            "alert",
-            "emergency",
-        ]
-        .map(|name| Level::parse(name).unwrap().name())
-        .to_vec(),
+        every!(Level {
+            Debug,
+            Info,
+            Notice,
+            Warning,
+            Error,
+            Critical,
+            Alert,
+            Emergency,
+        })
+        .into_iter()
+        .map(Level::name)
+        .collect(),
         None,
     );
-    check(
-        &registry,
+    reference.check(
         "log.channel.kind",
-        vec![
-            LogChannelKind::Single,
-            LogChannelKind::Daily,
-            LogChannelKind::Mixed,
-        ],
+        every!(LogChannelKind {
+            Single,
+            Daily,
+            Mixed
+        }),
         None,
     );
-    check(
-        &registry,
+    reference.check(
         "log.coverage.kind",
-        vec![LogCoverage::Complete, LogCoverage::Partial { from: None }],
+        every!(LogCoverage {
+            Complete,
+            Partial { from: None }
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "log.format.kind",
-        vec![
-            LogFormat::Recognized,
-            LogFormat::Partial { percent: 20 },
-            LogFormat::Unrecognized,
-            LogFormat::Empty,
-            LogFormat::NotRead,
-        ],
+        every!(LogFormat {
+            Recognized,
+            Partial { percent: 20 },
+            Unrecognized,
+            Empty,
+            NotRead,
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "log.anchor.kind",
-        vec![
-            Anchor::Run {
+        every!(Anchor {
+            Run {
                 run_id: "x".into(),
                 plan: "x".into(),
                 target_commit: "x".into(),
@@ -100,97 +198,102 @@ fn serialized_fixed_values_match_the_json_reference() {
                 server_marker_outcome: None,
                 reflog_recorded: false,
             },
-            Anchor::RunInProgress {
+            RunInProgress {
                 run_id: "x".into(),
                 step: None,
             },
-            Anchor::CheckoutChange { commit: "x".into() },
-            Anchor::Since {
-                since: Since::Ago(1),
+            CheckoutChange { commit: "x".into() },
+            Since {
+                since: Since::Ago(1)
             },
-            Anchor::Default { seconds: 86400 },
-        ],
+            Default { seconds: 86400 },
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "log.since.kind",
-        vec![Since::Ago(1), Since::At("x".into())],
+        every!(Since {
+            Ago(1),
+            At("x".into())
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "log.check.kind",
-        vec![
-            RunCheck::Verified,
-            RunCheck::Unverified { reason: "x".into() },
-        ],
+        every!(RunCheck {
+            Verified,
+            Unverified { reason: "x".into() },
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "log.fallback.kind",
-        vec![
-            AnchorFallback::Run {
+        every!(AnchorFallback {
+            Run {
                 run_id: "x".into(),
                 reason: RunFallbackReason::ReflogMissing,
             },
-            AnchorFallback::LastRunMarker {
+            LastRunMarker {
                 reason: MarkerFallbackReason::Missing,
             },
-            AnchorFallback::CheckoutChange {
+            CheckoutChange {
                 reason: CheckoutFallbackReason::ReflogMissing,
             },
-        ],
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "log.run_fallback.kind",
-        vec![
-            RunFallbackReason::ReflogMissing,
-            RunFallbackReason::TargetNotReached {
+        every!(RunFallbackReason {
+            ReflogMissing,
+            TargetNotReached {
                 target_commit: "x".into(),
             },
-            RunFallbackReason::CheckoutChanged,
-            RunFallbackReason::InvalidStartTime,
-        ],
+            CheckoutChanged,
+            InvalidStartTime,
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "log.marker_fallback.kind",
-        vec![
-            MarkerFallbackReason::Missing,
-            MarkerFallbackReason::Corrupt,
-            MarkerFallbackReason::Unreadable {
+        every!(MarkerFallbackReason {
+            Missing,
+            Corrupt,
+            Unreadable {
                 message: "x".into(),
             },
-        ],
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "log.checkout_fallback.kind",
-        vec![
-            CheckoutFallbackReason::ReflogMissing,
-            CheckoutFallbackReason::ReflogReadFailed {
+        every!(CheckoutFallbackReason {
+            ReflogMissing,
+            ReflogReadFailed {
                 message: "x".into(),
             },
-            CheckoutFallbackReason::HeadReadFailed {
+            HeadReadFailed {
                 message: "x".into(),
             },
-            CheckoutFallbackReason::InvalidStartTime { commit: "x".into() },
-        ],
+            InvalidStartTime { commit: "x".into() },
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    let shared = |key| SameRequest::Shared {
+        key,
+        value: "x".into(),
+        conflict: false,
+        before: vec![],
+        after: vec![],
+        more: 0,
+        may_be_missing: false,
+    };
+    reference.check(
         "log.same_request.kind",
-        vec![
-            SameRequest::NoId,
-            SameRequest::Cut,
-            SameRequest::Shared {
+        every!(SameRequest {
+            NoId,
+            Cut,
+            Shared {
                 key: "request_id",
                 value: "x".into(),
                 conflict: false,
@@ -199,225 +302,203 @@ fn serialized_fixed_values_match_the_json_reference() {
                 more: 0,
                 may_be_missing: false,
             },
-        ],
+        }),
         Some("kind"),
     );
-    let mut keys = Vec::new();
-    for key in [
-        "request_id",
-        "trace_id",
-        "correlation_id",
-        "job_id",
-        "batch_id",
-    ] {
-        // Request-ID recognition is observable through a real snapshot, covered by logs tests.
-        let record = SameRequest::Shared {
-            key,
-            value: "x".into(),
-            conflict: false,
-            before: vec![],
-            after: vec![],
-            more: 0,
-            may_be_missing: false,
-        };
-        keys.push(serde_json::to_value(record).unwrap()["key"].clone());
-    }
-    check(&registry, "log.same_request.key", keys, None);
-    check(
-        &registry,
+    reference.check(
+        "log.same_request.key",
+        ID_KEYS.into_iter().map(shared).collect(),
+        Some("key"),
+    );
+    reference.check(
         "log.error.kind",
-        vec![
-            LogsQueryError::invalid("x"),
-            LogsQueryError::Unreadable {
+        every!(LogsQueryError {
+            InvalidInput {
+                message: "x".into()
+            },
+            Unreadable {
                 message: "x".into(),
             },
-            LogsQueryError::Missing,
-            LogsQueryError::Ambiguous { ids: vec![] },
-            LogsQueryError::SshRefused {
+            Missing,
+            Ambiguous { ids: vec![] },
+            SshRefused {
                 reason: SshRefusal::Other,
                 message: "x".into(),
             },
-            LogsQueryError::ConnectionLost {
+            ConnectionLost {
                 message: "x".into(),
             },
-            LogsQueryError::LogPathNotTrusted {
+            LogPathNotTrusted {
                 path: "x".into(),
                 environment: "x".into(),
             },
-            LogsQueryError::ZoneMissing { zone: "x".into() },
-            LogsQueryError::ServerReadFailed {
+            ZoneMissing { zone: "x".into() },
+            ServerReadFailed {
                 message: "x".into(),
             },
-            LogsQueryError::NotApproved {
+            NotApproved {
                 environment: "x".into(),
             },
-        ],
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "log.error.reason",
-        vec![
-            SshRefusal::HostKeyUnknown,
-            SshRefusal::HostKeyChanged,
-            SshRefusal::KeyNotLoaded,
-            SshRefusal::Other,
-        ],
+        every!(SshRefusal {
+            HostKeyUnknown,
+            HostKeyChanged,
+            KeyNotLoaded,
+            Other,
+        }),
         None,
     );
-    check(
-        &registry,
+    reference.check(
         "receipt.error.kind",
-        vec![
-            ReceiptQueryError::Missing,
-            ReceiptQueryError::Ambiguous { ids: vec![] },
-            ReceiptQueryError::NewerVersion { version: 99 },
-            ReceiptQueryError::Unreadable {
+        every!(ReceiptQueryError {
+            Missing,
+            Ambiguous { ids: vec![] },
+            NewerVersion { version: 99 },
+            Unreadable {
                 message: "x".into(),
             },
-        ],
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
-        "receipt.kind",
-        vec![ReceiptKind::Deploy, ReceiptKind::Up],
-        None,
+    // Status and receipts argument and config failures are plain strings in the binary.
+    let missing = std::env::temp_dir().join(format!("shipslip-no-config-{}", std::process::id()));
+    reference.check_values(
+        "cli.early_error.kind",
+        [
+            early_error_kind(&["status", "--json", "bogus"]),
+            early_error_kind(&["--config", missing.to_str().unwrap(), "receipts", "--json"]),
+        ],
     );
-    let plans = [RunPlan::Deploy, RunPlan::Rerun, RunPlan::FromStep(1)].map(|plan| {
-        let value = serde_json::to_value(plan).unwrap();
-        if value.is_string() {
-            value
-        } else {
-            json!(value.as_object().unwrap().keys().next().unwrap())
-        }
-    });
-    check(&registry, "receipt.run_plan", plans.to_vec(), None);
-    check(
-        &registry,
+    reference.check("receipt.kind", every!(ReceiptKind { Deploy, Up }), None);
+    reference.check_values(
+        "receipt.run_plan",
+        every!(RunPlan {
+            Deploy,
+            Rerun,
+            FromStep(1)
+        })
+        .into_iter()
+        .map(|plan| external_tag(serde_json::to_value(plan).unwrap())),
+    );
+    reference.check(
         "receipt.outcome.kind",
-        vec![
-            OutcomeKind::Succeeded,
-            OutcomeKind::FailedAtStep {
+        every!(OutcomeKind {
+            Succeeded,
+            FailedAtStep {
                 step: 1,
                 partial_update: false,
             },
-            OutcomeKind::StoppedAfterStep { step: 1 },
-            OutcomeKind::StoppedInMaintenance,
-            OutcomeKind::Unknown { step: 1 },
-            OutcomeKind::CancelledBeforeChanges,
-            OutcomeKind::AbortedBeforeChanges,
-            OutcomeKind::NotRecorded,
-        ],
+            StoppedAfterStep { step: 1 },
+            StoppedInMaintenance,
+            Unknown { step: 1 },
+            CancelledBeforeChanges,
+            AbortedBeforeChanges,
+            NotRecorded,
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "receipt.flag.kind",
-        vec![
-            Flag::NewErrors { groups: 1 },
-            Flag::LogNotFullyObserved,
-            Flag::LogNotRecorded,
-            Flag::SmokeFailed { status: None },
-            Flag::SmokeNotRecorded,
-            Flag::AppLeftDown,
-        ],
+        every!(Flag {
+            NewErrors { groups: 1 },
+            LogNotFullyObserved,
+            LogNotRecorded,
+            SmokeFailed { status: None },
+            SmokeNotRecorded,
+            AppLeftDown,
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "receipt.step.kind",
-        vec![
-            StepKind::MaintenanceDown,
-            StepKind::Step { index: 0 },
-            StepKind::MaintenanceUp,
-        ],
+        every!(StepKind {
+            MaintenanceDown,
+            Step { index: 0 },
+            MaintenanceUp,
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "receipt.step.status",
-        vec![
-            StepState::Pending,
-            StepState::Running,
-            StepState::Ok,
-            StepState::Failed,
-            StepState::Unknown,
-            StepState::NotStarted,
-            StepState::Skipped,
-        ],
+        every!(StepState {
+            Pending,
+            Running,
+            Ok,
+            Failed,
+            Unknown,
+            NotStarted,
+            Skipped,
+        }),
         None,
     );
-    check(
-        &registry,
+    reference.check(
         "receipt.watch.status",
-        vec![
-            WatchStatus::Complete,
-            WatchStatus::Partial,
-            WatchStatus::Unavailable,
-            WatchStatus::Cancelled,
-            WatchStatus::NotRun,
-            WatchStatus::NoLogSeen,
-        ],
+        every!(WatchStatus {
+            Complete,
+            Partial,
+            Unavailable,
+            Cancelled,
+            NotRun,
+            NoLogSeen,
+        }),
         None,
     );
-    check(
-        &registry,
+    reference.check(
         "receipt.watch.phase",
-        vec![LogPhase::During, LogPhase::After],
+        every!(LogPhase { During, After }),
         None,
     );
-    check(
-        &registry,
+    reference.check(
         "receipt.smoke.kind",
-        vec![
-            Smoke::NotConfigured,
-            Smoke::Skipped,
-            Smoke::Passed {
+        every!(Smoke {
+            NotConfigured,
+            Skipped,
+            Passed {
                 status: 200,
                 latency_ms: 1,
             },
-            Smoke::Failed {
+            Failed {
                 status: None,
                 reason: "x".into(),
             },
-        ],
+        }),
         Some("kind"),
     );
-    let parts = [Part::Text("x".into()), Part::Command(vec![])].map(|part| {
-        json!(serde_json::to_value(part)
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .keys()
-            .next()
-            .unwrap())
-    });
-    check(&registry, "receipt.next_step.part", parts.to_vec(), None);
-    check(
-        &registry,
+    reference.check_values(
+        "receipt.next_step.part",
+        every!(Part {
+            Text("x".into()),
+            Command(vec![])
+        })
+        .into_iter()
+        .map(|part| external_tag(serde_json::to_value(part).unwrap())),
+    );
+    reference.check(
         "status.mark",
-        vec![
-            Mark::Recorded,
-            Mark::Incomplete,
-            Mark::Observed,
-            Mark::NotKnown,
-            Mark::NoCode,
-        ],
+        every!(Mark {
+            Recorded,
+            Incomplete,
+            Observed,
+            NotKnown,
+            NoCode,
+        }),
         None,
     );
-    check(
-        &registry,
+    reference.check(
         "status.code.kind",
-        vec![
-            CodeState::Recorded {
+        every!(CodeState {
+            Recorded {
                 sha: "x".into(),
                 complete: true,
                 evidence: Evidence::FastForward,
                 run_id: "x".into(),
                 at_ms: 0,
             },
-            CodeState::Observed {
+            Observed {
                 sha: "x".into(),
                 dirty: None,
                 expected: "x".into(),
@@ -425,66 +506,64 @@ fn serialized_fixed_values_match_the_json_reference() {
                 outcome: None,
                 at_ms: 0,
             },
-            CodeState::NotKnown {
+            NotKnown {
                 run_id: None,
                 reason: NotKnownReason::NoStepZero,
             },
-            CodeState::NeverDeployed,
-            CodeState::NoCodeChangeInLast { records: 0 },
-            CodeState::TargetChanged {
+            NeverDeployed,
+            NoCodeChangeInLast { records: 0 },
+            TargetChanged {
                 run_id: "x".into(),
                 target: "x".into(),
             },
-        ],
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "status.code.evidence",
-        vec![Evidence::FastForward, Evidence::CheckedOutAtStart],
+        every!(Evidence {
+            FastForward,
+            CheckedOutAtStart
+        }),
         None,
     );
-    check(
-        &registry,
+    reference.check(
         "status.code.reason.kind",
-        vec![
-            NotKnownReason::StepZero(ReceiptStepStatus::Unknown),
-            NotKnownReason::NoStepZero,
-            NotKnownReason::Unreadable,
-        ],
+        every!(NotKnownReason {
+            StepZero(ReceiptStepStatus::Unknown),
+            NoStepZero,
+            Unreadable,
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "status.code.reason.status",
-        vec![
-            ReceiptStepStatus::Pending,
-            ReceiptStepStatus::Running,
-            ReceiptStepStatus::Ok,
-            ReceiptStepStatus::Failed,
-            ReceiptStepStatus::Unknown,
-            ReceiptStepStatus::NotStarted,
-            ReceiptStepStatus::Skipped,
-        ],
+        every!(ReceiptStepStatus {
+            Pending,
+            Running,
+            Ok,
+            Failed,
+            Unknown,
+            NotStarted,
+            Skipped,
+        }),
         None,
     );
-    check(
-        &registry,
+    reference.check(
         "status.stale_hint.kind",
-        vec![
-            StaleHint::NewestUnreadable { path: "x".into() },
-            StaleHint::UnattributedNewer { path: "x".into() },
-        ],
+        every!(StaleHint {
+            NewestUnreadable { path: "x".into() },
+            UnattributedNewer { path: "x".into() },
+        }),
         Some("kind"),
     );
-    check(
-        &registry,
+    reference.check(
         "status.problem.kind",
-        vec![
-            ProblemKind::Trust,
-            ProblemKind::ProjectDir,
-            ProblemKind::Receipt,
-        ],
+        every!(ProblemKind {
+            Trust,
+            ProjectDir,
+            Receipt
+        }),
         None,
     );
     let summary = ReceiptSummary {
@@ -505,30 +584,30 @@ fn serialized_fixed_values_match_the_json_reference() {
         recipe_steps: 0,
         steps: vec![],
     };
-    check(
-        &registry,
+    reference.check(
         "receipt.row.state",
-        vec![
-            ReceiptListRow::Receipt {
+        every!(ReceiptListRow {
+            Receipt {
                 id: "x".into(),
                 path: "x".into(),
                 receipt: Box::new(summary),
             },
-            ReceiptListRow::Newer {
+            Newer {
                 id: "x".into(),
                 env: "x".into(),
                 started_at_ms: None,
                 version: 99,
                 path: "x".into(),
             },
-            ReceiptListRow::Unreadable {
+            Unreadable {
                 id: "x".into(),
                 env: "x".into(),
                 started_at_ms: None,
                 path: "x".into(),
                 reason: "x".into(),
             },
-        ],
+        }),
         Some("state"),
     );
+    reference.assert_all_checked();
 }

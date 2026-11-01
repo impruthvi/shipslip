@@ -1700,7 +1700,7 @@ fn json_tail(text: &str) -> bool {
 }
 
 /// Context keys that name one request or job, narrowest first.
-const ID_KEYS: [&str; 5] = [
+pub const ID_KEYS: [&str; 5] = [
     "request_id",
     "trace_id",
     "correlation_id",

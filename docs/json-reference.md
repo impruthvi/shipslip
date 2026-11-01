@@ -107,10 +107,14 @@ entries per side, adding omitted entries to `more`; CLI JSON includes all.
 
 ## Fixed values
 
-The following JSON object is the fixed-value registry used by the tests.
-Keys name fields by their owning record/type. Numeric and boolean fields
-are not strings. All fields not listed here are server text, including
-`anchor.plan`, `server_marker_outcome`, and `check.reason`.
+The following JSON object is the fixed-value registry. `tests/json_values.rs`
+checks that each listed field serializes exactly these values; a new enum
+variant fails that test until it is listed here. Keys name fields by their
+owning record/type, not by JSON path: `log.level` is every `level` in a logs
+record (`filter`, `latest`, and same-request entries). A receipt's
+`watch.new_errors[].variants[].level` is server text. Numeric and boolean
+fields are not strings. All fields not listed here are server text,
+including `anchor.plan`, `server_marker_outcome`, and `check.reason`.
 
 ```json
 {
@@ -152,6 +156,14 @@ are not strings. All fields not listed here are server text, including
   "status.problem.kind": ["trust", "project_dir", "receipt"]
 }
 ```
+
+Error kinds by source: `status --json`, `receipts --json`, `receipts show
+ID --json`, and the `status`, `receipts`, and `receipt` tools use
+`receipt.error.kind`. `logs --json` and the `logs` and `log_group` tools use
+`log.error.kind`, including bad flags and a missing config; `ssh_refused`
+adds a `reason` from `log.error.reason`. A `status` or `receipts` failure
+before the command reads any record (a bad flag, a missing config) uses
+`cli.early_error.kind`. Every other error field is server text.
 
 `run_plan` is either a string or `{"FromStep": N}`. Next-step parts use
 externally tagged objects (`{"text": ...}` or `{"command": [...]}`). These
