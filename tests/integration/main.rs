@@ -26,6 +26,7 @@ use tokio::sync::mpsc;
 const IMAGE: &str = "shipslip-test-sshd";
 
 mod github_token;
+mod logs_text;
 mod mcp;
 
 fn docker(args: &[&str]) -> String {
@@ -317,8 +318,8 @@ async fn logs_mixed_baselines_retain_positive_matches_without_claiming_absences_
         Badge::Unknown
     );
     assert!(!snapshot.channels[0].baseline.available);
-    assert!(logs::render_header(&snapshot).contains("baseline partly recognized"));
-    assert!(logs::render_channels(&snapshot).contains("none (partly recognized"));
+    assert!(logs_text::header(&snapshot).contains("baseline partly recognized"));
+    assert!(logs_text::channels(&snapshot).contains("none (partly recognized"));
 }
 
 #[tokio::test]
@@ -388,7 +389,7 @@ async fn logs_window_and_baseline_budgets_stay_separate_and_fair_across_busy_cha
         .unwrap();
     assert_eq!(new.badge, Badge::New);
     assert!(new.partial);
-    assert!(logs::render_detail(&snapshot, new, true).contains("First seen: —"));
+    assert!(logs_text::detail(&snapshot, new, true).contains("First seen: —"));
     let quiet = groups
         .groups
         .iter()
@@ -412,8 +413,8 @@ async fn logs_active_run_is_the_anchor_before_and_after_fast_forward() {
     let before = logs::snapshot(&*ssh, &target, &Request::default())
         .await
         .unwrap();
-    assert!(before.since_label.contains("deploy in progress"));
-    assert!(before.since_label.contains(&running.run_id));
+    assert!(logs_text::window(&before).contains("deploy in progress"));
+    assert!(logs_text::window(&before).contains(&running.run_id));
     server.exec("touch ~/release-down", "");
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(event) = running.rx.recv().await {
@@ -425,8 +426,8 @@ async fn logs_active_run_is_the_anchor_before_and_after_fast_forward() {
     let after = logs::snapshot(&*ssh, &target, &Request::default())
         .await
         .unwrap();
-    assert!(after.since_label.contains("deploy in progress"));
-    assert!(after.since_label.contains("step 1"));
+    assert!(logs_text::window(&after).contains("deploy in progress"));
+    assert!(logs_text::window(&after).contains("step 1"));
     assert_eq!(before.start, after.start);
     server.exec("touch ~/release-step", "");
     let events = running.rest(events).await;
@@ -482,12 +483,12 @@ async fn logs_deploy_anchor_compares_global_groups_and_new_variants() {
         .await
         .unwrap();
     assert!(
-        snapshot.since_label.starts_with("since slip deploy"),
+        logs_text::window(&snapshot).starts_with("since slip deploy"),
         "{} {:?}",
-        snapshot.since_label,
+        logs_text::window(&snapshot),
         snapshot.warnings
     );
-    assert!(snapshot.since_label.contains("succeeded"));
+    assert!(logs_text::window(&snapshot).contains("succeeded"));
     assert_eq!(snapshot.entries.len(), 5);
     assert_eq!(
         server.exec(&format!("cat {path}/.git/shipslip.last-run"), ""),
@@ -515,8 +516,8 @@ async fn logs_deploy_anchor_compares_global_groups_and_new_variants() {
         .iter()
         .any(|variant| variant.badge == Badge::Seen));
     assert_eq!(groups.groups[0].badge, Badge::New);
-    assert!(logs::render_header(&snapshot).contains("no baseline: queue"));
-    assert!(logs::render_channels(&snapshot).contains("BASELINE"));
+    assert!(logs_text::header(&snapshot).contains("no baseline: queue"));
+    assert!(logs_text::channels(&snapshot).contains("BASELINE"));
     let explicit = logs::snapshot(
         &*ssh,
         &target,
@@ -527,7 +528,7 @@ async fn logs_deploy_anchor_compares_global_groups_and_new_variants() {
     )
     .await
     .unwrap();
-    assert_eq!(explicit.since_label, "since 2h");
+    assert_eq!(logs_text::window(&explicit), "since 2h");
     assert_eq!(explicit.entries.len(), 7);
 }
 
@@ -556,7 +557,7 @@ async fn logs_rerun_from_step_and_failed_runs_refresh_the_marker() {
         let snapshot = logs::snapshot(&*ssh, &target, &Request::default())
             .await
             .unwrap();
-        assert!(snapshot.since_label.contains(label));
+        assert!(logs_text::window(&snapshot).contains(label));
         assert_eq!(
             server.exec(&format!("git -C {path} rev-parse HEAD"), ""),
             head
@@ -574,7 +575,7 @@ async fn logs_rerun_from_step_and_failed_runs_refresh_the_marker() {
     let snapshot = logs::snapshot(&*ssh, &failed, &Request::default())
         .await
         .unwrap();
-    assert!(snapshot.since_label.contains("failed"));
+    assert!(logs_text::window(&snapshot).contains("failed"));
 }
 
 #[tokio::test]
@@ -596,7 +597,7 @@ async fn logs_anchor_fallbacks_distinguish_corrupt_missing_and_failed_git() {
     let no_marker = logs::snapshot(&*ssh, &target, &Request::default())
         .await
         .unwrap();
-    assert!(no_marker.since_label.starts_with("since checkout change"));
+    assert!(logs_text::window(&no_marker).starts_with("since checkout change"));
     server.exec(
         &format!("printf corrupt > {path}/.git/shipslip.last-run"),
         "",
@@ -622,14 +623,12 @@ async fn logs_anchor_fallbacks_distinguish_corrupt_missing_and_failed_git() {
     let unverified = logs::snapshot(&git_fails, &target, &Request::default())
         .await
         .unwrap();
-    assert!(unverified
-        .since_label
-        .contains("unverified: fatal: dubious ownership"));
+    assert!(logs_text::window(&unverified).contains("unverified: fatal: dubious ownership"));
     server.exec(&format!("rm {path}/.git/shipslip.last-run"), "");
     let failed = logs::snapshot(&git_fails, &target, &Request::default())
         .await
         .unwrap();
-    assert_eq!(failed.since_label, "since 24h (default)");
+    assert_eq!(logs_text::window(&failed), "since 24h (default)");
     assert!(failed
         .warnings
         .iter()
@@ -663,7 +662,7 @@ async fn logs_copytruncate_regrowth_and_checkout_away_and_back_invalidate_offset
     let snapshot = logs::snapshot(&*ssh, &target, &Request::default())
         .await
         .unwrap();
-    assert!(snapshot.since_label.starts_with("since checkout change"));
+    assert!(logs_text::window(&snapshot).starts_with("since checkout change"));
     assert!(snapshot
         .warnings
         .iter()
@@ -713,7 +712,7 @@ async fn logs_marker_start_failure_warns_in_receipt_removes_old_marker_and_still
     let snapshot = logs::snapshot(&server.connect().await, &target, &Request::default())
         .await
         .unwrap();
-    assert!(snapshot.since_label.starts_with("since checkout change"));
+    assert!(logs_text::window(&snapshot).starts_with("since checkout change"));
 }
 
 #[tokio::test]
@@ -817,12 +816,12 @@ async fn logs_discovery_preserves_partial_entries_and_raw_unsupported_formats() 
         .groups
         .iter()
         .any(|group| group.class == "JobException"));
-    let raw = logs::render_raw(&snapshot, Level::Emergency, Some("SECRET"));
+    let raw = logs_text::raw(&snapshot, Level::Emergency, Some("SECRET"));
     assert!(raw.contains("json-secret\\x1b[2J"));
     assert!(raw.contains("no --level/--since filtering"));
     assert!(!raw.contains("worker-stdout"));
     assert!(!raw.contains('\x1b'));
-    let table = logs::render_channels(&snapshot);
+    let table = logs_text::channels(&snapshot);
     assert!(table.contains("quote'\\x0a\\x1b[2J"));
     assert!(!table.contains('\x1b'));
 }
@@ -877,7 +876,7 @@ async fn logs_overrides_hide_before_opening_replace_paths_and_preserve_trust() {
         .unwrap();
     assert_eq!(payments.name, "billing");
     assert_eq!(payments.files, ["storage/logs/custom output.txt"]);
-    let table = logs::render_channels(&snapshot);
+    let table = logs_text::channels(&snapshot);
     let fields = table.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(fields.contains("app (laravel) single+daily"));
     assert!(fields.contains("audit single 0"));
@@ -997,7 +996,7 @@ async fn logs_budget_is_fair_to_quiet_channels_and_counts_only_partial_groups_as
             .unwrap()
             .partial
     );
-    assert!(logs::render_header(&snapshot).contains("other channels partial"));
+    assert!(logs_text::header(&snapshot).contains("other channels partial"));
     let tiny = logs::snapshot(
         &ssh,
         &target(&path, &[]),
@@ -1058,7 +1057,7 @@ async fn logs_caps_file_slots_and_channels_and_reports_stale_non_disk_hint() {
             .unwrap()
             .complete
     );
-    assert!(logs::render_channels(&snapshot).contains("+11 files not read"));
+    assert!(logs_text::channels(&snapshot).contains("+11 files not read"));
     server.keep_logs(&path, &[]);
     server.exec(&format!("cd {path}/storage/logs; for n in $(seq -w 1 21); do printf 'stdout only\\n' > \"worker-$n.log\"; done; touch -d '2 days ago' -- *.log"), "");
     let snapshot = logs::snapshot(&ssh, &target(&path, &[]), &Request::default())
@@ -1073,12 +1072,11 @@ async fn logs_caps_file_slots_and_channels_and_reports_stale_non_disk_hint() {
         .warnings
         .iter()
         .any(|warning| warning.contains("stderr, syslog, or a service")));
-    let summary = logs::render_summary(
+    let summary = logs_text::summary(
         &snapshot,
         &logs::group(&snapshot, Level::Error, None),
         Level::Error,
         None,
-        false,
     );
     assert!(summary.contains("coverage is incomplete"));
     assert!(!summary.contains("No errors"));
@@ -1116,10 +1114,10 @@ async fn logs_snapshot_merges_daily_files_and_changes_no_app_or_run_files() {
         .find(|g| g.class == "QueryException")
         .unwrap();
     assert_eq!(query.count, 4);
-    let detail = logs::render_detail(&snapshot, query, true);
+    let detail = logs_text::detail(&snapshot, query, true);
     assert!(detail.contains("[stacktrace]"));
     assert!(detail.contains("Checkout.php(3)"));
-    let raw = logs::render_raw(&snapshot, Level::Debug, None);
+    let raw = logs_text::raw(&snapshot, Level::Debug, None);
     assert!(raw.contains("Slow query"));
     assert!(!raw.contains('\x1b'));
     assert!(raw.contains("\\x1b]0;title\\x07"));
@@ -1218,9 +1216,9 @@ async fn logs_byte_limit_and_partial_lookup_are_honest() {
         .unwrap();
         assert_eq!(snapshot.channels[0].bytes_read, limit);
         assert!(!snapshot.channels[0].complete);
-        assert!(logs::render_miss(&snapshot, "zz").contains("not found in what was read"));
+        assert!(logs_text::miss(&snapshot, "zz").contains("not found in what was read"));
         let groups = logs::group(&snapshot, Level::Error, None);
-        let summary = logs::render_summary(&snapshot, &groups, Level::Error, None, false);
+        let summary = logs_text::summary(&snapshot, &groups, Level::Error, None);
         assert!(summary.contains("≥") || summary.contains("coverage is incomplete"));
     }
 }
@@ -1246,7 +1244,7 @@ async fn logs_read_refuses_symlink_swaps_rotation_and_copytruncate() {
         assert!(snapshot.entries.is_empty(), "{mutation}");
         assert!(!snapshot.channels[0].complete);
         assert_eq!(snapshot.channels[0].changed.len(), 1);
-        assert!(logs::render_header(&snapshot).contains("changed during read"));
+        assert!(logs_text::header(&snapshot).contains("changed during read"));
     }
 }
 
@@ -1263,7 +1261,7 @@ async fn logs_append_after_probe_is_excluded_from_the_snapshot() {
         .unwrap();
     assert_eq!(snapshot.entries.len(), 1);
     assert!(snapshot.channels[0].complete);
-    assert!(!logs::render_raw(&snapshot, Level::Debug, None).contains("LateException"));
+    assert!(!logs_text::raw(&snapshot, Level::Debug, None).contains("LateException"));
 }
 
 #[tokio::test]
@@ -1350,10 +1348,8 @@ async fn logs_dst_keeps_second_pass_entries_and_warns_in_raw_mode() {
     let groups = logs::group(&snapshot, Level::Error, None);
     assert_eq!(groups.groups.len(), 1);
     assert_eq!(groups.groups[0].count, 2);
-    assert!(logs::render_detail(&snapshot, &groups.groups[0], true).contains("second pass"));
-    assert!(
-        logs::render_raw(&snapshot, Level::Debug, None).contains("clock changed in this window")
-    );
+    assert!(logs_text::detail(&snapshot, &groups.groups[0], true).contains("second pass"));
+    assert!(logs_text::raw(&snapshot, Level::Debug, None).contains("clock changed in this window"));
 }
 
 #[tokio::test]
@@ -1371,12 +1367,11 @@ async fn logs_missing_or_unreadable_files_do_not_report_all_clear() {
     let snapshot = logs::snapshot(&ssh, &target, &Request::default())
         .await
         .unwrap();
-    let summary = logs::render_summary(
+    let summary = logs_text::summary(
         &snapshot,
         &logs::group(&snapshot, Level::Error, None),
         Level::Error,
         None,
-        false,
     );
     assert!(summary.contains("no log file found"));
     assert!(summary.contains("coverage is incomplete"));

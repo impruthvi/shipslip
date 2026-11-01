@@ -14,7 +14,9 @@ mod receipts;
 mod status;
 mod steps;
 
-pub use crate::receipt::markdown::render as markdown;
+pub use crate::receipt::markdown::{
+    code as markdown_code, fence as markdown_fence, inline as markdown_inline, render as markdown,
+};
 pub use logs::*;
 pub use next_steps::{copy_is_safe, failed_step_options, NextStep, NextSteps, Part};
 pub use outcome::{describe_plan, Badge, Flag, Outcome, OutcomeKind};

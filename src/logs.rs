@@ -22,7 +22,6 @@ use sha2::{Digest, Sha256};
 use crate::observation::{
     clip_utf8, parse_header, signature, ENTRY_BYTES, MAX_GROUPS, MAX_VARIANTS,
 };
-use crate::receipt::markdown::{code, fence, inline};
 use crate::runner::run_collect;
 use crate::script::shell_quote;
 use crate::transport::{Transport, TransportError};
@@ -46,7 +45,6 @@ const BASELINE_CHANNEL_BYTES: u64 = 2 * 1024 * 1024;
 const BASELINE_TOTAL_BYTES: u64 = 6 * 1024 * 1024;
 const BASELINE_FLOOR_BYTES: u64 = 128 * 1024;
 const MESSAGE_BYTES: usize = 512;
-const DEFAULT_ROWS: usize = 20;
 const ID_LEN: usize = 5;
 /// Letters only, so an ID is never mistaken for a row number; no `l` or `o`.
 const ID_ALPHABET: &[u8] = b"abcdefghijkmnpqrstuvwxyz";
@@ -154,15 +152,6 @@ impl Since {
             Err(usage())
         }
     }
-
-    fn label(&self) -> String {
-        match self {
-            Since::Ago(seconds) if seconds % 86_400 == 0 => format!("since {}d", seconds / 86_400),
-            Since::Ago(seconds) if seconds % 3600 == 0 => format!("since {}h", seconds / 3600),
-            Since::Ago(seconds) => format!("since {}m", seconds / 60),
-            Since::At(at) => format!("since {at}"),
-        }
-    }
 }
 
 fn is_date(value: &str) -> bool {
@@ -261,16 +250,6 @@ pub enum ChannelKind {
     Mixed,
 }
 
-impl ChannelKind {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Single => "single",
-            Self::Daily => "daily",
-            Self::Mixed => "single+daily",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Format {
     Recognized,
@@ -281,16 +260,6 @@ pub enum Format {
 }
 
 impl Format {
-    fn label(&self) -> String {
-        match self {
-            Self::Recognized => "Laravel".into(),
-            Self::Partial(percent) => format!("partly recognized ({percent}% of lines)"),
-            Self::Unrecognized => "format not recognized".into(),
-            Self::Empty => "no lines in this window".into(),
-            Self::NotRead => "not read".into(),
-        }
-    }
-
     fn has_unknown_content(&self) -> bool {
         matches!(self, Self::Partial(_) | Self::Unrecognized | Self::NotRead)
     }
@@ -330,8 +299,6 @@ impl Entry {
 pub struct Snapshot {
     pub env: String,
     pub zone: String,
-    /// Text label rebuilt from the chosen anchor.
-    pub since_label: String,
     /// Evidence used to choose the window start.
     pub anchor: Anchor,
     /// Candidates that could not be used, in selection order.
@@ -488,7 +455,6 @@ pub async fn snapshot<T: Transport>(
     let mut snapshot = Snapshot {
         env: target.env.clone(),
         zone,
-        since_label: choice.label,
         anchor: choice.anchor,
         anchor_fallbacks: choice.fallbacks,
         start: time.start_local.clone(),
@@ -834,7 +800,7 @@ struct FormatStats {
 
 /// For a numbered stack frame line like `#3 /srv/app/vendor/X.php(48): f()`,
 /// its number and the text after the number.
-pub(crate) fn frame_rest(line: &str) -> Option<(u64, &str)> {
+pub fn frame_rest(line: &str) -> Option<(u64, &str)> {
     let rest = line.trim_start().strip_prefix('#')?;
     let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
     if digits == 0 {
@@ -846,7 +812,7 @@ pub(crate) fn frame_rest(line: &str) -> Option<(u64, &str)> {
 
 /// A frame whose file sits under a whole `vendor` path segment. Lines that
 /// are not numbered frames, or whose path can't be read, are not vendor.
-pub(crate) fn vendor_frame(line: &str) -> bool {
+pub fn vendor_frame(line: &str) -> bool {
     let Some((_, rest)) = frame_rest(line) else {
         return false;
     };
@@ -854,34 +820,6 @@ pub(crate) fn vendor_frame(line: &str) -> bool {
         return false;
     };
     path.split(['/', '\\']).any(|segment| segment == "vendor")
-}
-
-/// Runs of at least this many vendor frames fold into one line.
-const FOLD_RUN: usize = 3;
-
-/// `text` with runs of vendor frames folded into a count. Frame #0 (where
-/// the exception was thrown) and every other line stay as written.
-fn fold_frames(text: &str) -> String {
-    fn flush(out: &mut Vec<String>, run: &mut Vec<&str>) {
-        if run.len() >= FOLD_RUN {
-            out.push(format!("… {} vendor frames (--full to show)", run.len()));
-        } else {
-            out.extend(run.iter().map(|line| line.to_string()));
-        }
-        run.clear();
-    }
-    let mut out = Vec::new();
-    let mut run = Vec::new();
-    for line in text.split('\n') {
-        if vendor_frame(line) && frame_rest(line).is_some_and(|(number, _)| number > 0) {
-            run.push(line);
-            continue;
-        }
-        flush(&mut out, &mut run);
-        out.push(line.to_string());
-    }
-    flush(&mut out, &mut run);
-    out.join("\n")
 }
 
 impl FormatStats {
@@ -1456,16 +1394,6 @@ pub enum Badge {
     Unknown,
     Seen,
 }
-impl Badge {
-    fn label(self) -> &'static str {
-        match self {
-            Self::New => "NEW",
-            Self::Unknown => "?",
-            Self::Seen => "",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Variant {
     pub badge: Badge,
@@ -1685,6 +1613,11 @@ fn without_context(line: &str) -> &str {
     cut.map_or(line, |at| line[..at].trim_end())
 }
 
+/// An entry's first message line without Laravel's context and extra JSON.
+pub fn headline(entry: &Entry) -> &str {
+    without_context(entry.message().lines().next().unwrap_or(""))
+}
+
 /// `text` is one or two JSON objects or arrays and nothing else.
 fn json_tail(text: &str) -> bool {
     let mut values = 0;
@@ -1707,10 +1640,6 @@ pub const ID_KEYS: [&str; 5] = [
     "job_id",
     "batch_id",
 ];
-/// Keys whose value is copied into queued jobs when set through `Context`.
-const JOB_SPANNING_KEYS: [&str; 2] = ["trace_id", "correlation_id"];
-/// Lines shown on each side of the entry in a same-request section.
-const RELATED_SIDE: usize = 10;
 /// Trailing JSON larger than this is not read for IDs (exception context aside).
 const ID_TAIL_BYTES: usize = 16 * 1024;
 /// Candidate JSON starts tried from the end when there is no exception context.
@@ -1809,19 +1738,6 @@ pub fn request_id(entry: &Entry) -> Option<RequestId> {
     None
 }
 
-/// `word` as typed in a shell: bare when it is plainly safe, quoted otherwise.
-fn shell_word(word: &str) -> String {
-    let plain = !word.is_empty()
-        && word
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._:/@%+=,-".contains(&byte));
-    if plain {
-        word.into()
-    } else {
-        shell_quote(word)
-    }
-}
-
 /// Entries that share a request or job ID with one entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Related {
@@ -1829,8 +1745,6 @@ pub struct Related {
     /// Entry indices before and after the chosen entry, in time order.
     pub before: Vec<usize>,
     pub after: Vec<usize>,
-    /// Matching entries not shown.
-    pub more: u64,
     /// Some channel was not fully read or understood, so lines may be missing.
     pub partial: bool,
 }
@@ -1848,10 +1762,6 @@ pub enum Correlation {
 /// This is correlation, not cause: it says the lines came from the same
 /// request, not that one led to the other.
 pub fn related(snapshot: &Snapshot, entry: usize) -> Correlation {
-    related_with_limit(snapshot, entry, RELATED_SIDE)
-}
-
-pub(crate) fn related_with_limit(snapshot: &Snapshot, entry: usize, limit: usize) -> Correlation {
     let chosen = &snapshot.entries[entry];
     let Some(id) = request_id(chosen) else {
         return if chosen.truncated {
@@ -1884,99 +1794,12 @@ pub(crate) fn related_with_limit(snapshot: &Snapshot, entry: usize, limit: usize
         .iter()
         .position(|index| *index == entry)
         .unwrap_or(0);
-    let before = matches[at.saturating_sub(limit)..at].to_vec();
-    let after = matches[at + 1..(at + 1).saturating_add(limit).min(matches.len())].to_vec();
     Correlation::Shared(Related {
-        more: (matches.len() - 1 - before.len() - after.len()) as u64,
-        before,
-        after,
+        before: matches[..at].to_vec(),
+        after: matches[at + 1..].to_vec(),
         partial: coverage_incomplete(snapshot),
         id,
     })
-}
-
-/// The same-request section for a group's latest entry, or a short note when
-/// it has no ID. `window_args` are the user's `--since`/`--max-bytes` flags,
-/// repeated in the follow-up command so it reads the same window.
-pub fn render_related(snapshot: &Snapshot, group: &Group, window_args: &[String]) -> String {
-    let latest = &snapshot.entries[group.latest];
-    let related = match related(snapshot, group.latest) {
-        Correlation::Shared(related) => related,
-        Correlation::Cut => {
-            return "\nEntry was cut at 256 KiB, so an ID at its end may be missing.\n".into()
-        }
-        Correlation::NoId if latest.level >= Level::Error => {
-            return "\nNo request ID in this entry. Laravel's Context::add('request_id', …) in a middleware adds one to every log line.\n".into()
-        }
-        Correlation::NoId => return String::new(),
-    };
-    let id = &related.id;
-    let mut out = String::new();
-    out.push('\n');
-    push_wrapped(
-        &mut out,
-        "",
-        &format!(
-            "Shared {} {} (correlation, not cause{}):",
-            id.key,
-            id.value,
-            if JOB_SPANNING_KEYS.contains(&id.key) {
-                "; can include queued jobs"
-            } else {
-                ""
-            }
-        ),
-    );
-    if id.conflict {
-        out.push_str("  context and extra disagree; using context\n");
-    }
-    let line = |index: usize| {
-        let entry = &snapshot.entries[index];
-        format!(
-            "  {}  {}  {:<8} {}{}\n",
-            entry.time.as_deref().unwrap_or("time unknown"),
-            escape_field(&snapshot.channels[entry.channel].name),
-            entry.level.name().to_ascii_uppercase(),
-            escape_field(&clip_utf8(
-                without_context(entry.message().lines().next().unwrap_or("")),
-                120
-            )),
-            if index == group.latest {
-                "  ← this entry"
-            } else {
-                ""
-            }
-        )
-    };
-    for index in related
-        .before
-        .iter()
-        .chain([&group.latest])
-        .chain(&related.after)
-    {
-        out.push_str(&line(*index));
-    }
-    if related.before.is_empty() && related.after.is_empty() {
-        out.push_str("  no other entry in this window has this ID\n");
-    }
-    if related.more > 0 {
-        // One unwrapped line, so it can be pasted as is.
-        let command = ["slip", "logs", &snapshot.env, "--raw", "--grep", &id.value]
-            .into_iter()
-            .chain(window_args.iter().map(String::as_str))
-            .map(shell_word)
-            .collect::<Vec<_>>()
-            .join(" ");
-        out.push_str(&format!(
-            "  +{} more; broader text search: {}\n",
-            related.more,
-            escape_field(&command)
-        ));
-    }
-    if related.partial {
-        out.push_str("  (some channels only partly read)\n");
-    }
-    out
 }
 
 fn matches_grep(entry: &Entry, grep: Option<&str>) -> bool {
@@ -2076,277 +1899,6 @@ pub fn escape_field(text: &str) -> String {
     escape(text).replace('\n', "\\x0a").replace('\t', "\\x09")
 }
 
-fn short_class(class: &str) -> &str {
-    class.rsplit('\\').next().unwrap_or(class)
-}
-
-fn count_label(group: &Group) -> String {
-    if group.partial {
-        format!("≥{}", group.count)
-    } else {
-        format!("×{}", group.count)
-    }
-}
-
-const OUTPUT_COLUMNS: usize = 96;
-
-/// Wrap presentation text; raw entries and stack traces keep their original lines.
-fn push_wrapped(out: &mut String, prefix: &str, text: &str) {
-    let mut line = prefix.to_string();
-    let mut columns = prefix.chars().count();
-    let mut has_word = false;
-    for word in text.split_whitespace() {
-        if has_word && columns + 1 + word.chars().count() > OUTPUT_COLUMNS {
-            out.push_str(&line);
-            out.push('\n');
-            line = "    ".into();
-            columns = 4;
-            has_word = false;
-        }
-        if has_word {
-            line.push(' ');
-            columns += 1;
-        }
-        for character in word.chars() {
-            if columns >= OUTPUT_COLUMNS {
-                out.push_str(&line);
-                out.push('\n');
-                line = "    ".into();
-                columns = 4;
-            }
-            line.push(character);
-            columns += 1;
-        }
-        has_word = true;
-    }
-    out.push_str(&line);
-    out.push('\n');
-}
-
-fn short_path<'a>(snapshot: &Snapshot, path: &'a str) -> &'a str {
-    // Log paths may be relative. Only use a root when an absolute storage path
-    // identifies it; an empty hint must never strip a leading slash.
-    if let Some(root) = snapshot
-        .channels
-        .iter()
-        .flat_map(|channel| &channel.files)
-        .filter(|file| file.starts_with('/'))
-        .find_map(|file| file.rsplit_once("/storage/logs/").map(|(root, _)| root))
-    {
-        return path
-            .strip_prefix(root)
-            .and_then(|path| path.strip_prefix('/'))
-            .unwrap_or(path);
-    }
-    // Laravel source directories still identify the root when log paths are relative.
-    ["/app/", "/database/", "/routes/", "/config/", "/resources/"]
-        .iter()
-        .filter_map(|dir| path.rfind(dir))
-        .max()
-        .map(|at| &path[at + 1..])
-        .unwrap_or(path)
-}
-
-fn status_label(snapshot: &Snapshot, badge: Badge) -> &'static str {
-    if !snapshot.baseline_enabled {
-        "-"
-    } else if badge == Badge::Seen {
-        "seen"
-    } else {
-        badge.label()
-    }
-}
-
-fn short_message<'a>(message: &'a str, class: &str) -> &'a str {
-    message
-        .strip_prefix(class)
-        .and_then(|message| message.strip_prefix(':'))
-        .map(str::trim_start)
-        .unwrap_or(message)
-}
-
-pub fn render_header(snapshot: &Snapshot) -> String {
-    let names: Vec<&str> = snapshot
-        .channels
-        .iter()
-        .map(|channel| channel.name.as_str())
-        .collect();
-    let mut out = String::new();
-    push_wrapped(
-        &mut out,
-        "",
-        &format!(
-            "{} · {} · times {}",
-            escape_field(&snapshot.env),
-            if names.is_empty() {
-                "no log channels".into()
-            } else {
-                escape_field(&names.join(", "))
-            },
-            escape_field(&snapshot.zone),
-        ),
-    );
-    push_wrapped(
-        &mut out,
-        "",
-        &format!(
-            "{} ({})",
-            escape_field(&snapshot.since_label),
-            escape_field(&snapshot.start)
-        ),
-    );
-    let partial: Vec<_> = snapshot
-        .channels
-        .iter()
-        .filter(|channel| !channel.complete)
-        .collect();
-    if let Some(channel) = partial.iter().max_by_key(|channel| {
-        (
-            channel.covered_from.is_none(),
-            channel.covered_from.as_deref(),
-        )
-    }) {
-        let others = if partial.len() > 1 {
-            format!("; {} other channels partial", partial.len() - 1)
-        } else {
-            "; others complete".into()
-        };
-        if let Some(from) = &channel.covered_from {
-            push_wrapped(&mut out, "", &format!("covered: since {from} only ({}: read limit reached; raise it with --max-bytes){others}", escape_field(&channel.name)));
-        } else {
-            push_wrapped(
-                &mut out,
-                "",
-                &format!(
-                    "covered: partly ({}; see --channels){others}",
-                    escape_field(&channel.name)
-                ),
-            );
-        }
-    }
-    if snapshot.baseline_enabled {
-        if let Some(baseline) = baseline_coverage(snapshot) {
-            push_wrapped(
-                &mut out,
-                "",
-                &format!(
-                    "baseline: {} before the window ({}; {})",
-                    escape_field(&baseline.span),
-                    escape_field(baseline.channel),
-                    baseline.read
-                ),
-            );
-            out.push_str("    NEW = not seen in that baseline\n");
-        } else {
-            out.push_str("baseline: unavailable; ? = no readable comparison\n");
-        }
-        let missing: Vec<_> = snapshot
-            .channels
-            .iter()
-            .filter(|channel| !channel.baseline.available)
-            .map(|channel| escape_field(&channel.name))
-            .collect();
-        if !missing.is_empty() {
-            push_wrapped(
-                &mut out,
-                "",
-                &format!("no baseline: {}", missing.join(", ")),
-            );
-        }
-    }
-    for channel in &snapshot.channels {
-        if channel.files.is_empty() {
-            push_wrapped(
-                &mut out,
-                "",
-                &format!(
-                    "{}: no log file found ({})",
-                    escape_field(&channel.name),
-                    escape_field(&channel.source)
-                ),
-            );
-        }
-        if let Some(format) = &channel.baseline.format {
-            if format.has_unknown_content() {
-                push_wrapped(
-                    &mut out,
-                    "",
-                    &format!(
-                        "{}: baseline {} — NEW unavailable for this channel",
-                        escape_field(&channel.name),
-                        format.label()
-                    ),
-                );
-            }
-        }
-        if matches!(channel.format, Format::Partial(_) | Format::Unrecognized) {
-            push_wrapped(
-                &mut out,
-                "",
-                &format!(
-                    "{}: {} — see --raw",
-                    escape_field(&channel.name),
-                    channel.format.label()
-                ),
-            );
-        }
-        for file in &channel.changed {
-            push_wrapped(
-                &mut out,
-                "",
-                &format!(
-                    "{}: {} changed during read and was skipped",
-                    escape_field(&channel.name),
-                    escape_field(file)
-                ),
-            );
-        }
-    }
-    for warning in &snapshot.warnings {
-        push_wrapped(&mut out, "", &format!("warning: {}", escape_field(warning)));
-    }
-    out
-}
-
-/// The baseline's time span and how it was read, from the channel that
-/// limits it. `None` when no channel has a readable baseline.
-struct BaselineCoverage<'a> {
-    span: String,
-    channel: &'a str,
-    read: &'static str,
-}
-
-fn baseline_coverage(snapshot: &Snapshot) -> Option<BaselineCoverage<'_>> {
-    let channel = snapshot
-        .channels
-        .iter()
-        .filter(|channel| channel.baseline.available)
-        .max_by_key(|channel| channel.baseline.covered_from.as_deref())?;
-    let from = channel
-        .baseline
-        .covered_from
-        .as_deref()
-        .unwrap_or("time unknown");
-    let to = channel
-        .baseline
-        .covered_to
-        .as_deref()
-        .unwrap_or("time unknown");
-    Some(BaselineCoverage {
-        span: if from == to {
-            from.to_string()
-        } else {
-            format!("{from} to {to}")
-        },
-        channel: &channel.name,
-        read: if channel.baseline.complete {
-            "full read"
-        } else {
-            "partial read"
-        },
-    })
-}
-
 /// Some of this channel's window was not read, or was read but not understood.
 fn channel_incomplete(channel: &Channel) -> bool {
     !channel.complete || channel.files.is_empty() || channel.format.has_unknown_content()
@@ -2371,567 +1923,6 @@ pub fn level_counts(snapshot: &Snapshot) -> Vec<(Level, u64)> {
         .filter(|level| counts[**level as usize] > 0)
         .map(|level| (*level, counts[*level as usize]))
         .collect()
-}
-
-fn counts_line(snapshot: &Snapshot) -> Option<String> {
-    let counts = level_counts(snapshot);
-    if counts.is_empty() {
-        return None;
-    }
-    let list = counts
-        .iter()
-        .map(|(level, count)| format!("{count} {}", level.name()))
-        .collect::<Vec<_>>()
-        .join(" · ");
-    Some(if coverage_incomplete(snapshot) {
-        format!("in this window: at least {list} (some channels partly read)")
-    } else {
-        format!("in this window: {list}")
-    })
-}
-
-pub fn render_summary(
-    snapshot: &Snapshot,
-    groups: &Groups,
-    min_level: Level,
-    grep: Option<&str>,
-    all: bool,
-) -> String {
-    let mut out = render_header(snapshot);
-    if let Some(line) = counts_line(snapshot) {
-        push_wrapped(&mut out, "", &line);
-    }
-    out.push('\n');
-    if groups.groups.is_empty() {
-        if coverage_incomplete(snapshot) {
-            out.push_str("No matching entries in the portion read; log coverage is incomplete.\n");
-        } else if grep.is_some() {
-            out.push_str(&format!(
-                "No entries match --grep at {} level or above.\n",
-                min_level.name()
-            ));
-        } else {
-            out.push_str(&format!(
-                "No entries at {} level or above in the selected channels in this window.\n",
-                min_level.name()
-            ));
-        }
-        return out;
-    }
-    let shown = if all {
-        groups.groups.len()
-    } else {
-        groups.groups.len().min(DEFAULT_ROWS)
-    };
-    let id_width = groups
-        .groups
-        .iter()
-        .take(shown)
-        .map(|group| group.id.len())
-        .max()
-        .unwrap_or(ID_LEN);
-    let count_width = groups
-        .groups
-        .iter()
-        .take(shown)
-        .map(|group| count_label(group).chars().count())
-        .max()
-        .unwrap_or(0)
-        .max(5);
-    out.push_str(&format!(
-        "{:>3}  {:<id_width$}  {:>count_width$}  {:<6}  EXCEPTION\n",
-        "ROW", "ID", "COUNT", "STATUS"
-    ));
-    for (row, group) in groups.groups.iter().take(shown).enumerate() {
-        let prefix = format!(
-            "{:>3}  {:<id_width$}  {:>count_width$}  {:<6}  ",
-            row + 1,
-            group.id,
-            count_label(group),
-            status_label(snapshot, group.badge),
-        );
-        push_wrapped(&mut out, &prefix, &escape_field(short_class(&group.class)));
-        let channels = group
-            .channels
-            .iter()
-            .map(|index| escape_field(&snapshot.channels[*index].name))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let source = match &group.file {
-            Some(file) => format!(
-                "{} · channels: {channels}",
-                escape_field(short_path(snapshot, file))
-            ),
-            None => format!("channels: {channels}"),
-        };
-        push_wrapped(&mut out, "    ", &source);
-        let message = short_message(&group.message, &group.class);
-        push_wrapped(&mut out, "    ", &escape_field(&clip_utf8(message, 120)));
-    }
-    if shown < groups.groups.len() {
-        out.push_str(&format!(
-            "+{} more groups (--all)\n",
-            groups.groups.len() - shown
-        ));
-    }
-    if groups.overflow > 0 {
-        out.push_str(&format!("+{} groups not tracked\n", groups.overflow));
-    }
-    out.push_str(&format!(
-        "\nDetails: slip logs {} <ID or row>\n",
-        escape_field(&snapshot.env)
-    ));
-    out
-}
-
-/// One group in detail. Unless `full`, runs of vendor stack frames are folded.
-pub fn render_detail(snapshot: &Snapshot, group: &Group, full: bool) -> String {
-    let latest = &snapshot.entries[group.latest];
-    let channels: Vec<&str> = group
-        .channels
-        .iter()
-        .map(|channel| snapshot.channels[*channel].name.as_str())
-        .collect();
-    let mut out = String::new();
-    push_wrapped(
-        &mut out,
-        &format!("{}  {}  ", group.id, status_label(snapshot, group.badge)),
-        &escape_field(&group.class),
-    );
-    push_wrapped(
-        &mut out,
-        "File:       ",
-        &escape_field(group.file.as_deref().unwrap_or("-")),
-    );
-    push_wrapped(&mut out, "Count:      ", &count_label(group));
-    push_wrapped(
-        &mut out,
-        "First seen: ",
-        if group.partial {
-            "—"
-        } else {
-            group.first_seen.as_deref().unwrap_or("-")
-        },
-    );
-    push_wrapped(
-        &mut out,
-        "Last seen:  ",
-        group.last_seen.as_deref().unwrap_or("-"),
-    );
-    push_wrapped(
-        &mut out,
-        "Channels:   ",
-        &escape_field(&channels.join(", ")),
-    );
-    if snapshot.baseline_enabled || group.variants.len() > 1 || group.overflow_variants > 0 {
-        out.push_str("\nVariants:\n");
-        for variant in &group.variants {
-            let prefix = format!(
-                "  {:>5}  {:<4}  ",
-                variant_count(group, variant),
-                if variant.badge == Badge::Seen {
-                    "seen"
-                } else {
-                    variant.badge.label()
-                },
-            );
-            push_wrapped(
-                &mut out,
-                &prefix,
-                &format!(
-                    "{}{}",
-                    escape_field(&clip_utf8(
-                        short_message(&variant.message, &group.class),
-                        160
-                    )),
-                    variant
-                        .file_line
-                        .as_deref()
-                        .map(|at| format!(" (at {})", escape_field(short_path(snapshot, at))))
-                        .unwrap_or_default()
-                ),
-            );
-        }
-        if group.overflow_variants > 0 {
-            out.push_str(&format!("  +{} more\n", group.overflow_variants));
-        }
-    }
-    out.push('\n');
-    push_wrapped(
-        &mut out,
-        "",
-        &format!(
-            "Latest entry ({}, {}):",
-            latest.time.as_deref().unwrap_or("time unknown"),
-            escape_field(&latest.file),
-        ),
-    );
-    out.push_str(&escape(&entry_text(latest, full)));
-    out.push('\n');
-    if latest.truncated {
-        out.push_str("Entry truncated at 256 KiB.\n");
-    }
-    out
-}
-
-fn entry_text(entry: &Entry, full: bool) -> String {
-    if full {
-        entry.text.clone()
-    } else {
-        fold_frames(&entry.text)
-    }
-}
-
-fn variant_count(group: &Group, variant: &Variant) -> String {
-    if group.partial {
-        format!("≥{}", variant.count)
-    } else {
-        format!("×{}", variant.count)
-    }
-}
-
-/// What selected the entries a detail view was built from.
-pub struct DetailFilter<'a> {
-    pub level: Level,
-    pub grep: Option<&'a str>,
-}
-
-/// One group as Markdown to paste into an issue. Every value from the
-/// server is escaped or fenced so none of it renders as Markdown or HTML.
-pub fn render_detail_md(
-    snapshot: &Snapshot,
-    group: &Group,
-    filter: &DetailFilter,
-    full: bool,
-) -> String {
-    let latest = &snapshot.entries[group.latest];
-    let channels: Vec<&str> = group
-        .channels
-        .iter()
-        .map(|channel| snapshot.channels[*channel].name.as_str())
-        .collect();
-    let mut out = format!(
-        "## {} {}\n\n",
-        code(&group.id),
-        inline(short_class(&group.class))
-    );
-    let mut item = |label: &str, value: String| out.push_str(&format!("- {label}: {value}\n"));
-    item("Environment", inline(&snapshot.env));
-    item("Log times", inline(&snapshot.zone));
-    item(
-        "Window",
-        format!(
-            "{} ({} to {})",
-            inline(&snapshot.since_label),
-            inline(&snapshot.start),
-            inline(snapshot.read_at.as_deref().unwrap_or("time unknown"))
-        ),
-    );
-    item(
-        "Coverage",
-        if coverage_incomplete(snapshot) {
-            "incomplete; counts are lower bounds".into()
-        } else {
-            "complete".into()
-        },
-    );
-    item(
-        "Baseline",
-        if !snapshot.baseline_enabled {
-            "off".into()
-        } else {
-            match baseline_coverage(snapshot) {
-                Some(baseline) => format!(
-                    "{} before the window ({}; {})",
-                    inline(&baseline.span),
-                    inline(baseline.channel),
-                    baseline.read
-                ),
-                None => "unavailable".into(),
-            }
-        },
-    );
-    item(
-        "Filters",
-        match filter.grep {
-            Some(grep) => format!("{} or above; --grep {}", filter.level.name(), code(grep)),
-            None => format!("{} or above", filter.level.name()),
-        },
-    );
-    item("slip", env!("CARGO_PKG_VERSION").into());
-    out.push('\n');
-    let mut item = |label: &str, value: String| out.push_str(&format!("- {label}: {value}\n"));
-    item("Exception", inline(&group.class));
-    item("Status", status_label(snapshot, group.badge).into());
-    item(
-        "File",
-        group
-            .file
-            .as_deref()
-            .map(code)
-            .unwrap_or_else(|| "-".into()),
-    );
-    item("Count", count_label(group));
-    item(
-        "First seen",
-        if group.partial {
-            "—".into()
-        } else {
-            inline(group.first_seen.as_deref().unwrap_or("-"))
-        },
-    );
-    item(
-        "Last seen",
-        inline(group.last_seen.as_deref().unwrap_or("-")),
-    );
-    item("Channels", inline(&channels.join(", ")));
-    if snapshot.baseline_enabled || group.variants.len() > 1 || group.overflow_variants > 0 {
-        out.push_str("\nVariants:\n\n");
-        for variant in &group.variants {
-            out.push_str(&format!(
-                "- {} {} {}{}\n",
-                variant_count(group, variant),
-                if variant.badge == Badge::Seen {
-                    "seen"
-                } else {
-                    variant.badge.label()
-                },
-                inline(&clip_utf8(
-                    short_message(&variant.message, &group.class),
-                    160
-                )),
-                variant
-                    .file_line
-                    .as_deref()
-                    .map(|at| format!(" (at {})", code(short_path(snapshot, at))))
-                    .unwrap_or_default()
-            ));
-        }
-        if group.overflow_variants > 0 {
-            out.push_str(&format!("- +{} more\n", group.overflow_variants));
-        }
-    }
-    out.push_str(&format!(
-        "\nLatest entry ({}, {}):\n\n{}\n",
-        inline(latest.time.as_deref().unwrap_or("time unknown")),
-        code(&latest.file),
-        fence(&entry_text(latest, full))
-    ));
-    if latest.truncated {
-        out.push_str("\nEntry truncated at 256 KiB.\n");
-    }
-    out
-}
-
-/// What to say when a lookup finds no group.
-pub fn render_miss(snapshot: &Snapshot, query: &str) -> String {
-    if snapshot.channels.is_empty() {
-        return format!("group {} not found in what was read; no visible log channels — inspect channel configuration\n", escape(query));
-    }
-    if snapshot
-        .channels
-        .iter()
-        .any(|channel| channel.format.has_unknown_content())
-    {
-        return format!("group {} not found in what was read; some log formats are not fully recognized — inspect --raw or --channels\n", escape(query));
-    }
-    let partial = snapshot.channels.iter().find(|channel| {
-        !channel.complete || channel.files.is_empty() || channel.format.has_unknown_content()
-    });
-    match partial.and_then(|channel| channel.covered_from.as_deref()) {
-        Some(from) => format!(
-            "group {} not found in what was read (entries since {from} of a window from {}); \
-             try --max-bytes N or a later --since\n",
-            escape(query),
-            snapshot.start
-        ),
-        None if partial.is_some() => format!(
-            "group {} not found in what was read; try --max-bytes N\n",
-            escape(query)
-        ),
-        None => format!(
-            "group {} not seen {} ({}); try --since 7d\n",
-            escape(query),
-            snapshot.since_label,
-            snapshot.start
-        ),
-    }
-}
-
-pub fn render_ambiguous(matches: &[&Group]) -> String {
-    let mut out = String::from("That prefix matches several groups; use more letters:\n");
-    for group in matches {
-        out.push_str(&format!(
-            "  {}  {}  {}  {}\n",
-            group.full_id,
-            count_label(group),
-            escape(short_class(&group.class)),
-            escape(group.file.as_deref().unwrap_or("-"))
-        ));
-    }
-    out
-}
-
-/// Entries at `min_level` or above, oldest first.
-pub fn render_raw(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> String {
-    let grep = grep.map(str::to_lowercase);
-    let mut out = render_header(snapshot);
-    if snapshot.clock_changed {
-        out.push_str("clock changed in this window; order across files approximate\n");
-    }
-    let mut entries: Vec<&Entry> = snapshot.entries.iter().collect();
-    entries.sort_by(|a, b| {
-        a.time
-            .cmp(&b.time)
-            .then_with(|| a.file.cmp(&b.file))
-            .then(a.offset.cmp(&b.offset))
-    });
-    for entry in entries {
-        if entry.level >= min_level && matches_grep(entry, grep.as_deref()) {
-            out.push_str(&escape(&entry.text));
-            out.push('\n');
-        }
-    }
-    for block in &snapshot.raw_blocks {
-        out.push_str(&format!("== {} / {} (not fully parsed: shown as-is, newest last, no --level/--since filtering) ==\n", escape_field(&snapshot.channels[block.channel].name), escape_field(&block.file)));
-        for line in block.text.lines() {
-            if grep
-                .as_deref()
-                .is_none_or(|grep| line.to_lowercase().contains(grep))
-            {
-                out.push_str(&escape(line));
-                out.push('\n');
-            }
-        }
-    }
-    out
-}
-
-/// The discovery/coverage view uses the same bounded snapshot as the summary.
-pub fn render_channels(snapshot: &Snapshot) -> String {
-    let mut out = render_header(snapshot);
-    let labels: Vec<_> = snapshot
-        .channels
-        .iter()
-        .map(|channel| {
-            if channel.key == channel.name {
-                escape_field(&channel.name)
-            } else {
-                format!(
-                    "{} ({})",
-                    escape_field(&channel.name),
-                    escape_field(&channel.key)
-                )
-            }
-        })
-        .collect();
-    let label_width = labels
-        .iter()
-        .map(|label| label.chars().count())
-        .max()
-        .unwrap_or(0)
-        .clamp(7, 26);
-    let kind_width = snapshot
-        .channels
-        .iter()
-        .map(|channel| channel.kind.label().len())
-        .max()
-        .unwrap_or(0)
-        .max(4);
-    let size_width = snapshot
-        .channels
-        .iter()
-        .map(|channel| format!("{} B", channel.size).len())
-        .max()
-        .unwrap_or(0)
-        .max(4);
-    out.push_str(&format!(
-        "\n{:<label_width$}  {:<kind_width$}  {:>5}  {:>size_width$}\n",
-        "CHANNEL", "KIND", "FILES", "SIZE"
-    ));
-    for (channel, label) in snapshot.channels.iter().zip(labels) {
-        let coverage = if channel.files.is_empty() {
-            "no file".into()
-        } else if channel.complete {
-            "full".into()
-        } else if !channel.changed.is_empty() {
-            "changed during read".into()
-        } else {
-            format!(
-                "partial: {} / {} bytes{}",
-                channel.bytes_read,
-                channel.size,
-                channel
-                    .covered_from
-                    .as_ref()
-                    .map(|from| format!(", since {from}"))
-                    .unwrap_or_default()
-            )
-        };
-        let baseline = if !channel.baseline.available {
-            channel
-                .baseline
-                .format
-                .as_ref()
-                .filter(|format| format.has_unknown_content())
-                .map(|format| format!("none ({})", format.label()))
-                .unwrap_or_else(|| "none".into())
-        } else {
-            format!(
-                "{} bytes, since {} ({})",
-                channel.baseline.bytes_read,
-                channel
-                    .baseline
-                    .covered_from
-                    .as_deref()
-                    .unwrap_or("time unknown"),
-                if channel.baseline.complete {
-                    "full read"
-                } else {
-                    "partial read"
-                }
-            )
-        };
-        let short_label = if label.chars().count() > label_width {
-            format!(
-                "{}…",
-                label.chars().take(label_width - 1).collect::<String>()
-            )
-        } else {
-            label.clone()
-        };
-        out.push_str(&format!(
-            "{:<label_width$}  {:<kind_width$}  {:>5}  {:>size_width$}\n",
-            short_label,
-            channel.kind.label(),
-            channel.files.len(),
-            format!("{} B", channel.size)
-        ));
-        if short_label != label {
-            push_wrapped(&mut out, "    NAME: ", &label);
-        }
-        if channel.omitted_files > 0 {
-            push_wrapped(
-                &mut out,
-                "    FILES: ",
-                &format!(
-                    "{} selected (+{} omitted)",
-                    channel.files.len(),
-                    channel.omitted_files
-                ),
-            );
-        }
-        push_wrapped(
-            &mut out,
-            "    LAST WRITE: ",
-            channel.last_write.as_deref().unwrap_or("-"),
-        );
-        push_wrapped(&mut out, "    FORMAT: ", &channel.format.label());
-        push_wrapped(&mut out, "    COVERAGE: ", &coverage);
-        push_wrapped(&mut out, "    BASELINE: ", &baseline);
-        out.push('\n');
-    }
-    out
 }
 
 #[cfg(test)]
@@ -2975,22 +1966,6 @@ mod tests {
             .unwrap();
         assert_eq!(known.badge, Badge::Seen);
         assert_eq!(known.variants[0].badge, Badge::New);
-        assert!(render_header(&snapshot).contains("no baseline: queue"));
-        let summary = render_summary(&snapshot, &groups, Level::Error, None, false);
-        let rows: Vec<_> = summary
-            .lines()
-            .filter(|line| {
-                line.split_whitespace()
-                    .next()
-                    .is_some_and(|word| word.parse::<usize>().is_ok())
-            })
-            .collect();
-        assert_eq!(
-            rows.iter()
-                .map(|row| row.split_whitespace().nth(3).unwrap())
-                .collect::<Vec<_>>(),
-            ["NEW", "?", "seen"]
-        );
     }
 
     #[test]
@@ -3017,11 +1992,6 @@ mod tests {
         assert_eq!(group.first_seen.as_deref(), Some("2026-10-01 12:00:00"));
         assert_eq!(group.last_seen.as_deref(), Some("2026-10-02 12:00:00"));
         assert!(group.partial);
-        assert!(render_detail(&snapshot, group, true).contains("newer"));
-        assert!(
-            render_summary(&snapshot, &groups, Level::Error, None, false)
-                .contains("laravel, payments")
-        );
     }
 
     #[test]
@@ -3066,21 +2036,6 @@ mod tests {
             text: "ordinary stdout\nPayment failed\x1b]0;secret\x07\n".into(),
         });
         assert_eq!(group(&snapshot, Level::Error, None).groups.len(), 1);
-        let raw = render_raw(&snapshot, Level::Emergency, Some("PAYMENT"));
-        assert!(raw.contains("no --level/--since filtering"));
-        assert!(raw.contains("Payment failed\\x1b]0;secret\\x07"));
-        assert!(!raw.contains("ordinary stdout"));
-        assert!(!raw.contains('\x1b'));
-        assert!(render_header(&snapshot).contains("partly recognized (10% of lines) — see --raw"));
-    }
-
-    #[test]
-    fn channels_view_has_a_stable_table_and_names_original_channel_after_rename() {
-        let mut snapshot = snapshot_of("", true);
-        snapshot.channels[0].name = "app".into();
-        snapshot.channels[0].format = Format::Empty;
-        let expected = "production · app · times UTC\nsince 24h (2026-10-01 00:00:00)\n\nCHANNEL        KIND    FILES  SIZE\napp (laravel)  single      1   0 B\n    LAST WRITE: 2026-10-01 10:00:00\n    FORMAT: no lines in this window\n    COVERAGE: full\n    BASELINE: none\n\n";
-        assert_eq!(render_channels(&snapshot), expected);
     }
 
     #[test]
@@ -3096,48 +2051,7 @@ mod tests {
         );
         snapshot.channels[0].files = vec!["storage/logs/laravel.log".into()];
         let groups = group(&snapshot, Level::Error, None);
-        let summary = render_summary(&snapshot, &groups, Level::Error, None, false);
-        assert!(summary.contains("app/Services/Payment.php · channels: laravel"));
         assert_eq!(groups.groups[0].file.as_deref(), Some(path));
-        assert!(render_detail(&snapshot, &groups.groups[0], true).contains(path));
-        assert_eq!(
-            short_path(&snapshot, "/opt/external/src/Failure.php"),
-            "/opt/external/src/Failure.php"
-        );
-        assert_eq!(
-            short_path(&snapshot, "/var/www/laravel/database/migrations/x.php"),
-            "database/migrations/x.php"
-        );
-        snapshot.channels[0].files = vec!["/srv/app/storage/logs/laravel.log".into()];
-        assert_eq!(
-            short_path(&snapshot, "/srv/app/routes/web.php"),
-            "routes/web.php"
-        );
-        assert_eq!(
-            short_path(&snapshot, "/srv/app-copy/app/Failure.php"),
-            "/srv/app-copy/app/Failure.php"
-        );
-    }
-
-    #[test]
-    fn presentation_wraps_safely_and_raw_entries_retain_original_lines() {
-        let message = format!("RuntimeException: {}\x1b[2J", "é".repeat(200));
-        let mut snapshot = snapshot_of(&entry_line("2026-10-01 01:00:00", "ERROR", &message), true);
-        snapshot.channels[0].name = format!("{}\n\t", "channel-".repeat(20));
-        snapshot.warnings.push("warning-word ".repeat(30));
-        let groups = group(&snapshot, Level::Error, None);
-        for output in [
-            render_summary(&snapshot, &groups, Level::Error, None, false),
-            render_channels(&snapshot),
-        ] {
-            assert!(output
-                .lines()
-                .all(|line| line.chars().count() <= OUTPUT_COLUMNS));
-            assert!(!output.contains('\x1b'));
-            assert!(output.contains("\\x0a\\x09"));
-        }
-        let raw = render_raw(&snapshot, Level::Error, None);
-        assert!(raw.contains(&escape(&snapshot.entries[0].text)));
     }
 
     fn file(path: &str, size: u64) -> ProbeFile {
@@ -3162,7 +2076,6 @@ mod tests {
         Snapshot {
             env: "production".into(),
             zone: "UTC".into(),
-            since_label: "since 24h".into(),
             anchor: Anchor::Default {
                 seconds: DEFAULT_WINDOW,
             },
@@ -3222,18 +2135,6 @@ mod tests {
         assert_eq!(g.count, 2);
         assert_eq!(g.badge, Badge::Seen);
         assert_eq!(g.id, &group_id(class, Some(file))[..ID_LEN]);
-        assert!(render_detail(&snapshot, g, true)
-            .lines()
-            .next()
-            .unwrap()
-            .contains(class));
-        assert!(!render_detail(&snapshot, g, true)
-            .lines()
-            .next()
-            .unwrap()
-            .contains(r"Illuminate\\Database"));
-        assert!(render_detail(&snapshot, g, true).contains(encoded.trim_end()));
-        assert!(render_raw(&snapshot, Level::Error, None).contains(encoded.trim_end()));
     }
 
     #[test]
@@ -3299,26 +2200,6 @@ mod tests {
         assert_eq!(Level::parse("WARNING"), Some(Level::Warning));
         assert_eq!(Level::parse("Error"), Some(Level::Error));
         assert_eq!(Level::parse("fatal"), None);
-        let text = [
-            entry_line("2026-10-01 01:00:00", "DEBUG", "a"),
-            entry_line("2026-10-01 01:00:01", "INFO", "b"),
-            entry_line("2026-10-01 01:00:02", "NOTICE", "c"),
-            entry_line("2026-10-01 01:00:03", "WARNING", "d"),
-            entry_line("2026-10-01 01:00:04", "ERROR", "e"),
-            entry_line("2026-10-01 01:00:05", "CRITICAL", "f"),
-            entry_line("2026-10-01 01:00:06", "ALERT", "g"),
-            entry_line("2026-10-01 01:00:07", "EMERGENCY", "h"),
-        ]
-        .concat();
-        let snapshot = snapshot_of(&text, true);
-        for (level, kept) in Level::ALL.iter().zip((1..=8).rev()) {
-            let raw = render_raw(&snapshot, *level, None);
-            assert_eq!(
-                raw.lines().filter(|l| l.starts_with('[')).count(),
-                kept,
-                "{level:?}"
-            );
-        }
     }
 
     #[test]
@@ -3540,35 +2421,6 @@ mod tests {
     }
 
     #[test]
-    fn summary_shows_twenty_rows_then_points_to_all() {
-        let text: String = (0..30)
-            .map(|i| entry_line("2026-10-01 01:00:00", "ERROR", &format!("E{i}Exception: x")))
-            .collect();
-        let snapshot = snapshot_of(&text, true);
-        let groups = group(&snapshot, Level::Error, None);
-        let summary = render_summary(&snapshot, &groups, Level::Error, None, false);
-        assert!(summary.contains(" 20  "));
-        assert!(!summary.contains(" 21  "));
-        assert!(summary.contains("+10 more groups (--all)"));
-        let all = render_summary(&snapshot, &groups, Level::Error, None, true);
-        assert!(all.contains(" 30  "));
-        assert!(!all.contains("more groups"));
-    }
-
-    #[test]
-    fn partly_read_channels_mark_counts_as_lower_bounds() {
-        let text = entry_line("2026-10-01 10:00:00", "ERROR", "RuntimeException: x");
-        let snapshot = snapshot_of(&text, false);
-        let groups = group(&snapshot, Level::Error, None);
-        let summary = render_summary(&snapshot, &groups, Level::Error, None, false);
-        assert!(summary.contains("≥1"), "{summary}");
-        assert!(summary.contains("covered: since 2026-10-01 09:00:00 only"));
-        assert!(render_miss(&snapshot, "zz").contains("not found in what was read"));
-        let complete = snapshot_of(&text, true);
-        assert!(render_miss(&complete, "zz").contains("not seen since 24h"));
-    }
-
-    #[test]
     fn control_characters_are_escaped() {
         assert_eq!(
             escape("a\x1b[31mred\x1b]0;title\x07\u{9b}\tb\nc\x7f"),
@@ -3579,36 +2431,6 @@ mod tests {
             "evil\\u{202e}php.txt \\u{2066}x\\u{2069} \\u{200f}\\u{61c}"
         );
         assert_eq!(escape_field("a\u{202a}b\n"), "a\\u{202a}b\\x0a");
-        let text = entry_line(
-            "2026-10-01 01:00:00",
-            "ERROR",
-            "RuntimeException: \x1b[2Jboom",
-        );
-        let mut snapshot = snapshot_of(&text, true);
-        snapshot.channels[0].name = "channel\x1b]0;title\x07".into();
-        let groups = group(&snapshot, Level::Error, None);
-        for out in [
-            render_summary(&snapshot, &groups, Level::Error, None, false),
-            render_detail(&snapshot, &groups.groups[0], true),
-            render_detail(&snapshot, &groups.groups[0], false),
-            render_related(
-                &snapshot,
-                &groups.groups[0],
-                &["--since".into(), "\x1b[2J".into()],
-            ),
-            render_detail_md(
-                &snapshot,
-                &groups.groups[0],
-                &DetailFilter {
-                    level: Level::Error,
-                    grep: Some("\x1b[2J"),
-                },
-                false,
-            ),
-            render_raw(&snapshot, Level::Debug, None),
-        ] {
-            assert!(!out.contains('\x1b'), "{out:?}");
-        }
     }
 
     #[test]
@@ -3647,9 +2469,6 @@ mod tests {
             })
             .sum();
         assert!(retained <= MAX_GROUPS * (MAX_VARIANTS + 1) * MESSAGE_BYTES);
-        assert!(render_detail(&snapshot, &groups.groups[0], true).contains("#0 full trace"));
-        assert!(render_summary(&snapshot, &groups, Level::Error, None, true)
-            .contains("+50 groups not tracked"));
     }
 
     #[test]
@@ -3661,9 +2480,7 @@ mod tests {
         );
         let snapshot = snapshot_of(&first, true);
         assert!(snapshot.entries[0].text.len() <= ENTRY_BYTES);
-        let groups = group(&snapshot, Level::Error, None);
-        assert!(render_detail(&snapshot, &groups.groups[0], true)
-            .contains("Entry truncated at 256 KiB"));
+        assert!(snapshot.entries[0].truncated);
 
         let mut bytes = b"invalid \xff\n".to_vec();
         let start = bytes.len() as u64;
@@ -3780,32 +2597,8 @@ mod tests {
         assert!(probe.contains(r#"for f in "$prefix"-*.log"#));
     }
 
-    /// A Laravel-shaped error entry: the origin and two app frames between
-    /// runs of framework frames, a short vendor run, and a chained exception.
-    /// Written by hand from Laravel's LineFormatter layout; no real log data.
-    const TRACE: &str = "Class not found {\"exception\":\"[object] (Error(code: 0): Class not found at /srv/acme-vendor/app/Http/Controllers/InvoiceController.php:16)\n\
-[stacktrace]\n\
-#0 /srv/acme-vendor/vendor/laravel/framework/src/Illuminate/Routing/Controller.php(54): handle()\n\
-#1 /srv/acme-vendor/vendor/laravel/framework/src/Illuminate/Routing/ControllerDispatcher.php(43): callAction()\n\
-#2 /srv/acme-vendor/vendor/laravel/framework/src/Illuminate/Routing/Route.php(260): dispatch()\n\
-#3 /srv/acme-vendor/vendor/laravel/framework/src/Illuminate/Routing/Route.php(205): runController()\n\
-#4 /srv/acme-vendor/app/Http/Middleware/Tenant.php(31): run()\n\
-#5 /srv/acme-vendor/vendor/laravel/framework/src/Illuminate/Pipeline/Pipeline.php(183): handle()\n\
-#6 /srv/acme-vendor/vendor/laravel/framework/src/Illuminate/Pipeline/Pipeline.php(119): Illuminate\\\\Pipeline\\\\{closure}()\n\
-#7 [internal function]: Illuminate\\\\Foundation\\\\Http\\\\Kernel->handle()\n\
-#8 /srv/acme-vendor/public/index.php(52): handle()\n\
-#9 {main}\n\
-[previous exception] [object] (LogicException(code: 0): earlier at /srv/acme-vendor/app/Models/Invoice.php:9)\n\
-[stacktrace]\n\
-#0 /srv/acme-vendor/vendor/a/b/One.php(1): x()\n\
-#1 /srv/acme-vendor/vendor/a/b/Two.php(2): x()\n\
-#2 /srv/acme-vendor/vendor/a/b/Three.php(3): x()\n\
-#3 /srv/acme-vendor/vendor/a/b/Four.php(4): x()\n\
-#4 {main}\n\
-\"}";
-
     #[test]
-    fn folding_keeps_the_origin_app_frames_and_short_runs() {
+    fn frames_are_numbered_lines_and_vendor_needs_a_whole_path_segment() {
         assert_eq!(
             frame_rest("#12 /x.php(1): f()"),
             Some((12, "/x.php(1): f()"))
@@ -3819,38 +2612,6 @@ mod tests {
         assert!(!vendor_frame("#1 /srv/vendors/app/Y.php(3): f()"));
         assert!(!vendor_frame("#1 [internal function]: f()"));
         assert!(!vendor_frame("/srv/app/vendor/x/Y.php(3): f()"));
-
-        let folded = fold_frames(TRACE);
-        // The origin stays even though it is a framework frame.
-        assert!(folded.contains("#0 /srv/acme-vendor/vendor/laravel/framework/src/Illuminate/Routing/Controller.php(54)"));
-        // #1–#3 fold; the app frame after them stays.
-        assert!(folded.contains("… 3 vendor frames (--full to show)\n#4 /srv/acme-vendor/app/Http/Middleware/Tenant.php(31)"));
-        assert!(!folded.contains("ControllerDispatcher.php"));
-        // A run of two stays, and so do frames whose path can't be read.
-        assert!(folded.contains("Pipeline.php(183)") && folded.contains("Pipeline.php(119)"));
-        assert!(folded.contains("#7 [internal function]") && folded.contains("#9 {main}"));
-        // The chained exception starts again at #0 and folds its own run.
-        assert!(folded.contains("[previous exception]"));
-        assert!(folded.contains("#0 /srv/acme-vendor/vendor/a/b/One.php(1): x()\n… 3 vendor frames (--full to show)\n#4 {main}"));
-        assert!(folded.ends_with("\"}"));
-        assert_eq!(fold_frames("no frames here\n"), "no frames here\n");
-
-        let entry = entry_line("2026-10-01 01:00:00", "ERROR", TRACE);
-        let snapshot = snapshot_of(&entry, true);
-        let groups = group(&snapshot, Level::Error, None);
-        let detail = render_detail(&snapshot, &groups.groups[0], false);
-        assert!(detail.contains("… 3 vendor frames (--full to show)"));
-        let full = render_detail(&snapshot, &groups.groups[0], true);
-        assert!(full.contains("ControllerDispatcher.php") && !full.contains("vendor frames ("));
-    }
-
-    #[test]
-    fn folded_detail_keeps_the_truncation_note_last() {
-        let mut snapshot = snapshot_of(&entry_line("2026-10-01 01:00:00", "ERROR", TRACE), true);
-        snapshot.entries[0].truncated = true;
-        let groups = group(&snapshot, Level::Error, None);
-        assert!(render_detail(&snapshot, &groups.groups[0], false)
-            .ends_with("\"}\nEntry truncated at 256 KiB.\n"));
     }
 
     #[test]
@@ -3873,48 +2634,15 @@ mod tests {
                 (Level::Info, 1)
             ]
         );
-        // Filters change the groups, never the window totals.
-        let groups = group(&snapshot, Level::Critical, Some("nothing"));
-        let summary = render_summary(&snapshot, &groups, Level::Critical, Some("nothing"), false);
-        assert!(summary.contains("in this window: 1 critical · 2 error · 1 warning · 1 info\n"));
-        assert!(summary.contains("No entries match --grep at critical level or above.\n"));
-        let unfiltered = group(&snapshot, Level::Emergency, None);
-        assert!(
-            render_summary(&snapshot, &unfiltered, Level::Emergency, None, false)
-                .contains("No entries at emergency level or above")
-        );
-
         // Partly read: every count is a minimum, and the empty state says so.
         let partial = snapshot_of(&text, false);
         assert!(!coverage_incomplete(&snapshot) && coverage_incomplete(&partial));
-        let summary = render_summary(
-            &partial,
-            &group(&partial, Level::Error, None),
-            Level::Error,
-            None,
-            false,
-        );
-        assert!(summary.contains("in this window: at least 1 critical · 2 error · 1 warning · 1 info (some channels partly read)"));
-
         // Fully read but partly understood counts the same way.
         let mut unknown = snapshot_of(&text, true);
         unknown.channels[0].format = Format::Partial(80);
         assert!(coverage_incomplete(&unknown));
-        let groups = group(&unknown, Level::Error, Some("nothing"));
-        let summary = render_summary(&unknown, &groups, Level::Error, Some("nothing"), false);
-        assert!(summary.contains("in this window: at least"));
-        assert!(summary.contains("log coverage is incomplete"));
-
         let empty = snapshot_of("", true);
         assert!(level_counts(&empty).is_empty());
-        assert!(!render_summary(
-            &empty,
-            &group(&empty, Level::Error, None),
-            Level::Error,
-            None,
-            false
-        )
-        .contains("in this window:"));
     }
 
     #[test]
@@ -3927,71 +2655,12 @@ mod tests {
         let mut snapshot = snapshot_of(&text, true);
         let groups = group(&snapshot, Level::Error, None);
         assert!(!groups.groups[0].partial);
-        assert!(render_detail(&snapshot, &groups.groups[0], false).contains("×2"));
 
         snapshot.channels[0].format = Format::Unrecognized;
         let groups = group(&snapshot, Level::Error, None);
         let group = &groups.groups[0];
         assert!(group.partial);
-        let detail = render_detail(&snapshot, group, false);
-        assert!(detail.contains("Count:      ≥2"));
-        assert!(detail.contains("First seen: —"));
-        assert!(!detail.contains("×2"), "{detail}");
-    }
-
-    #[test]
-    fn markdown_detail_is_inert_and_says_where_it_came_from() {
-        let hostile = "RuntimeException: <img src=x onerror=alert(1)> [click](https://evil.example) ``` # heading **bold** | cell";
-        let text = entry_line(
-            "2026-10-01 01:00:00",
-            "ERROR",
-            &format!("{hostile}\n{}", TRACE.split_once('\n').unwrap().1),
-        );
-        let mut snapshot = snapshot_of(&text, true);
-        snapshot.env = "prod<b>".into();
-        let groups = group(&snapshot, Level::Error, None);
-        let filter = DetailFilter {
-            level: Level::Warning,
-            grep: Some("pay`ment"),
-        };
-        let md = render_detail_md(&snapshot, &groups.groups[0], &filter, false);
-
-        assert!(md.contains("- Environment: prod\\<b\\>\n"), "{md}");
-        assert!(md.contains("- Log times: UTC\n"));
-        assert!(md.contains("- Window: since 24h (2026-10-01 00:00:00 to 2026-10-02 00:00:00)\n"));
-        assert!(md.contains("- Coverage: complete\n"));
-        assert!(md.contains("- Baseline: off\n"));
-        assert!(md.contains("- Filters: warning or above; --grep ``pay`ment``\n"));
-        assert!(md.contains(&format!("- slip: {}\n", env!("CARGO_PKG_VERSION"))));
-        // The entry sits in a fence longer than its own ``` run.
-        let (_, body) = md.split_once("Latest entry").unwrap();
-        assert!(body.contains("\n````text\n") && body.trim_end().ends_with("````"));
-        // Outside the fence, nothing renders: tags, links and emphasis are escaped.
-        let (outside, _) = md.split_once("````text").unwrap();
-        for raw in ["<img", "[click](", "**bold**", "](https"] {
-            assert!(!outside.contains(raw), "{raw} unescaped in {outside}");
-        }
-        // Folds like the terminal unless --full.
-        assert!(md.contains("… 3 vendor frames (--full to show)"));
-        let full = render_detail_md(&snapshot, &groups.groups[0], &filter, true);
-        assert!(!full.contains("vendor frames (") && full.contains("ControllerDispatcher.php"));
-
-        let mut partial = snapshot_of(&text, false);
-        partial.read_at = None;
-        let groups = group(&partial, Level::Error, None);
-        let md = render_detail_md(
-            &partial,
-            &groups.groups[0],
-            &DetailFilter {
-                level: Level::Error,
-                grep: None,
-            },
-            false,
-        );
-        assert!(md.contains("- Coverage: incomplete; counts are lower bounds\n"));
-        assert!(md.contains("to time unknown)"));
-        assert!(md.contains("- Count: ≥1\n") && md.contains("- First seen: —\n"));
-        assert!(md.contains("- Filters: error or above\n"));
+        assert_eq!(group.count, 2);
     }
 
     #[test]
@@ -4068,34 +2737,6 @@ mod tests {
         // Many brace-like words: only the last few candidates are tried.
         let long = format!("{}{}", " {x".repeat(10_000), " {\"a\":1}");
         assert_eq!(without_context(&long), " {x".repeat(10_000).trim_end());
-
-        let text = [
-            entry_line(
-                "2026-10-01 01:00:00",
-                "ERROR",
-                &format!("{}\n[stacktrace]\n#0 {{main}}\n\"}}", cases[0].0),
-            ),
-            entry_line("2026-10-01 01:00:01", "ERROR", cases[2].0),
-        ]
-        .concat();
-        let snapshot = snapshot_of(&text, true);
-        let groups = group(&snapshot, Level::Error, None);
-        let summary = render_summary(&snapshot, &groups, Level::Error, None, false);
-        assert!(
-            summary.contains(
-                "    Invoice backfill failed: column totals_cents is missing (shipslip test)\n"
-            ),
-            "{summary}"
-        );
-        assert!(summary.contains("    User authenticated.\n"), "{summary}");
-        assert!(!summary.contains("{\"exception\""));
-        // The detail view still shows the whole entry.
-        let detail = render_detail(&snapshot, &groups.groups[0], false);
-        assert!(
-            detail.contains("{\"exception\":\"[object]")
-                || render_detail(&snapshot, &groups.groups[1], false)
-                    .contains("{\"exception\":\"[object]")
-        );
     }
 
     fn one(message: &str) -> Entry {
@@ -4204,32 +2845,11 @@ mod tests {
         assert_eq!(related.id.key, "trace_id");
         assert_eq!(related.before, [0]);
         assert_eq!(related.after, [1]); // untimed sorts after timed
-        assert_eq!(related.more, 0);
         assert!(!related.partial);
-
-        let groups = group(&snapshot, Level::Error, None);
-        let out = render_related(&snapshot, &groups.groups[0], &[]);
-        assert!(
-            out.contains(
-                "Shared trace_id trace-aaaaaaaa (correlation, not cause; can include queued jobs):"
-            ),
-            "{out}"
-        );
-        assert!(out.contains("WARNING  Checkout started\n"), "{out}");
-        assert!(
-            out.contains("ERROR    Payment failed  ← this entry\n"),
-            "{out}"
-        );
-        assert!(
-            out.contains("time unknown  laravel  INFO     Cart loaded\n"),
-            "{out}"
-        );
-        assert!(!out.contains("Other request") && !out.contains("other key"));
-        assert!(!out.contains("more;"));
     }
 
     #[test]
-    fn related_lines_cap_each_side_and_print_a_broader_search() {
+    fn related_lines_list_every_match_and_say_when_some_may_be_missing() {
         let text: String = (0..25)
             .map(|second| {
                 entry_line(
@@ -4243,26 +2863,9 @@ mod tests {
         let Correlation::Shared(related) = related(&snapshot, 12) else {
             panic!("expected shared lines")
         };
-        assert_eq!(related.before, (2..12).collect::<Vec<_>>());
-        assert_eq!(related.after, (13..23).collect::<Vec<_>>());
-        assert_eq!(related.more, 4);
+        assert_eq!(related.before, (0..12).collect::<Vec<_>>());
+        assert_eq!(related.after, (13..25).collect::<Vec<_>>());
         assert!(related.partial);
-        let groups = group(&snapshot, Level::Error, None);
-        let args = [
-            "--since".to_string(),
-            "2026-10-01 00:00".into(),
-            "--max-bytes".into(),
-            "20m".into(),
-        ];
-        let out = render_related(&snapshot, &groups.groups[0], &args);
-        assert!(!out.contains("queued jobs"));
-        assert!(out.contains("+4 more; broader text search: slip logs production --raw --grep req-12345678 --since '2026-10-01 00:00' --max-bytes 20m"), "{out}");
-        assert!(out.contains("(some channels only partly read)"));
-        // The suggested search shows at least every matching line.
-        let raw = render_raw(&snapshot, Level::Debug, Some("req-12345678"));
-        for entry in &snapshot.entries {
-            assert!(raw.contains(&escape(&entry.text)));
-        }
     }
 
     #[test]
@@ -4276,29 +2879,8 @@ mod tests {
             true,
         );
         assert_eq!(related(&snapshot, 0), Correlation::NoId);
-        let groups = group(&snapshot, Level::Warning, None);
-        let error = groups
-            .groups
-            .iter()
-            .find(|group| group.class == "RuntimeException")
-            .unwrap();
-        assert!(render_related(&snapshot, error, &[])
-            .contains("No request ID in this entry. Laravel's Context::add"));
-        let warning = groups
-            .groups
-            .iter()
-            .find(|group| group.class != "RuntimeException")
-            .unwrap();
-        assert_eq!(render_related(&snapshot, warning, &[]), "");
-
         snapshot.entries[0].truncated = true;
         assert_eq!(related(&snapshot, 0), Correlation::Cut);
-        let groups = group(&snapshot, Level::Error, None);
-        assert_eq!(
-            render_related(&snapshot, &groups.groups[0], &[]),
-            "\nEntry was cut at 256 KiB, so an ID at its end may be missing.\n"
-        );
-
         let alone = snapshot_of(
             &entry_line(
                 "2026-10-01 01:00:00",
@@ -4307,9 +2889,10 @@ mod tests {
             ),
             true,
         );
-        let groups = group(&alone, Level::Error, None);
-        assert!(render_related(&alone, &groups.groups[0], &[])
-            .contains("no other entry in this window has this ID"));
+        let Correlation::Shared(related) = related(&alone, 0) else {
+            panic!("expected an ID")
+        };
+        assert!(related.before.is_empty() && related.after.is_empty());
     }
 }
 
