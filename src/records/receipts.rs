@@ -6,6 +6,8 @@ use super::{Flag, Outcome, ReceiptQueryError, StepRow, Untrusted};
 use crate::receipt::{self, Listed, Receipt, ReceiptKind};
 use crate::RunPlan;
 
+pub const DEFAULT_RECEIPTS_LIMIT: usize = 20;
+
 #[derive(Debug, Serialize)]
 pub struct ReceiptList {
     pub rows: Vec<ReceiptListRow>,

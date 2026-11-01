@@ -23,23 +23,27 @@ fn raw(text: &Option<Untrusted>) -> Option<&str> {
     text.as_ref().map(Untrusted::raw)
 }
 
+fn short_commit(commit: &Untrusted) -> String {
+    escape_field(&commit.raw().chars().take(7).collect::<String>())
+}
+
 fn since_label(since: &Since) -> String {
     match since {
         Since::Ago(seconds) if seconds % 86_400 == 0 => format!("since {}d", seconds / 86_400),
         Since::Ago(seconds) if seconds % 3600 == 0 => format!("since {}h", seconds / 3600),
         Since::Ago(seconds) => format!("since {}m", seconds / 60),
-        Since::At(at) => format!("since {at}"),
+        Since::At(at) => format!("since {}", escape_field(at)),
     }
 }
 
 pub(crate) fn window_label(anchor: &Anchor) -> String {
     match anchor {
         Anchor::CheckoutChange { commit } => {
-            format!("since checkout change {}", &commit.raw()[..7])
+            format!("since checkout change {}", short_commit(commit))
         }
         Anchor::RunInProgress { run_id, step } => format!(
             "deploy in progress (run {}{}); since run start",
-            run_id.raw(),
+            run_id.field(),
             step.map(|step| format!(", step {step}"))
                 .unwrap_or_default()
         ),
@@ -52,19 +56,23 @@ pub(crate) fn window_label(anchor: &Anchor) -> String {
             reflog_recorded,
         } => {
             let detail = match check {
-                RunCheck::Unverified { reason } => format!("unverified: {}", reason.raw()),
-                RunCheck::Verified => if *reflog_recorded {
-                    raw(server_marker_outcome).unwrap_or("outcome unknown")
-                } else {
-                    "outcome unknown"
+                RunCheck::Unverified { reason } => format!("unverified: {}", reason.field()),
+                RunCheck::Verified => {
+                    if *reflog_recorded {
+                        server_marker_outcome
+                            .as_ref()
+                            .map(Untrusted::field)
+                            .unwrap_or_else(|| "outcome unknown".into())
+                    } else {
+                        "outcome unknown".into()
+                    }
                 }
-                .into(),
             };
             format!(
                 "since slip {} {} ({}, {detail})",
-                plan.raw(),
-                run_id.raw(),
-                &target_commit.raw()[..7]
+                plan.field(),
+                run_id.field(),
+                short_commit(target_commit)
             )
         }
         Anchor::Since { since } => since_label(since),
@@ -101,10 +109,10 @@ fn complete(coverage: &LogCoverage) -> bool {
     matches!(coverage, LogCoverage::Complete)
 }
 
-fn covered_from(coverage: &LogCoverage) -> Option<&str> {
+fn covered_from(coverage: &LogCoverage) -> Option<String> {
     match coverage {
         LogCoverage::Complete => None,
-        LogCoverage::Partial { from } => raw(from),
+        LogCoverage::Partial { from } => from.as_ref().map(Untrusted::field),
     }
 }
 
@@ -259,7 +267,7 @@ pub(crate) fn header(summary: &LogSnapshot) -> String {
         "",
         &format!(
             "{} ({})",
-            escape_field(&window_label(&summary.window.anchor)),
+            window_label(&summary.window.anchor),
             summary.window.start.field()
         ),
     );
@@ -458,7 +466,7 @@ pub(crate) fn summary(summary: &LogsSummary, all: bool) -> String {
     let id_width = groups
         .iter()
         .take(shown)
-        .map(|group| group.id.raw().len())
+        .map(|group| group.id.field().chars().count())
         .max()
         .unwrap_or(ID_LEN);
     let count_width = groups
@@ -476,7 +484,7 @@ pub(crate) fn summary(summary: &LogsSummary, all: bool) -> String {
         let prefix = format!(
             "{:>3}  {:<id_width$}  {:>count_width$}  {:<6}  ",
             row + 1,
-            group.id.raw(),
+            group.id.field(),
             group_count(group),
             status_label(summary, &group.badge),
         );
@@ -572,7 +580,7 @@ pub(crate) fn detail(detail: &LogsDetail, full: bool) -> String {
         &mut out,
         &format!(
             "{}  {}  ",
-            group.id.raw(),
+            group.id.field(),
             status_label(summary, &group.badge)
         ),
         &group.exception.field(),
@@ -586,16 +594,16 @@ pub(crate) fn detail(detail: &LogsDetail, full: bool) -> String {
     push_wrapped(
         &mut out,
         "First seen: ",
-        if group.count_is_lower_bound {
-            "—"
+        &if group.count_is_lower_bound {
+            "—".into()
         } else {
-            raw(&group.first_seen).unwrap_or("-")
+            escape_field(raw(&group.first_seen).unwrap_or("-"))
         },
     );
     push_wrapped(
         &mut out,
         "Last seen:  ",
-        raw(&group.last_seen).unwrap_or("-"),
+        &escape_field(raw(&group.last_seen).unwrap_or("-")),
     );
     push_wrapped(
         &mut out,
@@ -635,7 +643,7 @@ pub(crate) fn detail(detail: &LogsDetail, full: bool) -> String {
         "",
         &format!(
             "Latest entry ({}, {}):",
-            raw(&latest.time).unwrap_or("time unknown"),
+            escape_field(raw(&latest.time).unwrap_or("time unknown")),
             latest.file.field(),
         ),
     );
@@ -698,7 +706,7 @@ pub(crate) fn related(detail: &LogsDetail, window_args: &[String]) -> String {
         &format!(
             "Shared {} {} (correlation, not cause{}):",
             key,
-            value.raw(),
+            value.field(),
             if JOB_SPANNING_KEYS.contains(key) {
                 "; can include queued jobs"
             } else {
@@ -712,7 +720,7 @@ pub(crate) fn related(detail: &LogsDetail, window_args: &[String]) -> String {
     let line = |entry: &LogEntry, this: bool| {
         format!(
             "  {}  {}  {:<8} {}{}\n",
-            raw(&entry.time).unwrap_or("time unknown"),
+            escape_field(raw(&entry.time).unwrap_or("time unknown")),
             entry.channel.field(),
             entry.level.to_ascii_uppercase(),
             escape_field(clip(entry.headline.raw(), 120)),
@@ -884,7 +892,7 @@ pub(crate) fn miss(summary: &LogSnapshot, query: &str) -> String {
             "group {} not found in what was read (entries since {from} of a window from {}); \
              try --max-bytes N or a later --since\n",
             escape(query),
-            summary.window.start.raw()
+            summary.window.start.field()
         ),
         None if partial.is_some() => format!(
             "group {} not found in what was read; try --max-bytes N\n",
@@ -893,7 +901,7 @@ pub(crate) fn miss(summary: &LogSnapshot, query: &str) -> String {
         None => format!(
             "group {} not seen {label} ({}); try --since 7d\n",
             escape(query),
-            summary.window.start.raw()
+            summary.window.start.field()
         ),
     }
 }
@@ -903,7 +911,7 @@ pub(crate) fn ambiguous(matches: &[&LogGroup]) -> String {
     for group in matches {
         out.push_str(&format!(
             "  {}  {}  {}  {}\n",
-            group.full_id.raw(),
+            group.full_id.field(),
             group_count(group),
             escape(short_class(group.exception.raw())),
             escape(raw(&group.file).unwrap_or("-"))
@@ -1020,7 +1028,7 @@ pub(crate) fn channels(summary: &LogSnapshot) -> String {
             format!(
                 "{} bytes, since {} ({})",
                 channel.baseline.bytes_read,
-                raw(&channel.baseline.from).unwrap_or("time unknown"),
+                escape_field(raw(&channel.baseline.from).unwrap_or("time unknown")),
                 if complete(&channel.baseline.coverage) {
                     "full read"
                 } else {
@@ -1060,7 +1068,7 @@ pub(crate) fn channels(summary: &LogSnapshot) -> String {
         push_wrapped(
             &mut out,
             "    LAST WRITE: ",
-            raw(&channel.last_write).unwrap_or("-"),
+            &escape_field(raw(&channel.last_write).unwrap_or("-")),
         );
         push_wrapped(&mut out, "    FORMAT: ", &format_label(&channel.format));
         push_wrapped(&mut out, "    COVERAGE: ", &coverage);

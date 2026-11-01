@@ -10,7 +10,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use crate::records::{self, ReceiptList, ReceiptRecord, Status};
-pub use crate::records::{versioned, versioned_error, ReceiptQueryError};
+pub use crate::records::{versioned, versioned_error, ReceiptQueryError, DEFAULT_RECEIPTS_LIMIT};
 
 /// A connection factory, injectable at the transport boundary for protocol tests.
 /// Connections require a target checked by this module, not an arbitrary alias.
@@ -104,7 +104,7 @@ impl<C> Reader<C> {
             &self.receipts_root,
             project,
             environment,
-            Some(limit.unwrap_or(20)),
+            Some(limit.unwrap_or(DEFAULT_RECEIPTS_LIMIT)),
             None,
         )
     }
@@ -122,7 +122,7 @@ impl<C: Connector> Reader<C> {
     ) -> Result<ApprovedTarget, LogsQueryError> {
         let invalid = |message: String| LogsQueryError::invalid(message);
         let checkout = std::fs::canonicalize(checkout)
-            .map_err(|_| invalid("checkout is not listed in the release map".into()))?;
+            .map_err(|_| invalid("checkout path cannot be resolved".into()))?;
         let map = self
             .status()
             .map_err(|error| invalid(format!("cannot read release map: {error:?}")))?;
@@ -200,17 +200,12 @@ impl<C: Connector> Reader<C> {
         let snapshot = self.snapshot(checkout, environment, query).await?;
         let level = query.level.unwrap_or(Level::Error);
         let groups = logs::group(&snapshot, level, query.text.as_deref());
-        match logs::find(&groups, id) {
-            logs::Lookup::Found(group) => Ok(records::logs_detail(
-                &snapshot,
-                group,
-                level,
-                query.text.as_deref(),
-            )),
-            logs::Lookup::Missing => Err(LogsQueryError::Missing),
-            logs::Lookup::Ambiguous(groups) => Err(LogsQueryError::Ambiguous {
-                ids: groups.iter().map(|group| group.id.clone().into()).collect(),
-            }),
-        }
+        let group = records::find_log_group(&groups, id)?;
+        Ok(records::logs_detail(
+            &snapshot,
+            group,
+            level,
+            query.text.as_deref(),
+        ))
     }
 }

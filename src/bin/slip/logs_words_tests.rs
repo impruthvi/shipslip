@@ -403,6 +403,64 @@ async fn control_characters_are_escaped_in_every_view() {
 }
 
 #[tokio::test]
+async fn record_fields_are_escaped_without_relying_on_parser_validation() {
+    let snapshot = snapshot_of(
+        &line(
+            "2026-10-01 01:00:00",
+            "ERROR",
+            "RuntimeException: boom {\"request_id\":\"req-12345678\"}",
+        ),
+        true,
+    )
+    .await;
+    let groups = logs::group(&snapshot, Level::Error, None);
+    let mut summary = records::logs_summary(&snapshot, &groups, Level::Error, None);
+    let mut detail = records::logs_detail(&snapshot, &groups.groups[0], Level::Error, None);
+    let text = "value\x1b[2J\r\u{202e}";
+    let poison_snapshot = |snapshot: &mut records::LogSnapshot| {
+        snapshot.window.start = text.into();
+        snapshot.window.anchor = Anchor::RunInProgress {
+            run_id: text.into(),
+            step: None,
+        };
+        snapshot.baseline_enabled = true;
+        let channel = &mut snapshot.channels[0];
+        channel.coverage = records::LogCoverage::Partial {
+            from: Some(text.into()),
+        };
+        channel.last_write = Some(text.into());
+        channel.baseline.available = true;
+        channel.baseline.from = Some(text.into());
+        channel.baseline.to = Some(text.into());
+    };
+    poison_snapshot(&mut summary.snapshot);
+    poison_snapshot(&mut detail.snapshot);
+    summary.groups[0].id = text.into();
+    summary.groups[0].full_id = text.into();
+    detail.group.id = text.into();
+    detail.group.first_seen = Some(text.into());
+    detail.group.last_seen = Some(text.into());
+    detail.latest.entry.time = Some(text.into());
+    if let records::SameRequest::Shared { value, .. } = &mut detail.same_request {
+        *value = text.into();
+    } else {
+        panic!("expected a shared request ID");
+    }
+    for out in [
+        logs_words::summary(&summary, false),
+        logs_words::detail(&detail, false),
+        logs_words::related(&detail, &[]),
+        logs_words::channels(&summary.snapshot),
+        logs_words::miss(&summary.snapshot, "missing"),
+        logs_words::ambiguous(&[&summary.groups[0]]),
+    ] {
+        for control in ['\x1b', '\r', '\u{202e}'] {
+            assert!(!out.contains(control), "{out:?}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn detail_keeps_the_whole_trace_and_the_summary_counts_untracked_groups() {
     let text: String = (0..550)
         .map(|i| {
@@ -736,6 +794,85 @@ async fn entries_without_an_id_get_a_tip_or_a_cut_note() {
     .await;
     assert!(related_of(&alone, Level::Error, 0, &[])
         .contains("no other entry in this window has this ID"));
+}
+
+#[test]
+fn window_labels_shorten_commits_without_panicking() {
+    for (commit, short) in [
+        ("", ""),
+        ("abc", "abc"),
+        ("abcdef123456", "abcdef1"),
+        ("abcdefé123", "abcdefé"),
+        ("🦀é短", "🦀é短"),
+    ] {
+        for (anchor, expected) in [
+            (
+                Anchor::CheckoutChange {
+                    commit: commit.into(),
+                },
+                format!("since checkout change {short}"),
+            ),
+            (
+                Anchor::Run {
+                    run_id: "r-one".into(),
+                    plan: "deploy".into(),
+                    target_commit: commit.into(),
+                    check: RunCheck::Verified,
+                    server_marker_outcome: None,
+                    reflog_recorded: false,
+                },
+                format!("since slip deploy r-one ({short}, outcome unknown)"),
+            ),
+        ] {
+            assert_eq!(logs_words::window_label(&anchor), expected);
+        }
+    }
+}
+
+#[test]
+fn window_labels_escape_every_server_text_field() {
+    let text = "\x1b\t";
+    let run = |check| Anchor::Run {
+        run_id: text.into(),
+        plan: text.into(),
+        target_commit: text.into(),
+        check,
+        server_marker_outcome: Some(text.into()),
+        reflog_recorded: true,
+    };
+    for (anchor, expected) in [
+        (
+            Anchor::CheckoutChange {
+                commit: text.into(),
+            },
+            "since checkout change \\x1b\\x09",
+        ),
+        (
+            Anchor::RunInProgress {
+                run_id: text.into(),
+                step: None,
+            },
+            "deploy in progress (run \\x1b\\x09); since run start",
+        ),
+        (
+            run(RunCheck::Verified),
+            "since slip \\x1b\\x09 \\x1b\\x09 (\\x1b\\x09, \\x1b\\x09)",
+        ),
+        (
+            run(RunCheck::Unverified {
+                reason: text.into(),
+            }),
+            "since slip \\x1b\\x09 \\x1b\\x09 (\\x1b\\x09, unverified: \\x1b\\x09)",
+        ),
+        (
+            Anchor::Since {
+                since: Since::At(text.into()),
+            },
+            "since \\x1b\\x09",
+        ),
+    ] {
+        assert_eq!(logs_words::window_label(&anchor), expected);
+    }
 }
 
 #[test]

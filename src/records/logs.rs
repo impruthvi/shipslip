@@ -343,6 +343,16 @@ pub enum LogsQueryError {
     },
 }
 
+pub fn find_log_group<'a>(groups: &'a Groups, id: &str) -> Result<&'a logs::Group, LogsQueryError> {
+    match logs::find(groups, id) {
+        logs::Lookup::Found(group) => Ok(group),
+        logs::Lookup::Missing => Err(LogsQueryError::Missing),
+        logs::Lookup::Ambiguous(groups) => Err(LogsQueryError::Ambiguous {
+            ids: groups.iter().map(|group| group.id.clone().into()).collect(),
+        }),
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SshRefusal {

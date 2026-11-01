@@ -13,7 +13,7 @@ use shipslip::config::{
 };
 use shipslip::github_auth::discover_repository;
 use shipslip::interrupt::{next_stage, on_interrupt, Interrupt, Stage};
-use shipslip::logs::{self, Level, Lookup, Since};
+use shipslip::logs::{self, Level, Since};
 use shipslip::receipt::{
     default_receipts_root, duration_suffix, find_open, strip_color, ReceiptJournal, ReceiptKind,
 };
@@ -1142,8 +1142,8 @@ fn logs_text(
         let summary = records::logs_summary(snapshot, groups, level, grep);
         return (logs_words::summary(&summary, options.all), 0);
     };
-    match logs::find(groups, query) {
-        Lookup::Found(group) => {
+    match records::find_log_group(groups, query) {
+        Ok(group) => {
             let detail = records::logs_detail(snapshot, group, level, grep);
             let text = if options.md {
                 logs_words::detail_md(&detail, options.full)
@@ -1153,16 +1153,16 @@ fn logs_text(
             };
             (text, 0)
         }
-        Lookup::Ambiguous(matches) => {
+        Err(records::LogsQueryError::Ambiguous { ids }) => {
             let summary = records::logs_summary(snapshot, groups, level, grep);
             let matches: Vec<_> = summary
                 .groups
                 .iter()
-                .filter(|group| matches.iter().any(|m| group.id.raw() == m.id))
+                .filter(|group| ids.contains(&group.id))
                 .collect();
             (logs_words::ambiguous(&matches), 2)
         }
-        Lookup::Missing => {
+        Err(_) => {
             let summary = records::logs_summary(snapshot, &logs::Groups::default(), level, grep);
             (logs_words::miss(&summary.snapshot, query), 1)
         }
@@ -1176,23 +1176,14 @@ fn logs_json_record(
     level: Level,
     grep: Option<&str>,
 ) -> Result<(serde_json::Value, u8), serde_json::Error> {
-    use shipslip::records::LogsQueryError;
-    let result = match query.map(|query| logs::find(groups, query)) {
+    let result = match query.map(|query| records::find_log_group(groups, query)) {
         None => serde_json::to_value(records::versioned(records::logs_summary(
             snapshot, groups, level, grep,
         ))),
-        Some(Lookup::Found(group)) => serde_json::to_value(records::versioned(
-            records::logs_detail(snapshot, group, level, grep),
-        )),
-        Some(Lookup::Ambiguous(matches)) => {
-            return lookup_error(LogsQueryError::Ambiguous {
-                ids: matches
-                    .iter()
-                    .map(|group| group.id.clone().into())
-                    .collect(),
-            })
-        }
-        Some(Lookup::Missing) => return lookup_error(LogsQueryError::Missing),
+        Some(Ok(group)) => serde_json::to_value(records::versioned(records::logs_detail(
+            snapshot, group, level, grep,
+        ))),
+        Some(Err(error)) => return lookup_error(error),
     };
     Ok((result?, 0))
 }
