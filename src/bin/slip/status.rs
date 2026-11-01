@@ -6,10 +6,12 @@ use std::process::ExitCode;
 use super::receipts::next_step_text;
 use shipslip::git::Git;
 use shipslip::logs::escape_field;
-use shipslip::receipt::{
-    self, age, comparison_text, newer_elsewhere_text, sentence, short_id, stale_hint_text,
-    target_moved_text, EnvComparison, ReceiptKind,
-};
+use shipslip::receipt::{self, comparison_text, EnvComparison, ReceiptKind};
+
+#[path = "status_words.rs"]
+mod words;
+use super::receipts::{flag_text, headline};
+use words::{age, newer_elsewhere_text, sentence, short_id, stale_hint_text, target_moved_text};
 
 use super::invalid_input;
 use shipslip::records::{self, ReceiptQueryError, RepoRow, StaleHint, Status as Overview};
@@ -133,12 +135,12 @@ fn render(
                         },
                         short_id(attempt.run_id.raw()),
                         age(now_ms, attempt.started_at_ms),
-                        badge.outcome.headline()
+                        headline(badge.outcome)
                     )
                 };
                 for flag in &badge.flags {
                     line.push_str("  ");
-                    line.push_str(&flag.text());
+                    line.push_str(&flag_text(*flag));
                 }
                 let _ = writeln!(out, "{pad}{}", escape_field(&line));
                 for step in &attempt.next_steps.steps {
@@ -211,3 +213,7 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 #[path = "status_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "status_words_tests.rs"]
+mod wording_tests;

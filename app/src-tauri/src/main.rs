@@ -12,6 +12,7 @@ mod finish;
 mod fixture;
 mod git_path;
 mod receipt_view;
+mod receipt_words;
 mod recovery;
 mod state;
 mod terminate;

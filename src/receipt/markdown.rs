@@ -8,9 +8,12 @@
 
 use std::fmt::Write;
 
-use super::{describe_watch, format_duration, format_utc, strip_color, timing_suffix, Receipt};
+use super::{format_duration, format_utc, strip_color, timing_suffix, Receipt};
 use crate::logs::{escape, escape_field};
 use crate::records::{ReceiptRecord, Smoke, StepKind};
+
+mod words;
+use words::{describe_watch, flag_text, headline, step_label};
 
 pub fn markdown(receipt: &Receipt, details: bool) -> String {
     render(
@@ -36,7 +39,7 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
     }
     let outcome = match (receipt.summary.as_ref(), details) {
         (Some(summary), true) if !badge.outcome.unfinished => inline(summary.raw()),
-        _ => inline(&badge.outcome.headline()),
+        _ => inline(&headline(badge.outcome)),
     };
     out.push_str("| | |\n|---|---|\n");
     row(&mut out, "Run", &code(receipt.run_id.raw()));
@@ -107,7 +110,7 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
     if !badge.flags.is_empty() {
         out.push_str("\n## Flags\n\n");
         for flag in &badge.flags {
-            let _ = writeln!(out, "- {}", inline(&flag.text()));
+            let _ = writeln!(out, "- {}", inline(&flag_text(*flag)));
         }
     }
 
@@ -132,7 +135,7 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
             out,
             "| {label} | {} | {}{} | {} |",
             code(step.command.raw()),
-            step.status.label(),
+            step_label(step.status),
             timing_suffix(step.times(), time_of_day),
             exit(step.exit_code)
         );

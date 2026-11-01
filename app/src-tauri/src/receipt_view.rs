@@ -3,12 +3,11 @@
 
 use serde::Serialize;
 use shipslip::logs::escape_field;
-use shipslip::receipt::{describe_watch, format_duration, strip_color};
-use shipslip::records::{
-    ReceiptQueryError, ReceiptRecord, Smoke, StepKind, StepRow, StepState, Watch,
-};
+use shipslip::receipt::{format_duration, strip_color};
+use shipslip::records::{ReceiptQueryError, ReceiptRecord, StepKind, StepRow, StepState, Watch};
 use shipslip::{StepTimes, WatchResult, WatchStatus};
 
+use crate::receipt_words::{describe_watch, smoke_text, step_label};
 use crate::view::{flags, guidance, outcome, FlagView, Guidance, OutcomeView};
 
 /// Error groups listed before "and N more groups".
@@ -209,7 +208,7 @@ fn receipt_view(receipt: &ReceiptRecord) -> ReceiptView {
             .watch
             .as_ref()
             .map(|watch| record_watch_view(watch, target.log_path.raw())),
-        smoke: receipt.smoke.as_ref().map(Smoke::text),
+        smoke: receipt.smoke.as_ref().map(smoke_text),
         notes: receipt.notes.iter().map(|note| note.field()).collect(),
         next_steps: guidance(&receipt.next_steps, receipt.repo_root.raw()),
     }
@@ -238,7 +237,7 @@ fn step(row: &StepRow) -> StepView {
             StepState::Running => StepStatusView::Running,
             StepState::Skipped => StepStatusView::Skipped,
         },
-        label: row.status.label().into(),
+        label: step_label(row.status).into(),
         exit_code: row.exit_code,
         timing: step_timing(row.times()),
         output: row

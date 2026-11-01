@@ -125,9 +125,19 @@ impl DeployOutcome {
 
     /// A short label without reasons.
     pub fn label(&self) -> String {
-        crate::records::OutcomeKind::from(Some(self))
-            .label()
-            .unwrap_or_default()
+        match self {
+            Self::Succeeded => "Succeeded".into(),
+            Self::FailedAtStep {
+                step,
+                partial_update: true,
+            } => format!("Failed at step {step} (partial update)"),
+            Self::FailedAtStep { step, .. } => format!("Failed at step {step}"),
+            Self::StoppedAfterStep { step, .. } => format!("Stopped after step {step}"),
+            Self::CancelledBeforeChanges => "Cancelled before changes".into(),
+            Self::AbortedBeforeChanges(_) => "Aborted before changes".into(),
+            Self::StoppedInMaintenance(_) => "Stopped in maintenance mode, no steps ran".into(),
+            Self::Unknown { step, .. } => format!("Unknown at step {step}"),
+        }
     }
 }
 

@@ -566,10 +566,8 @@ pub fn compare_envs_with(
 }
 
 mod text;
-pub use text::{
-    age, code_text, comparison_text, newer_elsewhere_text, sentence, short_id, short_sha,
-    stale_hint_text, target_moved_text, CodeText, Mark,
-};
+pub use crate::records::Mark;
+pub use text::comparison_text;
 
 #[cfg(test)]
 mod tests;

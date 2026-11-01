@@ -98,19 +98,6 @@ impl From<ReceiptStepStatus> for StepState {
     }
 }
 
-impl StepState {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Ok => "✓ ok",
-            Self::Failed => "✗ failed",
-            Self::Unknown => "? unknown",
-            Self::NotStarted | Self::Pending => "– not run",
-            Self::Running => "? running when saved",
-            Self::Skipped => "↷ skipped",
-        }
-    }
-}
-
 impl Receipt {
     /// Maintenance down, each step, then maintenance up. An Up run's only
     /// step is `php artisan up`, so it has no maintenance-up row.

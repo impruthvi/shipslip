@@ -8,15 +8,17 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use shipslip::git::Comparison;
 use shipslip::logs::escape_field;
-use shipslip::receipt::{
-    age, code_text, comparison_text, newer_elsewhere_text, short_sha, stale_hint_text,
-    target_moved_text, EnvComparison,
-};
+use shipslip::receipt::{comparison_text, EnvComparison};
+
+#[path = "view_words.rs"]
+mod words;
+use crate::receipt_words::headline;
 use shipslip::records::{
     self, copy_is_safe, AttemptSummary, Badge, EnvCell, Flag, Mark, NextSteps, Part, ProblemKind,
     ReceiptQueryError, RepoRow, StaleHint, Status as Overview, Untrusted,
 };
 use shipslip::transport::ConnectFailure;
+use words::{age, code_text, newer_elsewhere_text, short_sha, stale_hint_text, target_moved_text};
 
 /// The app shows 7 characters of a commit; the CLI shows 12.
 const SHORT_SHA: usize = 7;
@@ -380,7 +382,7 @@ pub fn outcome(badge: &Badge) -> OutcomeView {
         | records::OutcomeKind::NotRecorded => OutcomeKind::Cancelled,
     };
     OutcomeView {
-        text: escape_field(&outcome.headline()),
+        text: escape_field(&headline(outcome)),
         tone: if outcome.needs_attention() {
             Tone::Bad
         } else if outcome.succeeded() {
@@ -1114,3 +1116,7 @@ mod span_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "view_words_tests.rs"]
+mod wording_tests;

@@ -68,37 +68,7 @@ impl From<Option<&DeployOutcome>> for OutcomeKind {
     }
 }
 
-impl OutcomeKind {
-    /// A short label without reasons, e.g. `Failed at step 2`.
-    pub fn label(self) -> Option<String> {
-        Some(match self {
-            Self::Succeeded => "Succeeded".into(),
-            Self::FailedAtStep {
-                step,
-                partial_update: true,
-            } => format!("Failed at step {step} (partial update)"),
-            Self::FailedAtStep { step, .. } => format!("Failed at step {step}"),
-            Self::StoppedAfterStep { step } => format!("Stopped after step {step}"),
-            Self::CancelledBeforeChanges => "Cancelled before changes".into(),
-            Self::AbortedBeforeChanges => "Aborted before changes".into(),
-            Self::StoppedInMaintenance => "Stopped in maintenance mode, no steps ran".into(),
-            Self::Unknown { step } => format!("Unknown at step {step}"),
-            Self::NotRecorded => return None,
-        })
-    }
-}
-
 impl Outcome {
-    /// e.g. `Succeeded` or `Unfinished (last recorded: Succeeded)`.
-    pub fn headline(self) -> String {
-        match (self.unfinished, self.kind.label()) {
-            (false, Some(label)) => label,
-            (false, None) => "Finished without an outcome".into(),
-            (true, Some(label)) => format!("Unfinished (last recorded: {label})"),
-            (true, None) => "Unfinished".into(),
-        }
-    }
-
     /// The run did not finish, or ended where the server may need a look.
     pub fn needs_attention(self) -> bool {
         self.unfinished
@@ -141,22 +111,6 @@ impl Flag {
             self,
             Self::NewErrors { .. } | Self::SmokeFailed { .. } | Self::AppLeftDown
         )
-    }
-
-    /// The flag for a terminal or a shared receipt.
-    pub fn text(self) -> String {
-        match self {
-            Self::NewErrors { groups: 1 } => "⚠ 1 new error group".into(),
-            Self::NewErrors { groups } => format!("⚠ {groups} new error groups"),
-            Self::LogNotFullyObserved => "ⓘ log not fully observed".into(),
-            Self::LogNotRecorded => "ⓘ log not recorded".into(),
-            Self::SmokeFailed {
-                status: Some(status),
-            } => format!("⚠ smoke {status}"),
-            Self::SmokeFailed { status: None } => "⚠ smoke failed".into(),
-            Self::SmokeNotRecorded => "ⓘ smoke not recorded".into(),
-            Self::AppLeftDown => "⛔ app may be in maintenance mode".into(),
-        }
     }
 }
 
