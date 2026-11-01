@@ -6,6 +6,66 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-01
+
+### Added
+
+- `slip logs ENV --json` returns every tracked error group as schema-1 JSON,
+  including stable full IDs, typed window anchors and fallbacks, baseline
+  badges, lower-bound counts, channel coverage, filters and warnings.
+  `slip logs ENV ID --json` adds the latest entry's full text, best-effort
+  stack frames and same-request entries (correlation, not cause). Group
+  lookup accepts a row number, short ID or full ID from an earlier snapshot.
+  JSON rejects `--raw`, `--channels` and `--md`; `--full` has no effect.
+- Log JSON failures have typed error kinds, including SSH refusals with a
+  reason and connections lost during a snapshot. Invalid input and ambiguous
+  IDs exit 2; other failures exit 1. A successful read with no log files
+  exits 0 with empty groups and channels.
+- `slip mcp` serves local `status`, `receipts` and `receipt` records over
+  stdio. Starting it with `--read-logs` also exposes `logs` and `log_group`
+  for fresh snapshots, only in checkout roots already listed in the release
+  map and for environments whose current config matches their approval.
+  Missing or changed approval returns `not_approved` before SSH. The server
+  cannot deploy, change a server, take or break a lock, or approve config.
+  `--config` is rejected and `SHIPSLIP_CONFIG` is ignored.
+- MCP uses protocol `2026-07-28`, with `server/discover`, per-request
+  metadata and compatibility `initialize`/`ping`. Tools return the same
+  schema-1 record as structured content and one JSON text item; Shipslip
+  failures are tool errors and protocol mistakes are JSON-RPC errors.
+- MCP log text defaults to 16 KiB per field, configurable from 1 to 256 KiB,
+  with explicit head/tail clipping, original byte counts and frames parsed
+  before clipping. Same-request entries are limited to five per side, with
+  omitted entries counted. CLI JSON keeps all same-request entries and does
+  not clip text for display. The [JSON reference](https://github.com/impruthvi/shipslip/blob/v0.12.0/docs/json-reference.md)
+  documents the schemas, text metadata, fixed values and error kinds.
+- Library: `records::logs_summary()`, `logs_detail()`, `find_log_group()`,
+  serializable log record/error types and `limit_log_text()` build records
+  from already-read snapshots. `read_only::Reader` supplies the five MCP
+  queries, with `ApprovedTarget` and an injectable `Connector` enforcing the
+  approval boundary for log connections.
+
+### Changed
+
+- Library: `logs::Snapshot::since_label` is replaced by `anchor: Anchor`
+  and `anchor_fallbacks: Vec<AnchorFallback>`, with typed run checks and
+  fallback reasons. Callers constructing snapshots must provide these fields;
+  front ends now word the window from the types.
+- Library: log rendering moved to the CLI, which renders the same records
+  used by JSON. The `logs::render_*` functions and `DetailFilter` were
+  removed. `Related::more` was removed; `logs::related()` now returns all
+  matching entry indices, and front ends apply their own display limits.
+  `Since` is serializable and gains `validate()` for checking explicit
+  windows before opening SSH.
+- ARM64 macOS release builds use the supported `macos-15` runner.
+
+### Fixed
+
+- Log text renderers escape server text, including anchor and channel fields,
+  and shorten commit text safely. JSON retains the original server text.
+- Impossible calendar dates and windows older than 30 days are rejected
+  before SSH. Empty log JSON omits placeholder channels, and a lost snapshot
+  session is distinguished from an initial SSH refusal.
+
 ## [0.11.0] - 2026-11-01
 
 ### Added
@@ -555,6 +615,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.12.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.12.0
 [0.11.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.11.0
 [0.10.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.10.0
 [0.9.1]: https://github.com/impruthvi/shipslip/releases/tag/v0.9.1
