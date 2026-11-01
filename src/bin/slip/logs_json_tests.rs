@@ -1,19 +1,23 @@
 use super::*;
+use serde_json::json;
 use shipslip::transport::TransportError;
 
 #[test]
 fn every_logs_failure_has_a_schema_one_kind_and_the_text_commands_exit_code() {
-    let cases: Vec<(Box<dyn Error>, &str, u8)> = vec![
-        (Box::new(invalid_input("bad flag")), "invalid_input", 2),
+    let cases: Vec<(Box<dyn Error>, serde_json::Value, u8)> = vec![
         (
-            Box::new(logs::LogsError::BadSince("bad time".into())),
-            "invalid_input",
+            Box::new(invalid_input("bad flag")),
+            json!({"kind":"invalid_input","message":"bad flag"}),
             2,
         ),
-        (Box::new(logs::LogsError::TooOld), "invalid_input", 2),
+        (
+            Box::new(logs::LogsError::BadSince("bad time".into())),
+            json!({"kind":"invalid_input","message":"the server could not read `--since bad time` as a time"}),
+            2,
+        ),
         (
             Box::new(logs::LogsError::ZoneMissing("missing/zone".into())),
-            "zone_missing",
+            json!({"kind":"zone_missing","zone":"missing/zone"}),
             1,
         ),
         (
@@ -21,29 +25,35 @@ fn every_logs_failure_has_a_schema_one_kind_and_the_text_commands_exit_code() {
                 path: "../secret".into(),
                 env: "production".into(),
             }),
-            "log_path_not_trusted",
+            json!({"kind":"log_path_not_trusted","path":"../secret","environment":"production"}),
             1,
         ),
         (
             Box::new(logs::LogsError::Unavailable("bad reply".into())),
-            "server_read_failed",
+            json!({"kind":"server_read_failed","message":"bad reply"}),
             1,
         ),
         (
             Box::new(logs::LogsError::Transport(TransportError::ConnectionLost(
                 "lost".into(),
             ))),
-            "connection_lost",
+            json!({"kind":"connection_lost","message":"lost"}),
             1,
         ),
     ];
-    for (error, kind, code) in cases {
+    for (error, expected, code) in cases {
         let record = logs_error_record(error.as_ref());
         assert_eq!(record.exit_code(), code);
         let value = serde_json::to_value(shipslip::records::versioned_error(record)).unwrap();
         assert_eq!(value["schema"], 1);
-        assert_eq!(value["error"]["kind"], kind);
+        assert_eq!(value["error"], expected);
     }
+    let too_old = logs_error_record(&logs::LogsError::TooOld);
+    assert_eq!(too_old.exit_code(), 2);
+    assert_eq!(
+        serde_json::to_value(too_old).unwrap()["kind"],
+        "invalid_input"
+    );
     for (message, reason) in [
         ("Host key verification failed", "host_key_unknown"),
         ("REMOTE HOST IDENTIFICATION HAS CHANGED", "host_key_changed"),
