@@ -32,6 +32,11 @@ mod anchor;
 mod baseline;
 mod discovery;
 
+pub use anchor::{
+    Anchor, AnchorFallback, CheckoutFallbackReason, MarkerFallbackReason, RunCheck,
+    RunFallbackReason,
+};
+
 const DEFAULT_WINDOW: u64 = 24 * 3600;
 const MAX_WINDOW: u64 = 30 * 24 * 3600;
 const CHANNEL_BYTES: u64 = 4 * 1024 * 1024;
@@ -324,7 +329,12 @@ impl Entry {
 pub struct Snapshot {
     pub env: String,
     pub zone: String,
+    /// Text label rebuilt from the chosen anchor.
     pub since_label: String,
+    /// Evidence used to choose the window start.
+    pub anchor: Anchor,
+    /// Candidates that could not be used, in selection order.
+    pub anchor_fallbacks: Vec<AnchorFallback>,
     /// The window start in the log's timezone.
     pub start: String,
     /// When the server was probed, in the log's timezone: the window's end.
@@ -383,12 +393,14 @@ pub async fn snapshot<T: Transport>(
     let choice = if request.since.is_none() {
         probe.anchor.choose(time)
     } else {
-        anchor::Choice {
-            label: since.label(),
+        anchor::Choice::new(
+            Anchor::Since {
+                since: since.clone(),
+            },
             time,
-            marker: None,
-            warnings: Vec::new(),
-        }
+            None,
+            Vec::new(),
+        )
     };
     let time = choice.time;
     for file in &mut probe.files {
@@ -476,6 +488,8 @@ pub async fn snapshot<T: Transport>(
         env: target.env.clone(),
         zone,
         since_label: choice.label,
+        anchor: choice.anchor,
+        anchor_fallbacks: choice.fallbacks,
         start: time.start_local.clone(),
         read_at: local_time(time.now, &time.offset_now),
         channels: Vec::new(),
@@ -3144,6 +3158,10 @@ mod tests {
             env: "production".into(),
             zone: "UTC".into(),
             since_label: "since 24h".into(),
+            anchor: Anchor::Default {
+                seconds: DEFAULT_WINDOW,
+            },
+            anchor_fallbacks: Vec::new(),
             start: "2026-10-01 00:00:00".into(),
             read_at: Some("2026-10-02 00:00:00".into()),
             channels: vec![Channel {
