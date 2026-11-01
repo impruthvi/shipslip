@@ -6,7 +6,7 @@ mod mcp;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::{json, Value};
 use shipslip::config::{approve_trust, LoadedConfig};
-use shipslip::read_only::{Connector, Reader};
+use shipslip::read_only::{ApprovedTarget, Connector, Reader};
 use shipslip::transport::{Transport, TransportError};
 use std::io::Write;
 use std::path::PathBuf;
@@ -97,7 +97,8 @@ struct FakeConnector {
 }
 impl Connector for FakeConnector {
     type Connection = FakeTransport;
-    async fn connect(&self, _alias: &str) -> Result<FakeTransport, TransportError> {
+    async fn connect(&self, target: &ApprovedTarget) -> Result<FakeTransport, TransportError> {
+        assert_eq!(target.ssh_alias(), "app");
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some(error @ TransportError::Connect(_)) = &self.failure {
             return Err(error.clone());
@@ -239,6 +240,68 @@ async fn an_unapproved_environment_in_a_listed_checkout_never_connects() {
         body(&response[0])["error"],
         json!({"kind":"not_approved","environment":"production"})
     );
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_listed_checkout_that_is_not_the_repository_root_never_connects() {
+    let fixture = Fixture::new();
+    let checkout = fixture.root.join("nested");
+    std::fs::create_dir(&checkout).unwrap();
+    std::fs::copy(
+        fixture.root.join(".shipslip.toml"),
+        checkout.join(".shipslip.toml"),
+    )
+    .unwrap();
+    let config = LoadedConfig::load(&checkout, None).unwrap();
+    // A stale approval can list a directory that is now inside another checkout.
+    approve_trust(
+        &fixture.root.join("trust.json"),
+        &checkout,
+        "production",
+        config.trust_snapshot("production").unwrap(),
+    )
+    .unwrap();
+    for tool in ["logs", "log_group"] {
+        let mut arguments = fixture.arguments();
+        arguments["checkout"] = json!(checkout);
+        if tool == "log_group" {
+            arguments["id"] = json!("1");
+        }
+        let response = fixture
+            .exchange(vec![call(tool, arguments)], "", None, true)
+            .await;
+        assert_eq!(response[0]["result"]["isError"], true);
+        assert_eq!(
+            body(&response[0])["error"],
+            json!({"kind":"invalid_input","message":"checkout must be the repository root"})
+        );
+    }
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_unreadable_release_map_never_connects() {
+    let fixture = Fixture::new();
+    fixture.approve();
+    // A file in place of the receipts directory fails even when run as root.
+    std::fs::write(fixture.root.join("receipts"), "not a directory").unwrap();
+    for tool in ["logs", "log_group"] {
+        let mut arguments = fixture.arguments();
+        if tool == "log_group" {
+            arguments["id"] = json!("1");
+        }
+        let response = fixture
+            .exchange(vec![call(tool, arguments)], "", None, true)
+            .await;
+        assert_eq!(response[0]["result"]["isError"], true);
+        let error = &body(&response[0])["error"];
+        assert_eq!(error["kind"], "invalid_input");
+        assert!(error["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("cannot read release map:"));
+    }
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
 }
 
