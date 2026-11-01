@@ -43,7 +43,16 @@ fn invalid_since_is_rejected_without_starting_ssh() {
             .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
-    for since in ["yesterday", "31d", "2000-01-01", "2000-01-01 14:00"] {
+    for since in [
+        "yesterday",
+        "31d",
+        "2000-01-01",
+        "2000-01-01 14:00",
+        "2099-11-31",
+        "2099-02-29",
+        "2100-02-29 14:00",
+        "2099-04-31 14:00",
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_slip"))
             .env("PATH", &path)
             .env("SSH_CALLED", &called)
@@ -91,6 +100,47 @@ fn logs_json_rejects_mixed_output_and_reports_early_errors_on_stdout() {
         assert_eq!(value["schema"], 1);
         assert_eq!(value["error"]["kind"], "invalid_input");
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn unavailable_local_date_is_a_json_error_without_starting_ssh() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let root = std::env::temp_dir().join(format!("shipslip-no-date-{}", std::process::id()));
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let config = root.join(".shipslip.toml");
+    std::fs::write(&config, "[project]\nname='fixture'\nstack='laravel'\n[env.production]\nssh='server'\npath='/srv/app'\nbranch='main'\nproduction=true\n[recipe.deploy]\nsteps=['true']\n").unwrap();
+    symlink("/bin/bash", root.join("bash")).unwrap();
+    let ssh = root.join("ssh");
+    std::fs::write(&ssh, "#!/bin/sh\nprintf called > \"$SSH_CALLED\"\nexit 1\n").unwrap();
+    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let called = root.join("ssh-called");
+    let output = Command::new(env!("CARGO_BIN_EXE_slip"))
+        .env("PATH", &root)
+        .env("SSH_CALLED", &called)
+        .args([
+            "--config",
+            config.to_str().unwrap(),
+            "logs",
+            "production",
+            "--json",
+            "--since",
+            "2096-02-29",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stderr.is_empty());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema"], 1);
+    assert_eq!(value["error"]["kind"], "server_read_failed");
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("cannot validate --since locally"));
+    assert!(!called.exists());
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

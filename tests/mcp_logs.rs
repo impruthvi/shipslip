@@ -157,7 +157,16 @@ async fn invalid_since_is_a_tool_error_without_connecting() {
     let fixture = Fixture::new();
     fixture.approve();
     for tool in ["logs", "log_group"] {
-        for since in ["yesterday", "31d", "2000-01-01", "2000-01-01 14:00"] {
+        for since in [
+            "yesterday",
+            "31d",
+            "2000-01-01",
+            "2000-01-01 14:00",
+            "2099-11-31",
+            "2099-02-29",
+            "2100-02-29 14:00",
+            "2099-04-31 14:00",
+        ] {
             let mut arguments = fixture.arguments();
             arguments["since"] = json!(since);
             if tool == "log_group" {
@@ -663,6 +672,47 @@ async fn dropped_connections_are_tool_errors_without_reconnection() {
         json!({"kind":"connection_lost","message":"dropped"})
     );
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn closed_sessions_are_connection_lost_tool_errors() {
+    struct ClosedSessionConnector;
+
+    impl Connector for ClosedSessionConnector {
+        type Connection = FakeTransport;
+
+        async fn connect(&self, _target: &ApprovedTarget) -> Result<FakeTransport, TransportError> {
+            Ok(FakeTransport {
+                text: String::new(),
+                failure: Some(TransportError::Connect("closed session".into())),
+            })
+        }
+    }
+
+    let fixture = Fixture::new();
+    fixture.approve();
+    for tool in ["logs", "log_group"] {
+        let mut arguments = fixture.arguments();
+        if tool == "log_group" {
+            arguments["id"] = json!("1");
+        }
+        let input = format!("{}\n", call(tool, arguments));
+        let reader = Reader::with_connector(
+            fixture.root.join("receipts"),
+            fixture.root.join("trust.json"),
+            ClosedSessionConnector,
+        );
+        let mut output = Vec::new();
+        mcp::serve(reader, true, input.as_bytes(), &mut output)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(
+            *body(&response),
+            json!({"schema":1,"error":{"kind":"connection_lost","message":"closed session"}})
+        );
+    }
 }
 
 #[tokio::test]

@@ -285,6 +285,49 @@ impl Transport for LogsTransport {
     }
 }
 
+struct DisconnectAfterProbe {
+    ssh: SshTransport,
+    container: String,
+    calls: AtomicUsize,
+}
+
+impl Transport for DisconnectAfterProbe {
+    async fn run(
+        &self,
+        script: &str,
+        output: mpsc::Sender<String>,
+        line_limit: usize,
+    ) -> Result<i32, TransportError> {
+        let result = self.ssh.run(script, output, line_limit).await;
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            docker(&["kill", &self.container]);
+        }
+        result
+    }
+
+    async fn reconnect(&self) -> Result<(), TransportError> {
+        panic!("log reads never reconnect")
+    }
+}
+
+#[tokio::test]
+async fn logs_disconnect_between_probe_and_read_is_connection_lost() {
+    let server = Server::start().await;
+    let path = server.logs_app("logs-disconnect");
+    let transport = DisconnectAfterProbe {
+        ssh: server.connect().await,
+        container: server.container.clone(),
+        calls: AtomicUsize::new(0),
+    };
+    let error = logs::snapshot(&transport, &target(&path, &[]), &Request::default())
+        .await
+        .unwrap_err();
+    let record = shipslip::records::versioned_error(shipslip::records::LogsQueryError::from(error));
+    let record = serde_json::to_value(record).unwrap();
+    assert_eq!(record["schema"], 1);
+    assert_eq!(record["error"]["kind"], "connection_lost");
+}
+
 #[tokio::test]
 async fn logs_mixed_baselines_retain_positive_matches_without_claiming_absences_are_new() {
     let server = Server::start().await;
@@ -1626,6 +1669,26 @@ async fn logs_cli_summary_detail_filters_and_exit_codes() {
     };
     assert_eq!(badge("FreshException"), Some("new".into()));
     assert_eq!(badge("OldException"), Some("seen".into()));
+
+    server.keep_logs(&path, &[]);
+    let empty = run_cli(&["logs", "staging", "--json"]);
+    assert!(empty.status.success());
+    assert!(empty.stderr.is_empty());
+    let empty: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty["channels"], serde_json::json!([]));
+    assert_eq!(empty["groups"], serde_json::json!([]));
+    assert!(!empty["warnings"].as_array().unwrap().is_empty());
+
+    server.exec(&format!("touch {path}/storage/logs/laravel.log"), "");
+    let empty_file = run_cli(&["logs", "staging", "--json"]);
+    assert!(empty_file.status.success());
+    let empty_file: serde_json::Value = serde_json::from_slice(&empty_file.stdout).unwrap();
+    assert_eq!(empty_file["channels"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        empty_file["channels"][0]["files"],
+        serde_json::json!(["storage/logs/laravel.log"])
+    );
+    assert_eq!(empty_file["channels"][0]["format"]["kind"], "empty");
 }
 
 #[cfg(unix)]

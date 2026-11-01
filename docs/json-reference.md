@@ -61,6 +61,9 @@ is `recognized`, `partial` with `percent`, `unrecognized`, `empty`, or
 Unrecognized samples have `channel`, `file`, `text`, `clipped`, and `bytes`.
 Warnings are unstructured server text.
 
+A successful read that finds no log files has `channels: []`, `groups: []`,
+and a warning. The text command can still show configured-but-missing sources.
+
 CLI JSON never clips text for display; `--full` has no effect with `--json`.
 `--json` rejects `--raw`, `--channels`, and `--md`. It still honors log-read
 budgets such as `--max-bytes`; `truncated` and coverage report reader limits.
@@ -98,10 +101,14 @@ approval gives `not_approved` before any SSH connection. An approval permits
 configured paths outside `storage/logs`, as in the CLI.
 
 Bad `since` syntax and windows older than 30 days both give `invalid_input`
-before SSH connects. MCP returns them as `isError: true` tool results, not
+before SSH connects. Calendar dates are checked strictly, including leap years.
+MCP returns them as `isError: true` tool results, not
 JSON-RPC errors. Absolute dates are checked against this Mac's clock using
 the environment's log timezone (UTC if unset); the server probe also checks
 the window against the server's clock after connecting.
+
+An initial SSH refusal is `ssh_refused`. A connection lost during a snapshot,
+including between the probe and the data read, is `connection_lost`.
 
 `status`, `receipts`, and `receipt` return exactly the CLI JSON, without
 clipping or added fields. Only `logs` and `log_group` accept `max_text_bytes`:

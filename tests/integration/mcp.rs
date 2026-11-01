@@ -295,6 +295,24 @@ async fn mcp_tools_change_no_remote_app_git_log_or_local_record_files() {
     // A failed read must not terminate the MCP server or poison local tools.
     let status = session.call("status", json!({})).await;
     assert_eq!(status["isError"], false, "{status}");
+    assert_eq!(server.exec(inspect, ""), remote_before);
+    assert_eq!(local_records(), local_before);
+
+    server.keep_logs(&path, &[]);
+    let remote_before = server.exec(inspect, "");
+    let empty = session
+        .call(
+            "logs",
+            json!({"checkout":config.repo_root(),"environment":"staging"}),
+        )
+        .await;
+    assert_eq!(empty["isError"], false, "{empty}");
+    assert_eq!(empty["structuredContent"]["channels"], json!([]));
+    assert_eq!(empty["structuredContent"]["groups"], json!([]));
+    assert!(!empty["structuredContent"]["warnings"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     session.finish().await;
     assert_eq!(server.exec(inspect, ""), remote_before);
     assert_eq!(local_records(), local_before);

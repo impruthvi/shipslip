@@ -201,15 +201,27 @@ impl Since {
 }
 
 fn is_date(value: &str) -> bool {
-    let b = value.as_bytes();
-    b.len() == 10
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && value
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !value
             .char_indices()
-            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
-        && (1..=12).contains(&value[5..7].parse::<u32>().unwrap_or(0))
-        && (1..=31).contains(&value[8..10].parse::<u32>().unwrap_or(0))
+            .all(|(index, character)| index == 4 || index == 7 || character.is_ascii_digit())
+    {
+        return false;
+    }
+    let year = value[..4].parse::<u32>().unwrap_or(0);
+    let month = value[5..7].parse::<u32>().unwrap_or(0);
+    let day = value[8..10].parse::<u32>().unwrap_or(0);
+    let days = match month {
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => return false,
+    };
+    year != 0 && (1..=days).contains(&day)
 }
 
 fn is_clock(value: &str) -> bool {
@@ -2221,6 +2233,9 @@ mod tests {
             Since::parse("2026-10-01 14:00"),
             Ok(Since::At("2026-10-01 14:00".into()))
         );
+        for valid in ["2000-02-29", "2096-02-29 14:00", "2100-02-28"] {
+            assert_eq!(Since::parse(valid), Ok(Since::At(valid.into())));
+        }
         for bad in [
             "",
             "0h",
@@ -2229,6 +2244,10 @@ mod tests {
             "6x",
             "31d",
             "2026-13-01",
+            "0000-01-01",
+            "2099-11-31",
+            "2099-02-29",
+            "2100-02-29 14:00",
             "2026-10-01 24:00",
             "2026-10-01T14:00",
             "2026-10-01 14:00:00",

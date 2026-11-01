@@ -18,6 +18,7 @@ pub struct LogSnapshot {
     pub environment: Untrusted,
     pub window: LogWindow,
     pub filter: LogFilter,
+    #[serde(serialize_with = "serialize_channels")]
     pub channels: Vec<LogChannel>,
     pub unrecognized_samples: Vec<LogSample>,
     pub warnings: Vec<Untrusted>,
@@ -28,6 +29,21 @@ pub struct LogSnapshot {
     /// Off only when grouping skipped the comparison; the text says so.
     #[serde(skip)]
     pub baseline_enabled: bool,
+}
+
+fn serialize_channels<S: serde::Serializer>(
+    channels: &[LogChannel],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let channels = if channels
+        .iter()
+        .all(|channel| channel.files.is_empty() && channel.omitted_files == 0)
+    {
+        &[]
+    } else {
+        channels
+    };
+    channels.serialize(serializer)
 }
 
 #[derive(Debug, Serialize)]
@@ -399,7 +415,11 @@ impl From<TransportError> for LogsQueryError {
 impl From<logs::LogsError> for LogsQueryError {
     fn from(error: logs::LogsError) -> Self {
         match error {
-            logs::LogsError::Transport(error) => error.into(),
+            logs::LogsError::Transport(
+                TransportError::Connect(message) | TransportError::ConnectionLost(message),
+            ) => Self::ConnectionLost {
+                message: message.into(),
+            },
             logs::LogsError::ZoneMissing(zone) => Self::ZoneMissing { zone: zone.into() },
             logs::LogsError::Outside { path, env } => Self::LogPathNotTrusted {
                 path: path.into(),
