@@ -216,6 +216,54 @@ async fn initialize_ping_and_eof_work_without_per_request_metadata() {
 }
 
 #[tokio::test]
+async fn listed_log_tools_share_the_text_budget_schema_and_dispatch() {
+    let fixture = Fixture::new();
+    fixture.approve();
+    let response = fixture
+        .exchange(
+            vec![
+                json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2026-07-28","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}),
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+            ],
+            "",
+            None,
+            true,
+        )
+        .await;
+    let tools = response[1]["result"]["tools"].as_array().unwrap();
+    assert_eq!(
+        tools
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["status", "receipts", "receipt", "logs", "log_group"]
+    );
+    for tool in &tools[3..] {
+        assert_eq!(
+            tool["inputSchema"]["properties"]["max_text_bytes"],
+            json!({"type":"integer","minimum":1024,"maximum":262144,"default":16384})
+        );
+        for budget in [1024, 262144] {
+            let mut arguments = fixture.arguments();
+            arguments["max_text_bytes"] = json!(budget);
+            if tool["name"] == "log_group" {
+                arguments["id"] = json!("1");
+            }
+            let response = fixture
+                .exchange(
+                    vec![call(tool["name"].as_str().unwrap(), arguments)],
+                    "[2026-10-01 00:01:00] production.ERROR: RuntimeException: boom\n",
+                    None,
+                    true,
+                )
+                .await;
+            assert_eq!(response[0]["result"]["isError"], false);
+        }
+    }
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
 async fn unlisted_unknown_and_unapproved_targets_never_connect() {
     let fixture = Fixture::new();
     let response = fixture
@@ -287,6 +335,27 @@ async fn an_unapproved_environment_in_a_listed_checkout_never_connects() {
         body(&response[0])["error"],
         json!({"kind":"not_approved","environment":"production"})
     );
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn an_unresolvable_checkout_has_its_own_error_and_never_connects() {
+    let fixture = Fixture::new();
+    for tool in ["logs", "log_group"] {
+        let mut arguments = fixture.arguments();
+        arguments["checkout"] = json!(fixture.root.join("missing"));
+        if tool == "log_group" {
+            arguments["id"] = json!("1");
+        }
+        let response = fixture
+            .exchange(vec![call(tool, arguments)], "", None, true)
+            .await;
+        assert_eq!(response[0]["result"]["isError"], true);
+        assert_eq!(
+            body(&response[0])["error"],
+            json!({"kind":"invalid_input","message":"checkout path cannot be resolved"})
+        );
+    }
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
 }
 

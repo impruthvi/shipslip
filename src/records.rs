@@ -24,7 +24,7 @@ pub use receipt::{
     receipt, receipt_at, ErrorGroup, ErrorVariant, ReceiptQueryError, ReceiptRecord, Smoke, Target,
     Watch,
 };
-pub use receipts::{receipts, ReceiptList, ReceiptListRow, ReceiptSummary};
+pub use receipts::{receipts, ReceiptList, ReceiptListRow, ReceiptSummary, DEFAULT_RECEIPTS_LIMIT};
 pub use status::{
     status, AttemptSummary, CellRef, CodeState, EnvCell, Evidence, Mark, NewerElsewhere,
     NotKnownReason, Problem, ProblemKind, RepoRow, StaleHint, Status,

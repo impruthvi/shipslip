@@ -10,7 +10,7 @@ use shipslip::receipt::{
 };
 use shipslip::records::{
     self, failed_step_options, NextStep, Part, ReceiptList, ReceiptListRow, ReceiptQueryError,
-    ReceiptRecord, StepKind, StepRow,
+    ReceiptRecord, StepKind, StepRow, DEFAULT_RECEIPTS_LIMIT,
 };
 use shipslip::{DeployOutcome, WatchStatus};
 
@@ -20,9 +20,6 @@ use super::invalid_input;
 mod words;
 use words::{describe_watch, smoke_text, step_label};
 pub(super) use words::{flag_text, headline};
-
-/// Receipts listed unless `--all` is given.
-const LIST_LIMIT: usize = 20;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Args {
@@ -110,7 +107,7 @@ pub(super) fn run(
                 root,
                 project,
                 env.as_deref(),
-                (!all).then_some(LIST_LIMIT),
+                (!all).then_some(DEFAULT_RECEIPTS_LIMIT),
                 None,
             ) {
                 Ok(listing) => listing,
