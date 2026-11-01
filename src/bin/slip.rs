@@ -39,6 +39,8 @@ const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 mod github_token;
 use github_token::{LocalTokens, TokenSource};
 
+#[path = "slip/mcp.rs"]
+mod mcp;
 #[path = "slip/new.rs"]
 mod new;
 #[path = "slip/publish.rs"]
@@ -164,6 +166,12 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         Action::Doctor(args) => return setup::run(args).await,
         Action::Setup(args) => return setup::run_setup(args).await,
         Action::Status(args) => return status::run(args),
+        Action::Mcp => {
+            let reader =
+                shipslip::read_only::Reader::new(default_receipts_root()?, default_trust_path()?);
+            mcp::run(reader).await?;
+            return Ok(ExitCode::SUCCESS);
+        }
         action => action,
     };
     let config = LoadedConfig::load(&std::env::current_dir()?, command.config.as_deref())?;
@@ -188,6 +196,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         | Action::Publish(_)
         | Action::Doctor(_)
         | Action::Setup(_)
+        | Action::Mcp
         | Action::Status(_) => {
             unreachable!("local commands run before the config is loaded")
         }
@@ -708,6 +717,15 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
         .get(index)
         .ok_or_else(|| invalid_input("missing command"))?;
     index += 1;
+    if action == "mcp" {
+        if index != args.len() || args.first().is_some_and(|arg| arg == "--config") {
+            return Err(invalid_input("mcp takes no arguments; omit --config").into());
+        }
+        return Ok(Some(Command {
+            config: None,
+            action: Action::Mcp,
+        }));
+    }
     if action == "init" {
         if index != args.len() {
             return Err(invalid_input("init takes no arguments").into());
@@ -1090,6 +1108,7 @@ fn print_help() {
          \x20 slip [--config FILE] receipts [ENV] [--all] [--json]\n\
          \x20 slip [--config FILE] receipts show ID [--json | --md [--with-details]]\n\
          \x20 slip status [--json | --compare ENV ENV]\n\
+         \x20 slip mcp\n\
          \x20 slip --version\n\n\
          Commands:\n\
          \x20 deploy ENV         Fast-forward the checkout and run all recipe steps\n\
@@ -1106,7 +1125,8 @@ fn print_help() {
          \x20 up ENV             Run `php artisan up` under a new deploy lock\n\
          \x20 logs ENV           Group recent log errors; read-only\n\
          \x20 receipts [ENV]     List saved deploy receipts, newest first; read-only\n\
-         \x20 status             Last recorded code of every app and env; read-only\n\n\
+         \x20 status             Last recorded code of every app and env; read-only\n\
+         \x20 mcp                Serve local records over MCP stdio; read-only\n\n\
          New project options:\n\
          \x20 --starter-kit none|react|vue|svelte|livewire\n\
          \x20 --auth laravel|none  --database sqlite|mysql|mariadb|pgsql|sqlsrv\n\
@@ -1780,6 +1800,7 @@ enum Action {
     },
     Receipts(receipts::Args),
     Status(status::Args),
+    Mcp,
 }
 
 #[cfg(test)]

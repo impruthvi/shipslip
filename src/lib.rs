@@ -25,6 +25,7 @@ pub mod observation;
 mod preflight;
 mod private_file;
 pub mod publish;
+pub mod read_only;
 pub mod receipt;
 pub mod records;
 mod runner;
