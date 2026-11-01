@@ -200,30 +200,6 @@ impl From<&SmokeResult> for Smoke {
     }
 }
 
-impl Smoke {
-    pub fn text(&self) -> String {
-        match self {
-            Self::NotConfigured => "not configured".into(),
-            Self::Skipped => "skipped".into(),
-            Self::Passed { status, latency_ms } => {
-                format!("passed, HTTP {status} in {latency_ms} ms")
-            }
-            Self::Failed {
-                status: Some(status),
-                reason,
-            } if reason.raw() == format!("HTTP {status}") => format!("failed, HTTP {status}"),
-            Self::Failed {
-                status: Some(status),
-                reason,
-            } => format!("failed, HTTP {status}: {}", reason.field()),
-            Self::Failed {
-                status: None,
-                reason,
-            } => format!("failed: {}", reason.field()),
-        }
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub struct Watch {
     pub status: WatchStatus,

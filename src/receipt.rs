@@ -19,13 +19,12 @@ mod history;
 pub(crate) mod markdown;
 mod overview;
 
-pub use history::{describe_smoke, describe_watch, find, list, Found, Listed, Listing, MIN_ID_LEN};
+pub use history::{find, list, Found, Listed, Listing, MIN_ID_LEN};
 pub use markdown::markdown;
 pub use overview::{
-    age, code_text, compare_envs, compare_envs_with, comparison_text, newer_elsewhere_text,
-    overview, sentence, short_id, short_sha, stale_hint_text, target_moved_text, AttemptSummary,
-    CellRef, CodeState, CodeText, EnvCell, EnvComparison, Evidence, Mark, NewerElsewhere,
-    NotKnownReason, Overview, Problem, ProblemKind, Qualifier, RepoRow, StaleHint, WALK_LIMIT,
+    compare_envs, compare_envs_with, comparison_text, overview, AttemptSummary, CellRef, CodeState,
+    EnvCell, EnvComparison, Evidence, Mark, NewerElsewhere, NotKnownReason, Overview, Problem,
+    ProblemKind, Qualifier, RepoRow, StaleHint, WALK_LIMIT,
 };
 
 /// Deploy receipts keep version 1 so older releases still read them.

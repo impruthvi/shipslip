@@ -6,8 +6,7 @@ use std::process::ExitCode;
 use shipslip::config::LoadedConfig;
 use shipslip::logs::{escape, escape_field};
 use shipslip::receipt::{
-    self, describe_watch, format_duration, strip_color, timing_suffix, Listed, Receipt,
-    ReceiptKind, ReceiptStatus,
+    self, format_duration, strip_color, timing_suffix, Listed, Receipt, ReceiptKind, ReceiptStatus,
 };
 use shipslip::records::{
     self, failed_step_options, NextStep, Part, ReceiptList, ReceiptListRow, ReceiptQueryError,
@@ -16,6 +15,11 @@ use shipslip::records::{
 use shipslip::{DeployOutcome, WatchStatus};
 
 use super::invalid_input;
+
+#[path = "receipt_words.rs"]
+mod words;
+use words::{describe_watch, smoke_text, step_label};
+pub(super) use words::{flag_text, headline};
 
 /// Receipts listed unless `--all` is given.
 const LIST_LIMIT: usize = 20;
@@ -200,10 +204,10 @@ fn render_list(project: &str, env: Option<&str>, listing: &ReceiptList) -> Strin
     for listed in &listing.rows {
         rows.push(match listed {
             ReceiptListRow::Receipt { id, receipt, .. } => {
-                let mut outcome = receipt.outcome.headline();
+                let mut outcome = headline(receipt.outcome);
                 for flag in &receipt.flags {
                     outcome.push_str("  ");
-                    outcome.push_str(&flag.text());
+                    outcome.push_str(&flag_text(*flag));
                 }
                 [
                     id.field(),
@@ -293,11 +297,11 @@ fn render_show(receipt: &ReceiptRecord) -> String {
     let _ = writeln!(out, "Receipt {}\n", escape_field(receipt.run_id.raw()));
     let outcome = match receipt.summary.as_ref() {
         Some(summary) if !badge.outcome.unfinished => summary.field(),
-        _ => escape_field(&badge.outcome.headline()),
+        _ => escape_field(&headline(badge.outcome)),
     };
     field(&mut out, "Outcome:", &outcome);
     if !badge.flags.is_empty() {
-        let flags: Vec<String> = badge.flags.iter().map(|flag| flag.text()).collect();
+        let flags: Vec<String> = badge.flags.iter().map(|flag| flag_text(*flag)).collect();
         field(&mut out, "Flags:", &flags.join(", "));
     }
     field(
@@ -447,7 +451,7 @@ fn render_show(receipt: &ReceiptRecord) -> String {
     }
 
     if let Some(smoke) = &receipt.smoke {
-        let text = smoke.text();
+        let text = smoke_text(smoke);
         let _ = writeln!(out, "\nSmoke check: {text}");
     }
 
@@ -516,7 +520,7 @@ pub(super) fn up_to_date_hint(root: &Path, project: &str, env: &str) -> Option<S
         {
             lines.push(format!(
                 "The last run here ({id}) did not succeed: {}. See `slip receipts show {id}`.",
-                deploy.badge().outcome.headline()
+                headline(deploy.badge().outcome)
             ));
             if let Some(DeployOutcome::FailedAtStep { step, .. }) = &deploy.outcome {
                 if *step > 0 {
@@ -540,7 +544,7 @@ pub(super) fn up_to_date_hint(root: &Path, project: &str, env: &str) -> Option<S
     for (id, up) in up_recovery.into_iter().flatten() {
         lines.push(format!(
             "The last `slip up` here ({id}) did not succeed: {}. See `slip receipts show {id}`.",
-            up.badge().outcome.headline()
+            headline(up.badge().outcome)
         ));
         lines.extend(up.next_steps().steps.iter().map(next_step_text));
     }
@@ -562,7 +566,7 @@ fn step_line(out: &mut String, step: &StepRow) {
     let _ = writeln!(
         out,
         "  {:<12}{:>4}  {}{}{}",
-        step.status.label(),
+        step_label(step.status),
         index,
         command,
         step.exit_code

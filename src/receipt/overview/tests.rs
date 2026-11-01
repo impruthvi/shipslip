@@ -473,7 +473,6 @@ fn an_approved_target_change_warns_until_a_run_uses_it() {
     let overview = fixture.overview();
     let staging = cell(&overview, "/work/app", "staging");
     assert_eq!(staging.target_moved(), None);
-    assert_eq!(target_moved_text(staging), None);
     assert!(!staging.needs_attention());
 
     fixture.approve_at("/work/app", "staging", "web1", "/srv/app-staging");
@@ -485,10 +484,6 @@ fn an_approved_target_change_warns_until_a_run_uses_it() {
         Some("web1:/srv/app")
     );
     assert_eq!(staging.target_moved(), Some("web1:/srv/app-staging"));
-    assert_eq!(
-        target_moved_text(staging).as_deref(),
-        Some("approved config now deploys to web1:/srv/app-staging, not this target")
-    );
     assert!(staging.needs_attention());
 
     let mut moved = run(2, "staging");
@@ -509,15 +504,6 @@ fn a_target_change_without_receipts_or_approval_is_not_a_warning() {
         None
     );
     assert_eq!(cell(&overview, "/work/app", "staging").target_moved(), None);
-}
-
-#[test]
-fn the_target_moved_warning_is_escaped() {
-    let mut cell = env_cell("staging", CodeState::NeverDeployed);
-    cell.target = Some("web1:/srv/app".into());
-    cell.approved_target = Some("web\u{202e}1:/srv\n".into());
-    let text = target_moved_text(&cell).unwrap();
-    assert!(!text.contains('\u{202e}') && !text.contains('\n'));
 }
 
 #[test]
@@ -933,32 +919,8 @@ fn every_code_state() -> Vec<EnvCell> {
 }
 
 #[test]
-fn the_status_sentence_is_built_from_the_cell_parts() {
-    let now = 2500 + 3 * 60_000;
-    let sentences: Vec<String> = every_code_state()
-        .iter()
-        .map(|cell| sentence(cell, now))
-        .collect();
-    assert_eq!(
-        sentences,
-        [
-            "code at 222222222222 (recorded 3m ago)",
-            "code at 222222222222, deploy incomplete, checked out at start (recorded 3m ago)",
-            "observed 222222222222 after run 00000002 failed at step 2, expected 111111111111, tree dirty (3m ago)",
-            "server code not known after run 00000003 (fast-forward failed)",
-            "server code not known (its receipts could not be read)",
-            "no deploy receipt on this Mac",
-            "approved before, no deploy receipt on this Mac",
-            "no code change in the last run",
-            "no code change in the last 3 runs",
-            "target changed in run 00000004; no code recorded for web2:/srv/app",
-        ]
-    );
-
-    let marks: Vec<Mark> = every_code_state()
-        .iter()
-        .map(|cell| code_text(cell).mark)
-        .collect();
+fn evidence_marks_describe_the_recorded_code() {
+    let marks: Vec<Mark> = every_code_state().iter().map(|cell| cell.mark()).collect();
     assert_eq!(
         marks,
         [
@@ -974,61 +936,6 @@ fn the_status_sentence_is_built_from_the_cell_parts() {
             Mark::NoCode,
         ]
     );
-
-    // A front-end laying out the parts shows every fact the CLI prints.
-    for (cell, line) in every_code_state().iter().zip(&sentences) {
-        let text = code_text(cell);
-        assert!(line.contains(&text.words), "{line}");
-        for fact in &text.evidence {
-            assert!(line.contains(fact.as_str()), "{fact} not in {line}");
-        }
-        if let Some(sha) = &text.sha {
-            assert!(line.contains(short_sha(sha, 12)), "{line}");
-        }
-    }
-}
-
-#[test]
-fn cell_words_never_claim_what_is_live_on_the_server() {
-    for cell in every_code_state() {
-        let text = code_text(&cell);
-        let all = [vec![sentence(&cell, 0), text.words], text.evidence].concat();
-        for words in all {
-            let words = words.to_lowercase();
-            for claim in ["deployed", "is running", "live", "currently", "now on"] {
-                assert!(!words.contains(claim), "{words:?} claims {claim:?}");
-            }
-        }
-    }
-}
-
-#[test]
-fn cell_parts_are_escaped() {
-    let cell = env_cell(
-        "a",
-        CodeState::TargetChanged {
-            run_id: "00000004-0".into(),
-            target: "web\u{202e}2:/srv\n".into(),
-        },
-    );
-    let text = code_text(&cell);
-    assert_eq!(text.words, "no code recorded for web\\u{202e}2:/srv\\x0a");
-    assert!(!sentence(&cell, 0).contains('\u{202e}'));
-}
-
-#[test]
-fn age_uses_the_largest_whole_unit() {
-    let minute = 60_000;
-    let now = 10_000 * minute;
-    let ago = |minutes: u128| age(now, now - minutes * minute);
-    assert_eq!(age(now, now - 59_999), "just now");
-    assert_eq!(ago(1), "1m ago");
-    assert_eq!(ago(59), "59m ago");
-    assert_eq!(ago(60), "1h ago");
-    assert_eq!(ago(47 * 60 + 59), "47h ago");
-    assert_eq!(ago(48 * 60), "2d ago");
-    // A clock that went backwards is not a negative age.
-    assert_eq!(age(now, now + minute), "just now");
 }
 
 #[test]

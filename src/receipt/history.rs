@@ -8,8 +8,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{io_error, read_receipt, safe_component, Receipt, ReceiptError};
-use crate::logs::escape_field;
-use crate::{DeployOutcome, SmokeResult, WatchStatus};
+use crate::DeployOutcome;
 
 /// Shortest run ID prefix shown to users.
 pub const MIN_ID_LEN: usize = 8;
@@ -248,39 +247,5 @@ impl Receipt {
                     | DeployOutcome::Unknown { .. }
             )
         )
-    }
-}
-
-/// The smoke check's result in words, with server text escaped.
-pub fn describe_smoke(smoke: &SmokeResult) -> String {
-    match smoke {
-        SmokeResult::NotConfigured => "not configured".into(),
-        SmokeResult::Skipped => "skipped".into(),
-        SmokeResult::Passed { status, latency_ms } => {
-            format!("passed, HTTP {status} in {latency_ms} ms")
-        }
-        SmokeResult::Failed {
-            status: Some(status),
-            reason,
-        } if *reason == format!("HTTP {status}") => format!("failed, HTTP {status}"),
-        SmokeResult::Failed {
-            status: Some(status),
-            reason,
-        } => format!("failed, HTTP {status}: {}", escape_field(reason)),
-        SmokeResult::Failed {
-            status: None,
-            reason,
-        } => format!("failed: {}", escape_field(reason)),
-    }
-}
-
-pub fn describe_watch(status: WatchStatus) -> &'static str {
-    match status {
-        WatchStatus::Complete => "complete",
-        WatchStatus::Partial => "partial",
-        WatchStatus::Unavailable => "unavailable",
-        WatchStatus::Cancelled => "cancelled",
-        WatchStatus::NotRun => "not run",
-        WatchStatus::NoLogSeen => "no log file seen",
     }
 }

@@ -663,3 +663,144 @@ fn standalone_up_shows_its_saved_output_once() {
     assert!(!text.contains("Maintenance off:"), "{text}");
     assert_eq!(text.matches("✓ ok").count(), 0, "{text}");
 }
+
+#[test]
+fn smoke_results_in_words() {
+    use shipslip::SmokeResult;
+    let failed = |status, reason: &str| SmokeResult::Failed {
+        status,
+        reason: reason.into(),
+    };
+    let cases = [
+        (SmokeResult::NotConfigured, "not configured"),
+        (SmokeResult::Skipped, "skipped"),
+        (
+            SmokeResult::Passed {
+                status: 200,
+                latency_ms: 42,
+            },
+            "passed, HTTP 200 in 42 ms",
+        ),
+        (failed(Some(500), "HTTP 500"), "failed, HTTP 500"),
+        (
+            failed(Some(502), "bad gateway"),
+            "failed, HTTP 502: bad gateway",
+        ),
+        (
+            failed(None, "timed out\u{1b}[2J"),
+            "failed: timed out\\x1b[2J",
+        ),
+    ];
+    for (smoke, words) in cases {
+        assert_eq!(smoke_text(&shipslip::records::Smoke::from(&smoke)), words);
+    }
+}
+
+#[test]
+fn receipt_headlines_preserve_each_outcome_and_unfinished_state() {
+    use shipslip::records::{Outcome, OutcomeKind};
+    let cases = [
+        (OutcomeKind::Succeeded, "Succeeded"),
+        (
+            OutcomeKind::FailedAtStep {
+                step: 2,
+                partial_update: true,
+            },
+            "Failed at step 2 (partial update)",
+        ),
+        (
+            OutcomeKind::FailedAtStep {
+                step: 2,
+                partial_update: false,
+            },
+            "Failed at step 2",
+        ),
+        (
+            OutcomeKind::StoppedAfterStep { step: 2 },
+            "Stopped after step 2",
+        ),
+        (
+            OutcomeKind::StoppedInMaintenance,
+            "Stopped in maintenance mode, no steps ran",
+        ),
+        (OutcomeKind::Unknown { step: 2 }, "Unknown at step 2"),
+        (
+            OutcomeKind::CancelledBeforeChanges,
+            "Cancelled before changes",
+        ),
+        (OutcomeKind::AbortedBeforeChanges, "Aborted before changes"),
+    ];
+    for (kind, expected) in cases {
+        assert_eq!(
+            headline(Outcome {
+                kind,
+                unfinished: false
+            }),
+            expected
+        );
+        assert_eq!(
+            headline(Outcome {
+                kind,
+                unfinished: true
+            }),
+            format!("Unfinished (last recorded: {expected})")
+        );
+    }
+    assert_eq!(
+        headline(Outcome {
+            kind: OutcomeKind::NotRecorded,
+            unfinished: false
+        }),
+        "Finished without an outcome"
+    );
+    assert_eq!(
+        headline(Outcome {
+            kind: OutcomeKind::NotRecorded,
+            unfinished: true
+        }),
+        "Unfinished"
+    );
+}
+
+#[test]
+fn receipt_flags_preserve_the_terminal_symbols_and_counts() {
+    use shipslip::records::Flag;
+    for (flag, expected) in [
+        (Flag::NewErrors { groups: 1 }, "⚠ 1 new error group"),
+        (Flag::NewErrors { groups: 3 }, "⚠ 3 new error groups"),
+        (Flag::LogNotFullyObserved, "ⓘ log not fully observed"),
+        (Flag::LogNotRecorded, "ⓘ log not recorded"),
+        (Flag::SmokeFailed { status: Some(500) }, "⚠ smoke 500"),
+        (Flag::SmokeFailed { status: None }, "⚠ smoke failed"),
+        (Flag::SmokeNotRecorded, "ⓘ smoke not recorded"),
+        (Flag::AppLeftDown, "⛔ app may be in maintenance mode"),
+    ] {
+        assert_eq!(flag_text(flag), expected);
+    }
+}
+
+#[test]
+fn receipt_step_and_watch_labels_preserve_every_state() {
+    use shipslip::records::StepState;
+    for (state, expected) in [
+        (StepState::Ok, "✓ ok"),
+        (StepState::Failed, "✗ failed"),
+        (StepState::Unknown, "? unknown"),
+        (StepState::NotStarted, "– not run"),
+        (StepState::Pending, "– not run"),
+        (StepState::Running, "? running when saved"),
+        (StepState::Skipped, "↷ skipped"),
+    ] {
+        assert_eq!(step_label(state), expected);
+    }
+    for (state, expected) in [
+        (WatchStatus::Complete, "complete"),
+        (WatchStatus::Partial, "partial"),
+        (WatchStatus::Unavailable, "unavailable"),
+        (WatchStatus::Cancelled, "cancelled"),
+        (WatchStatus::NotRun, "not run"),
+        (WatchStatus::NoLogSeen, "no log file seen"),
+    ] {
+        assert_eq!(describe_watch(state), expected);
+    }
+}
