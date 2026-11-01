@@ -76,7 +76,9 @@ per-request `_meta` with `io.modelcontextprotocol/protocolVersion` and
 `io.modelcontextprotocol/clientCapabilities`. `initialize` is also accepted:
 pass `protocolVersion`, `capabilities`, and `clientInfo` (`name`, `version`);
 the response names the pinned version. After this handshake, metadata is
-optional. `notifications/initialized` and cancellation notifications produce
+optional and may carry request fields such as `progressToken` without
+repeating protocol negotiation. Explicit protocol versions are still checked.
+`notifications/initialized` and cancellation notifications produce
 no response. `ping`, `tools/list`, and `tools/call` are supported. Protocol
 mistakes return JSON-RPC errors. Shipslip failures return `isError: true`
 with the schema-1 error record. Results carry exactly the record as both

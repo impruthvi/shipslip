@@ -97,6 +97,9 @@ async fn dispatch<C: Connector>(
     method: &str,
     params: &Value,
 ) -> Result<Value, Value> {
+    if params.get("_meta").is_some_and(|meta| !meta.is_object()) {
+        return Err(invalid_params());
+    }
     if method == "initialize" {
         let object = params.as_object().ok_or_else(invalid_params)?;
         only_keys(
@@ -117,14 +120,21 @@ async fn dispatch<C: Connector>(
             "instructions":SERVER_TEXT_RULE}),
         );
     }
-    if !*initialized || params.get("_meta").is_some() {
-        let meta = &params["_meta"];
+    let meta = &params["_meta"];
+    let capabilities = meta.get("io.modelcontextprotocol/clientCapabilities");
+    if capabilities.is_some_and(|value| !value.is_object())
+        || (!*initialized && capabilities.is_none())
+    {
+        return Err(invalid_params());
+    }
+    if !*initialized
+        || meta
+            .get("io.modelcontextprotocol/protocolVersion")
+            .is_some()
+    {
         let version = meta["io.modelcontextprotocol/protocolVersion"]
             .as_str()
             .ok_or_else(invalid_params)?;
-        if !meta["io.modelcontextprotocol/clientCapabilities"].is_object() {
-            return Err(invalid_params());
-        }
         if version != PROTOCOL_VERSION {
             let mut error = rpc_error(-32022, "Unsupported protocol version");
             error["data"] = json!({"supported":[PROTOCOL_VERSION], "requested":version});
