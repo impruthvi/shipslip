@@ -256,6 +256,8 @@ async fn mcp_tools_change_no_remote_app_git_log_or_local_record_files() {
         detail["structuredContent"]["group"]["full_id"],
         groups[0]["full_id"]
     );
+    assert!(detail["structuredContent"].get("groups").is_none());
+    assert!(detail["structuredContent"].get("overflow_groups").is_none());
     assert_eq!(server.exec(inspect, ""), remote_before);
     assert_eq!(local_records(), local_before);
 

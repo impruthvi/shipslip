@@ -39,7 +39,7 @@ means there is no usable comparison; it says nothing about a run's outcome.
 `filter` records the applied minimum `level` and nullable `text` filter.
 
 A detail has the same snapshot metadata, a `group`, `latest`, and
-`same_request`. The summary's `groups` is empty in a detail; use `group`.
+`same_request`. It has no `groups` or `overflow_groups`; use `group`.
 `latest` includes nullable `time`, `level`, `channel`, `file`, full `text`,
 `truncated` (cut at the log reader's entry limit), `frames`, `clipped`, and
 `bytes`. Frames are best-effort numbered frames only: `index`, nullable
@@ -80,9 +80,11 @@ the response names the pinned version. After this handshake, metadata is
 optional and may carry request fields such as `progressToken` without
 repeating protocol negotiation. Explicit protocol versions are still checked.
 `notifications/initialized` and cancellation notifications produce
-no response. `ping`, `tools/list`, and `tools/call` are supported. Protocol
-mistakes return JSON-RPC errors. Shipslip failures return `isError: true`
-with the schema-1 error record. Results carry exactly the record as both
+no response. `ping`, `tools/list`, and `tools/call` are supported.
+`tools/list` results include `ttlMs: 0` (do not cache) and
+`cacheScope: "private"`, because the available tools depend on this Mac's
+server invocation. Protocol mistakes return JSON-RPC errors. Shipslip failures
+return `isError: true` with the schema-1 error record. Results carry exactly the record as both
 `structuredContent` and one JSON text content item.
 
 Tools: `status` (no arguments); `receipts` (`project`, optional `environment`
@@ -94,6 +96,12 @@ checkout root already listed in the release map is eligible. Only its root
 Unknown checkouts/environments give `invalid_input`; missing or changed
 approval gives `not_approved` before any SSH connection. An approval permits
 configured paths outside `storage/logs`, as in the CLI.
+
+Bad `since` syntax and windows older than 30 days both give `invalid_input`
+before SSH connects. MCP returns them as `isError: true` tool results, not
+JSON-RPC errors. Absolute dates are checked against this Mac's clock using
+the environment's log timezone (UTC if unset); the server probe also checks
+the window against the server's clock after connecting.
 
 `status`, `receipts`, and `receipt` return exactly the CLI JSON, without
 clipping or added fields. Only `logs` and `log_group` accept `max_text_bytes`:
@@ -176,5 +184,5 @@ before the command reads any record (a bad flag, a missing config) uses
 externally tagged objects (`{"text": ...}` or `{"command": [...]}`). These
 discriminators are fixed; the text and command arguments remain server text.
 MCP framing also has fixed protocol fields (`jsonrpc: "2.0"`, content
-`type: "text"`, `resultType: "complete"`, and the protocol/tool names described
-above); they are not content from a log or receipt.
+`type: "text"`, `resultType: "complete"`, `cacheScope: "private"`, and the
+protocol/tool names described above); they are not content from a log or receipt.

@@ -141,6 +141,8 @@ async fn detail_json_keeps_long_entry_text_and_its_true_size_without_clipping() 
     assert_eq!(record["latest"]["clipped"], false);
     assert_eq!(record["latest"]["truncated"], false);
     assert_eq!(record["latest"]["bytes"], text.len());
+    assert!(record.get("groups").is_none());
+    assert!(record.get("overflow_groups").is_none());
     assert!(record.get("text_fields").is_none());
     assert!(record.get("clipped_fields").is_none());
     let (summary, code) = logs_json_record(&snapshot, &groups, None, Level::Error, None).unwrap();
@@ -168,7 +170,8 @@ async fn detail_json_finds_a_group_by_row_short_id_or_full_id_and_reports_lookup
         assert_eq!(code, 0, "{query}");
         assert_eq!(record["schema"], 1);
         assert_eq!(record["group"], rows[1]);
-        assert_eq!(record["groups"], json!([]));
+        assert!(record.get("groups").is_none());
+        assert!(record.get("overflow_groups").is_none());
         assert!(record["latest"]["text"]
             .as_str()
             .unwrap()

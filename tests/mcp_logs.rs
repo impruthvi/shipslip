@@ -153,6 +153,51 @@ fn body(response: &Value) -> &Value {
 }
 
 #[tokio::test]
+async fn invalid_since_is_a_tool_error_without_connecting() {
+    let fixture = Fixture::new();
+    fixture.approve();
+    for tool in ["logs", "log_group"] {
+        for since in ["yesterday", "31d", "2000-01-01", "2000-01-01 14:00"] {
+            let mut arguments = fixture.arguments();
+            arguments["since"] = json!(since);
+            if tool == "log_group" {
+                arguments["id"] = json!("1");
+            }
+            let response = fixture
+                .exchange(vec![call(tool, arguments)], "", None, true)
+                .await;
+            assert!(response[0].get("error").is_none(), "{tool}: {since}");
+            assert_eq!(response[0]["result"]["isError"], true, "{tool}: {since}");
+            assert_eq!(body(&response[0])["error"]["kind"], "invalid_input");
+            assert_eq!(fixture.calls.load(Ordering::SeqCst), 0, "{tool}: {since}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn valid_since_windows_still_connect_and_keep_summary_fields() {
+    let fixture = Fixture::new();
+    fixture.approve();
+    let today = std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%d"])
+        .output()
+        .unwrap();
+    assert!(today.status.success());
+    let today = String::from_utf8(today.stdout).unwrap();
+    for since in ["30m", "30d", today.trim()] {
+        let mut arguments = fixture.arguments();
+        arguments["since"] = json!(since);
+        let response = fixture
+            .exchange(vec![call("logs", arguments)], "", None, true)
+            .await;
+        assert_eq!(response[0]["result"]["isError"], false, "{since}");
+        assert_eq!(body(&response[0])["groups"], json!([]));
+        assert_eq!(body(&response[0])["overflow_groups"], 0);
+    }
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
 async fn initialize_ping_and_eof_work_without_per_request_metadata() {
     let fixture = Fixture::new();
     let responses = fixture.exchange(vec![
@@ -166,6 +211,8 @@ async fn initialize_ping_and_eof_work_without_per_request_metadata() {
     assert_eq!(responses[0]["result"]["capabilities"], json!({"tools":{}}));
     assert!(responses[1].get("error").is_none());
     assert_eq!(responses[2]["result"]["tools"].as_array().unwrap().len(), 3);
+    assert_eq!(responses[2]["result"]["ttlMs"], 0);
+    assert_eq!(responses[2]["result"]["cacheScope"], "private");
 }
 
 #[tokio::test]
@@ -652,4 +699,6 @@ async fn log_records_match_the_cli_builders_serialized_json() {
         .exchange(vec![call("log_group", arguments)], text, None, true)
         .await;
     assert_eq!(*body(&response[0]), expected);
+    assert!(body(&response[0]).get("groups").is_none());
+    assert!(body(&response[0]).get("overflow_groups").is_none());
 }

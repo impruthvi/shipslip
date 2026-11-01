@@ -162,7 +162,7 @@ async fn dispatch<C: Connector>(
         }
         "tools/list" => {
             only_keys(params, &["_meta"])?;
-            Ok(json!({"tools":tools(read_logs)}))
+            Ok(json!({"tools":tools(read_logs), "ttlMs":0, "cacheScope":"private"}))
         }
         "tools/call" => call_tool(reader, read_logs, params).await,
         _ => Err(rpc_error(-32601, "Method not found")),
@@ -247,10 +247,18 @@ async fn call_tool<C: Connector>(
                 .unwrap_or(16384);
             let checkout = std::path::Path::new(string_argument(arguments, "checkout")?);
             let environment = string_argument(arguments, "environment")?;
-            let since = optional_string(arguments, "since")?
+            let since = match optional_string(arguments, "since")?
                 .map(Since::parse)
                 .transpose()
-                .map_err(|_| invalid_params())?;
+            {
+                Ok(since) => since,
+                Err(message) => {
+                    return tool_result::<(), _>(
+                        Err(shipslip::read_only::LogsQueryError::invalid(message)),
+                        Some(budget),
+                    );
+                }
+            };
             let level = optional_string(arguments, "level")?
                 .map(|level| Level::parse(level).ok_or_else(invalid_params))
                 .transpose()?;

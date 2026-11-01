@@ -5,8 +5,8 @@ use shipslip::logs::{
 };
 use shipslip::records::{
     markdown_code as code, markdown_fence as fence, markdown_inline as inline, LogBadge,
-    LogChannel, LogChannelKind, LogCoverage, LogEntry, LogFormat, LogGroup, LogsDetail,
-    LogsSummary, SameRequest, Untrusted,
+    LogChannel, LogChannelKind, LogCoverage, LogEntry, LogFormat, LogGroup, LogSnapshot,
+    LogsDetail, LogsSummary, SameRequest, Untrusted,
 };
 
 const DEFAULT_ROWS: usize = 20;
@@ -115,7 +115,7 @@ fn channel_incomplete(channel: &LogChannel) -> bool {
 
 /// Entries in the window may be missing from what was read, so every count
 /// is a lower bound.
-fn coverage_incomplete(summary: &LogsSummary) -> bool {
+fn coverage_incomplete(summary: &LogSnapshot) -> bool {
     summary.channels.is_empty() || summary.channels.iter().any(channel_incomplete)
 }
 
@@ -176,7 +176,7 @@ fn push_wrapped(out: &mut String, prefix: &str, text: &str) {
     out.push('\n');
 }
 
-pub(crate) fn short_path<'a>(summary: &LogsSummary, path: &'a str) -> &'a str {
+pub(crate) fn short_path<'a>(summary: &LogSnapshot, path: &'a str) -> &'a str {
     // Log paths may be relative. Only use a root when an absolute storage path
     // identifies it; an empty hint must never strip a leading slash.
     if let Some(root) = summary
@@ -201,7 +201,7 @@ pub(crate) fn short_path<'a>(summary: &LogsSummary, path: &'a str) -> &'a str {
         .unwrap_or(path)
 }
 
-fn status_label(summary: &LogsSummary, badge: &LogBadge) -> &'static str {
+fn status_label(summary: &LogSnapshot, badge: &LogBadge) -> &'static str {
     if !summary.baseline_enabled {
         return "-";
     }
@@ -217,7 +217,7 @@ fn badge_label(badge: &LogBadge) -> &'static str {
 }
 
 /// Without a baseline every variant counts as seen.
-fn variant_label(summary: &LogsSummary, badge: &LogBadge) -> &'static str {
+fn variant_label(summary: &LogSnapshot, badge: &LogBadge) -> &'static str {
     if summary.baseline_enabled {
         badge_label(badge)
     } else {
@@ -233,7 +233,7 @@ fn short_message<'a>(message: &'a str, class: &str) -> &'a str {
         .unwrap_or(message)
 }
 
-pub(crate) fn header(summary: &LogsSummary) -> String {
+pub(crate) fn header(summary: &LogSnapshot) -> String {
     let names: Vec<&str> = summary
         .channels
         .iter()
@@ -385,7 +385,7 @@ struct BaselineCoverage<'a> {
     read: &'static str,
 }
 
-fn baseline_coverage(summary: &LogsSummary) -> Option<BaselineCoverage<'_>> {
+fn baseline_coverage(summary: &LogSnapshot) -> Option<BaselineCoverage<'_>> {
     let channel = summary
         .channels
         .iter()
@@ -408,7 +408,7 @@ fn baseline_coverage(summary: &LogsSummary) -> Option<BaselineCoverage<'_>> {
     })
 }
 
-fn counts_line(summary: &LogsSummary) -> Option<String> {
+fn counts_line(summary: &LogSnapshot) -> Option<String> {
     if summary.level_counts.is_empty() {
         return None;
     }
@@ -426,12 +426,14 @@ fn counts_line(summary: &LogsSummary) -> Option<String> {
 }
 
 pub(crate) fn summary(summary: &LogsSummary, all: bool) -> String {
+    let groups = &summary.groups;
+    let overflow_groups = summary.overflow_groups;
+    let summary = &summary.snapshot;
     let mut out = header(summary);
     if let Some(line) = counts_line(summary) {
         push_wrapped(&mut out, "", &line);
     }
     out.push('\n');
-    let groups = &summary.groups;
     if groups.is_empty() {
         if coverage_incomplete(summary) {
             out.push_str("No matching entries in the portion read; log coverage is incomplete.\n");
@@ -503,11 +505,8 @@ pub(crate) fn summary(summary: &LogsSummary, all: bool) -> String {
     if shown < groups.len() {
         out.push_str(&format!("+{} more groups (--all)\n", groups.len() - shown));
     }
-    if summary.overflow_groups > 0 {
-        out.push_str(&format!(
-            "+{} groups not tracked\n",
-            summary.overflow_groups
-        ));
+    if overflow_groups > 0 {
+        out.push_str(&format!("+{} groups not tracked\n", overflow_groups));
     }
     out.push_str(&format!(
         "\nDetails: slip logs {} <ID or row>\n",
@@ -558,7 +557,7 @@ fn variant_at(file: Option<&Untrusted>, line: Option<u64>) -> Option<String> {
     })
 }
 
-fn shows_variants(summary: &LogsSummary, group: &LogGroup) -> bool {
+fn shows_variants(summary: &LogSnapshot, group: &LogGroup) -> bool {
     summary.baseline_enabled || group.variants.len() > 1 || group.overflow_variants > 0
 }
 
@@ -864,7 +863,7 @@ pub(crate) fn detail_md(detail: &LogsDetail, full: bool) -> String {
 }
 
 /// What to say when a lookup finds no group.
-pub(crate) fn miss(summary: &LogsSummary, query: &str) -> String {
+pub(crate) fn miss(summary: &LogSnapshot, query: &str) -> String {
     if summary.channels.is_empty() {
         return format!("group {} not found in what was read; no visible log channels — inspect channel configuration\n", escape(query));
     }
@@ -915,7 +914,7 @@ pub(crate) fn ambiguous(matches: &[&LogGroup]) -> String {
 
 /// Entries at the record's level or above, oldest first. The record has no
 /// entry list, so the entries come from the snapshot it was built from.
-pub(crate) fn raw_entries(summary: &LogsSummary, entries: &[Entry]) -> String {
+pub(crate) fn raw_entries(summary: &LogSnapshot, entries: &[Entry]) -> String {
     let min_level = Level::parse(summary.filter.level).unwrap_or(Level::Debug);
     let grep = raw(&summary.filter.text).map(str::to_lowercase);
     let mut out = header(summary);
@@ -955,7 +954,7 @@ pub(crate) fn raw_entries(summary: &LogsSummary, entries: &[Entry]) -> String {
 }
 
 /// The discovery/coverage view uses the same bounded snapshot as the summary.
-pub(crate) fn channels(summary: &LogsSummary) -> String {
+pub(crate) fn channels(summary: &LogSnapshot) -> String {
     let mut out = header(summary);
     let labels: Vec<_> = summary
         .channels
