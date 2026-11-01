@@ -17,6 +17,7 @@ pr-run-mode = "upload"
 unix-archive = ".tar.gz"
 
 [dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
 aarch64-unknown-linux-musl = "ubuntu-24.04-arm"
 
 [dist.github-action-commits]

@@ -40,6 +40,13 @@ fn every_logs_failure_has_a_schema_one_kind_and_the_text_commands_exit_code() {
             json!({"kind":"connection_lost","message":"lost"}),
             1,
         ),
+        (
+            Box::new(logs::LogsError::Transport(TransportError::Connect(
+                "closed session".into(),
+            ))),
+            json!({"kind":"connection_lost","message":"closed session"}),
+            1,
+        ),
     ];
     for (error, expected, code) in cases {
         let record = logs_error_record(error.as_ref());
@@ -60,19 +67,12 @@ fn every_logs_failure_has_a_schema_one_kind_and_the_text_commands_exit_code() {
         ("Permission denied (publickey)", "key_not_loaded"),
         ("ssh diagnostic", "other"),
     ] {
-        for error in [
-            Box::new(TransportError::Connect(message.into())) as Box<dyn Error>,
-            Box::new(logs::LogsError::Transport(TransportError::Connect(
-                message.into(),
-            ))),
-        ] {
-            let record = logs_error_record(error.as_ref());
-            assert_eq!(record.exit_code(), 1);
-            let value = serde_json::to_value(record).unwrap();
-            assert_eq!(value["kind"], "ssh_refused");
-            assert_eq!(value["reason"], reason);
-            assert_eq!(value["message"], message);
-        }
+        let record = logs_error_record(&TransportError::Connect(message.into()));
+        assert_eq!(record.exit_code(), 1);
+        let value = serde_json::to_value(record).unwrap();
+        assert_eq!(value["kind"], "ssh_refused");
+        assert_eq!(value["reason"], reason);
+        assert_eq!(value["message"], message);
     }
 }
 
