@@ -1,13 +1,20 @@
 //! Anchor selection: an active lock wins, then a verified run, then checkout
 //! history, then 24h. Missing and failed reads remain distinct in the headline.
 
-use super::WindowTime;
+use super::{WindowTime, DEFAULT_WINDOW};
+
+mod types;
+pub use types::{
+    Anchor, AnchorFallback, CheckoutFallbackReason, MarkerFallbackReason, RunCheck,
+    RunFallbackReason,
+};
+
 use crate::marker::{decode, Marker};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct Probe {
-    pub marker: Option<Result<Marker, String>>,
+    pub marker: Option<Result<Marker, MarkerFallbackReason>>,
     pub head: Option<Result<String, String>>,
     pub reflog: Option<Result<String, String>>,
     pub active: Option<(String, Option<usize>)>,
@@ -17,9 +24,32 @@ pub(super) struct Probe {
 
 pub(super) struct Choice {
     pub label: String,
+    pub anchor: Anchor,
     pub time: WindowTime,
     pub marker: Option<Marker>,
     pub warnings: Vec<String>,
+    pub fallbacks: Vec<AnchorFallback>,
+}
+
+impl Choice {
+    pub(super) fn new(
+        anchor: Anchor,
+        time: WindowTime,
+        marker: Option<Marker>,
+        fallbacks: Vec<AnchorFallback>,
+    ) -> Self {
+        Self {
+            label: anchor.label(),
+            warnings: fallbacks
+                .iter()
+                .filter_map(AnchorFallback::warning)
+                .collect(),
+            anchor,
+            time,
+            marker,
+            fallbacks,
+        }
+    }
 }
 
 pub(super) fn reflog_fields(tip: &str) -> Option<(&str, u64)> {
@@ -46,13 +76,15 @@ impl Probe {
                 self.marker = Some(
                     decode(text)
                         .and_then(|text| Marker::parse(&text))
-                        .ok_or_else(|| "last-run marker is corrupt".into()),
+                        .ok_or(MarkerFallbackReason::Corrupt),
                 )
             }
             ["@marker", "error", error] => {
-                self.marker = Some(Err(
-                    decode(error).unwrap_or_else(|| "could not read last-run marker".into())
-                ))
+                self.marker = Some(Err(MarkerFallbackReason::Unreadable {
+                    message: decode(error)
+                        .unwrap_or_else(|| "could not read last-run marker".into())
+                        .into(),
+                }))
             }
             ["@git-head", "ok", sha] => {
                 self.head = Some(if crate::script::is_full_sha(sha) {
@@ -102,30 +134,27 @@ impl Probe {
     }
 
     pub fn choose(&self, fallback: WindowTime) -> Choice {
-        let mut warnings = Vec::new();
+        let mut fallbacks = Vec::new();
         if let Some(Ok(marker)) = &self.marker {
             if let Some(time) = self
                 .times
                 .get("marker")
                 .filter(|time| time.start <= fallback.now && time.start == marker.started_at)
             {
-                let short = &marker.target_sha[..7];
                 if let Some((_, step)) = self
                     .active
                     .as_ref()
                     .filter(|(run, _)| run == &marker.run_id)
                 {
-                    return Choice {
-                        label: format!(
-                            "deploy in progress (run {}{}); since run start",
-                            marker.run_id,
-                            step.map(|step| format!(", step {step}"))
-                                .unwrap_or_default()
-                        ),
-                        time: time.clone(),
-                        marker: Some(marker.clone()),
-                        warnings,
-                    };
+                    return Choice::new(
+                        Anchor::RunInProgress {
+                            run_id: marker.run_id.clone().into(),
+                            step: *step,
+                        },
+                        time.clone(),
+                        Some(marker.clone()),
+                        fallbacks,
+                    );
                 }
                 let git_error = self
                     .head
@@ -133,15 +162,17 @@ impl Probe {
                     .and_then(|head| head.as_ref().err())
                     .or_else(|| self.reflog.as_ref().and_then(|tip| tip.as_ref().err()));
                 if let Some(error) = git_error {
-                    return Choice {
-                        label: format!(
-                            "since slip {} {} ({short}, unverified: {error})",
-                            marker.plan, marker.run_id
+                    return Choice::new(
+                        run_anchor(
+                            marker,
+                            RunCheck::Unverified {
+                                reason: error.clone().into(),
+                            },
                         ),
-                        time: time.clone(),
-                        marker: Some(marker.clone()),
-                        warnings,
-                    };
+                        time.clone(),
+                        Some(marker.clone()),
+                        fallbacks,
+                    );
                 }
                 let head = self.head.as_ref().and_then(|head| head.as_ref().ok());
                 let tip = self.reflog.as_ref().and_then(|tip| tip.as_ref().ok());
@@ -153,26 +184,15 @@ impl Probe {
                             .is_some_and(|(sha, _)| sha == marker.target_sha),
                     };
                 if valid {
-                    let outcome = if marker.reflog_tip.is_some() {
-                        marker.outcome.as_deref().unwrap_or("outcome unknown")
-                    } else {
-                        "outcome unknown"
-                    };
-                    return Choice {
-                        label: format!(
-                            "since slip {} {} ({short}, {outcome})",
-                            marker.plan, marker.run_id
-                        ),
-                        time: time.clone(),
-                        marker: Some(marker.clone()),
-                        warnings,
-                    };
+                    return Choice::new(
+                        run_anchor(marker, RunCheck::Verified),
+                        time.clone(),
+                        Some(marker.clone()),
+                        fallbacks,
+                    );
                 }
-                warnings.push(if tip.is_none() {
-                    format!(
-                        "run {} could not be verified: reflog is missing",
-                        marker.run_id
-                    )
+                let reason = if tip.is_none() {
+                    RunFallbackReason::ReflogMissing
                 } else if head != Some(&marker.target_sha)
                     && marker
                         .reflog_tip
@@ -180,43 +200,82 @@ impl Probe {
                         .and_then(reflog_fields)
                         .is_none_or(|(sha, _)| sha != marker.target_sha)
                 {
-                    format!("run {} did not reach its target {short}", marker.run_id)
+                    RunFallbackReason::TargetNotReached {
+                        target_commit: marker.target_sha.clone().into(),
+                    }
                 } else {
-                    format!("checkout changed after run {}", marker.run_id)
-                });
+                    RunFallbackReason::CheckoutChanged
+                };
+                let fallback = AnchorFallback::Run {
+                    run_id: marker.run_id.clone().into(),
+                    reason,
+                };
+                fallbacks.push(fallback);
             } else {
-                warnings.push("last-run marker has an invalid start time".into());
+                let fallback = AnchorFallback::Run {
+                    run_id: marker.run_id.clone().into(),
+                    reason: RunFallbackReason::InvalidStartTime,
+                };
+                fallbacks.push(fallback);
             }
         } else if let Some(Err(error)) = &self.marker {
-            warnings.push(format!("anchor: {error}"));
+            let fallback = AnchorFallback::LastRunMarker {
+                reason: error.clone(),
+            };
+            fallbacks.push(fallback);
+        } else {
+            fallbacks.push(AnchorFallback::LastRunMarker {
+                reason: MarkerFallbackReason::Missing,
+            });
         }
         if let Some(Ok(tip)) = &self.reflog {
             if let (Some((sha, epoch)), Some(time)) = (reflog_fields(tip), self.times.get("reflog"))
             {
                 if epoch == time.start && epoch <= fallback.now {
-                    return Choice {
-                        label: format!("since checkout change {}", &sha[..7]),
-                        time: time.clone(),
-                        marker: None,
-                        warnings,
-                    };
+                    return Choice::new(
+                        Anchor::CheckoutChange { commit: sha.into() },
+                        time.clone(),
+                        None,
+                        fallbacks,
+                    );
                 }
             }
         }
-        if let Some(error) = self
-            .reflog
-            .as_ref()
-            .and_then(|tip| tip.as_ref().err())
-            .or_else(|| self.head.as_ref().and_then(|head| head.as_ref().err()))
-        {
-            warnings.push(format!("anchor: reflog failed ({error}) — using 24h"));
-        }
-        Choice {
-            label: "since 24h (default)".into(),
-            time: fallback,
-            marker: None,
-            warnings,
-        }
+        let reason = match (&self.reflog, &self.head) {
+            (Some(Err(error)), _) => CheckoutFallbackReason::ReflogReadFailed {
+                message: error.clone().into(),
+            },
+            (_, Some(Err(error))) => CheckoutFallbackReason::HeadReadFailed {
+                message: error.clone().into(),
+            },
+            (Some(Ok(tip)), _) => CheckoutFallbackReason::InvalidStartTime {
+                commit: reflog_fields(tip)
+                    .expect("probe validates reflog fields")
+                    .0
+                    .into(),
+            },
+            (None, _) => CheckoutFallbackReason::ReflogMissing,
+        };
+        fallbacks.push(AnchorFallback::CheckoutChange { reason });
+        Choice::new(
+            Anchor::Default {
+                seconds: DEFAULT_WINDOW,
+            },
+            fallback,
+            None,
+            fallbacks,
+        )
+    }
+}
+
+fn run_anchor(marker: &Marker, check: RunCheck) -> Anchor {
+    Anchor::Run {
+        run_id: marker.run_id.clone().into(),
+        plan: marker.plan.clone().into(),
+        target_commit: marker.target_sha.clone().into(),
+        check,
+        server_marker_outcome: marker.outcome.clone().map(Into::into),
+        reflog_recorded: marker.reflog_tip.is_some(),
     }
 }
 
