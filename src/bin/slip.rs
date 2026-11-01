@@ -1081,6 +1081,9 @@ async fn logs_command(
     let target = config.target(environment).ok_or_else(|| {
         invalid_input(format!("environment `{environment}` is not in the config"))
     })?;
+    if let Some(since) = &options.since {
+        since.validate(target.timezone.as_deref().unwrap_or("UTC"))?;
+    }
     // Reading storage/logs needs no approval; other configured paths do.
     let snapshot = config
         .trust_snapshot(environment)
@@ -1101,9 +1104,12 @@ async fn logs_command(
         let level = options.level.unwrap_or(Level::Debug);
         let summary = records::logs_summary(&snapshot, &logs::Groups::default(), level, grep);
         if options.channels {
-            print!("{}", logs_words::channels(&summary));
+            print!("{}", logs_words::channels(&summary.snapshot));
         } else {
-            print!("{}", logs_words::raw_entries(&summary, &snapshot.entries));
+            print!(
+                "{}",
+                logs_words::raw_entries(&summary.snapshot, &snapshot.entries)
+            );
         }
         return Ok(ExitCode::SUCCESS);
     }
@@ -1158,7 +1164,7 @@ fn logs_text(
         }
         Lookup::Missing => {
             let summary = records::logs_summary(snapshot, &logs::Groups::default(), level, grep);
-            (logs_words::miss(&summary, query), 1)
+            (logs_words::miss(&summary.snapshot, query), 1)
         }
     }
 }

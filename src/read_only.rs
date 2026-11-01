@@ -159,6 +159,9 @@ impl<C: Connector> Reader<C> {
         query: &LogQuery,
     ) -> Result<logs::Snapshot, LogsQueryError> {
         let approved = self.approved_target(checkout, environment)?;
+        if let Some(since) = &query.since {
+            since.validate(approved.0.timezone.as_deref().unwrap_or("UTC"))?;
+        }
         let transport = self.connector.connect(&approved).await?;
         let request = logs::Request {
             since: query.since.clone(),

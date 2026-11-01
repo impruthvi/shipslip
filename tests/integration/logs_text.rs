@@ -8,8 +8,8 @@ use shipslip::records;
 #[allow(dead_code)]
 mod logs_words;
 
-fn record(snapshot: &Snapshot, level: Level, grep: Option<&str>) -> records::LogsSummary {
-    records::logs_summary(snapshot, &Groups::default(), level, grep)
+fn record(snapshot: &Snapshot, level: Level, grep: Option<&str>) -> records::LogSnapshot {
+    records::logs_summary(snapshot, &Groups::default(), level, grep).snapshot
 }
 
 pub fn header(snapshot: &Snapshot) -> String {

@@ -7,8 +7,9 @@
 //! 2. The read re-checks every file it was told to read (path, inode, size),
 //!    then sends the newest bytes within budget, gzip-compressed.
 //!
-//! Laravel writes times without an offset, so all time conversion happens on
-//! the server with `TZ=<zone> date`, and entries are compared as local
+//! Laravel writes times without an offset. Clients validate explicit windows
+//! locally before connecting; the probe converts them again against the server
+//! clock with `TZ=<zone> date`. Entries are compared as local
 //! `YYYY-MM-DD HH:MM:SS` strings. Within a file, position decides: once an
 //! entry at or after the window start is seen, every later entry counts, which
 //! keeps the repeated hour of a DST fall-back.
@@ -112,6 +113,51 @@ pub enum Since {
 }
 
 impl Since {
+    /// Checks the window against this Mac's clock before opening SSH.
+    /// The server probe still checks it against the server's clock.
+    pub fn validate(&self, zone: &str) -> Result<(), LogsError> {
+        let seconds = match self {
+            Self::Ago(seconds) => *seconds,
+            Self::At(at) => {
+                if !matches!(Self::parse(at), Ok(Self::At(_))) {
+                    return Err(LogsError::BadSince(at.clone()));
+                }
+                let time = if at.len() == 10 {
+                    format!("{at} 00:00:00")
+                } else {
+                    format!("{at}:00")
+                };
+                let mut command = std::process::Command::new("date");
+                command.env("TZ", zone);
+                #[cfg(target_os = "macos")]
+                command.args(["-j", "-f", "%Y-%m-%d %H:%M:%S", &time, "+%s"]);
+                #[cfg(not(target_os = "macos"))]
+                command.args(["-d", &time, "+%s"]);
+                let output = command.output().map_err(|error| {
+                    LogsError::Unavailable(format!("cannot validate --since locally: {error}"))
+                })?;
+                let start = std::str::from_utf8(&output.stdout)
+                    .ok()
+                    .filter(|_| output.status.success())
+                    .and_then(|text| text.trim().parse::<i64>().ok())
+                    .ok_or_else(|| LogsError::BadSince(at.clone()))?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                i64::try_from(now)
+                    .unwrap_or(i64::MAX)
+                    .saturating_sub(start)
+                    .max(0) as u64
+            }
+        };
+        if seconds > MAX_WINDOW {
+            Err(LogsError::TooOld)
+        } else {
+            Ok(())
+        }
+    }
+
     /// Accepts `30m`, `6h`, `7d`, `YYYY-MM-DD` and `YYYY-MM-DD HH:MM`.
     pub fn parse(value: &str) -> Result<Self, String> {
         let usage = || {

@@ -495,6 +495,8 @@ fn discovery_pins_the_current_protocol_and_advertises_only_record_tools() {
     assert!(result["instructions"].as_str().unwrap().contains(rule));
     let response = session.request(json!(2), "tools/list", json!({}));
     assert_eq!(response["result"]["resultType"], "complete");
+    assert_eq!(response["result"]["ttlMs"], 0);
+    assert_eq!(response["result"]["cacheScope"], "private");
     let tools = response["result"]["tools"].as_array().unwrap();
     assert_eq!(
         tools

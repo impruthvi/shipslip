@@ -7,10 +7,16 @@ use crate::transport::{ConnectFailure, TransportError};
 
 #[derive(Debug, Serialize)]
 pub struct LogsSummary {
-    pub environment: Untrusted,
-    pub window: LogWindow,
+    #[serde(flatten)]
+    pub snapshot: LogSnapshot,
     pub groups: Vec<LogGroup>,
     pub overflow_groups: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LogSnapshot {
+    pub environment: Untrusted,
+    pub window: LogWindow,
     pub filter: LogFilter,
     pub channels: Vec<LogChannel>,
     pub unrecognized_samples: Vec<LogSample>,
@@ -153,6 +159,18 @@ pub fn logs_summary(
     text: Option<&str>,
 ) -> LogsSummary {
     LogsSummary {
+        snapshot: snapshot_record(snapshot, level, text),
+        groups: groups
+            .groups
+            .iter()
+            .map(|group| group_record(snapshot, group))
+            .collect(),
+        overflow_groups: groups.overflow,
+    }
+}
+
+fn snapshot_record(snapshot: &Snapshot, level: Level, text: Option<&str>) -> LogSnapshot {
+    LogSnapshot {
         environment: snapshot.env.clone().into(),
         window: LogWindow {
             start: snapshot.start.clone().into(),
@@ -162,12 +180,6 @@ pub fn logs_summary(
             anchor: snapshot.anchor.clone(),
             anchor_fallbacks: snapshot.anchor_fallbacks.clone(),
         },
-        groups: groups
-            .groups
-            .iter()
-            .map(|group| group_record(snapshot, group))
-            .collect(),
-        overflow_groups: groups.overflow,
         filter: LogFilter {
             level: level.name(),
             text: text.map(Into::into),
@@ -396,7 +408,7 @@ impl From<logs::LogsError> for LogsQueryError {
 #[derive(Debug, Serialize)]
 pub struct LogsDetail {
     #[serde(flatten)]
-    pub snapshot: LogsSummary,
+    pub snapshot: LogSnapshot,
     pub group: LogGroup,
     pub latest: LatestEntry,
     pub same_request: SameRequest,
@@ -479,7 +491,7 @@ pub fn logs_detail(
         logs::Correlation::Cut => SameRequest::Cut,
     };
     LogsDetail {
-        snapshot: logs_summary(snapshot, &Groups::default(), level, text),
+        snapshot: snapshot_record(snapshot, level, text),
         group: group_record(snapshot, group),
         latest: LatestEntry {
             entry: entry_record(snapshot, group.latest),

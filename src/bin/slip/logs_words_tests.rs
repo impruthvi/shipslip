@@ -66,7 +66,7 @@ fn md_of(snapshot: &logs::Snapshot, level: Level, grep: Option<&str>, full: bool
 }
 
 fn header_of(snapshot: &logs::Snapshot) -> String {
-    logs_words::header(&summary_record(snapshot))
+    logs_words::header(&summary_record(snapshot).snapshot)
 }
 
 fn summary_record(snapshot: &logs::Snapshot) -> records::LogsSummary {
@@ -75,11 +75,11 @@ fn summary_record(snapshot: &logs::Snapshot) -> records::LogsSummary {
 
 fn raw_of(snapshot: &logs::Snapshot, level: Level, grep: Option<&str>) -> String {
     let summary = records::logs_summary(snapshot, &logs::Groups::default(), level, grep);
-    logs_words::raw_entries(&summary, &snapshot.entries)
+    logs_words::raw_entries(&summary.snapshot, &snapshot.entries)
 }
 
 fn channels_of(snapshot: &logs::Snapshot) -> String {
-    logs_words::channels(&summary_record(snapshot))
+    logs_words::channels(&summary_record(snapshot).snapshot)
 }
 
 #[tokio::test]
@@ -251,8 +251,8 @@ async fn short_paths_handle_relative_logs_without_changing_the_detail() {
             "/srv/app-copy/app/Failure.php",
         ),
     ] {
-        summary.channels[0].files = vec![files.into()];
-        assert_eq!(logs_words::short_path(&summary, path), shown);
+        summary.snapshot.channels[0].files = vec![files.into()];
+        assert_eq!(logs_words::short_path(&summary.snapshot, path), shown);
     }
 }
 
