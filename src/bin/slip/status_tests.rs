@@ -37,7 +37,7 @@ fn cell(env: &str, code: CodeState) -> EnvCell {
 
 fn row(label: &str, envs: Vec<EnvCell>) -> RepoRow {
     RepoRow {
-        repo_root: format!("/work/{label}"),
+        repo_root: format!("/work/{label}").into(),
         project: Some(label.into()),
         label: label.into(),
         path_missing: false,
@@ -61,11 +61,18 @@ fn no_compare(_: &RepoRow, _: &str, _: &str) -> EnvComparison {
 
 #[test]
 fn parses_an_optional_pair_to_compare() {
-    assert_eq!(args(&[]), Ok(Args { compare: None }));
+    assert_eq!(
+        args(&[]),
+        Ok(Args {
+            compare: None,
+            json: false
+        })
+    );
     assert_eq!(
         args(&["--compare", "staging", "production"]),
         Ok(Args {
-            compare: Some(("staging".into(), "production".into()))
+            compare: Some(("staging".into(), "production".into())),
+            json: false,
         })
     );
     for bad in [
@@ -73,13 +80,27 @@ fn parses_an_optional_pair_to_compare() {
         &["--compare", "staging"],
         &["--compare", "staging", "staging"],
         &["--compare", "a", "b", "c"],
+        &["--compare", "--json", "production"],
+        &["--compare", "staging", "--json"],
+        &["--json", "--compare", "staging", "production"],
     ] {
         assert_eq!(
             args(bad),
-            Err("usage: slip status [--compare ENV ENV]".into()),
+            Err("usage: slip status [--json | --compare ENV ENV]".into()),
             "{bad:?}"
         );
     }
+}
+
+#[test]
+fn parses_json_without_comparison() {
+    assert_eq!(
+        args(&["--json"]),
+        Ok(Args {
+            compare: None,
+            json: true
+        })
+    );
 }
 
 #[test]
@@ -101,12 +122,15 @@ fn every_code_state_has_its_own_words() {
         lines(recorded(true, Evidence::CheckedOutAtStart), false),
         "code at a1b2c3d4e5f6, checked out at start (recorded 3d ago)"
     );
-    let observed = |sha: &str, dirty, outcome| CodeState::Observed {
+    let observed = |sha: &str, dirty, outcome: Option<DeployOutcome>| CodeState::Observed {
         sha: sha.into(),
         dirty,
         expected: A.into(),
         run_id: "bbbb0002-0".into(),
-        outcome,
+        outcome: outcome.map(|outcome: DeployOutcome| Outcome {
+            kind: Some(&outcome).into(),
+            unfinished: false,
+        }),
         at_ms: NOW - 2 * 3_600_000,
     };
     assert_eq!(
@@ -326,10 +350,7 @@ fn comparisons_print_per_checkout_with_notes() {
         NOW,
         Some(("staging", "production")),
         |row, a, b| {
-            assert_eq!(
-                (row.label.as_str(), a, b),
-                ("shop", "staging", "production")
-            );
+            assert_eq!((row.label.raw(), a, b), ("shop", "staging", "production"));
             EnvComparison {
                 result: Comparison::Ahead(4),
                 notes: vec![("staging".into(), Qualifier::DeployIncomplete)],

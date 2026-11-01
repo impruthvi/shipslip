@@ -514,6 +514,7 @@ needs no config, and never contacts a server.
 
 ```sh
 slip status
+slip status --json                         # versioned local status record
 slip status --compare staging production   # commits between the two, per app
 ```
 
@@ -529,6 +530,12 @@ same server path, since that run may have replaced the code. It also warns
 when the approved config now deploys to a different server or path than the
 newest receipt, until a run uses the new one. `--compare` uses your local checkout to count commits and notes an
 incomplete deploy or dirty tree on either side.
+
+`--json` prints the same local facts with `"schema": 1`, structured evidence
+marks and outcomes, and absolute epoch-millisecond timestamps rather than
+relative wording. Errors are JSON too and keep the text command's exit code.
+`--json` cannot be combined with `--compare`, which stays a separate local-git
+comparison.
 
 ### Desktop app (local build)
 

@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use shipslip::config::default_trust_path;
 use shipslip::git::Git;
-use shipslip::receipt::{default_receipts_root, overview, ReceiptError};
+use shipslip::receipt::{default_receipts_root, ReceiptError};
+use shipslip::records::status;
 use tauri::async_runtime::spawn_blocking;
 use tauri::Manager;
 
@@ -122,8 +123,8 @@ impl App {
 
     fn load_map(&self) -> LoadResult {
         self.state.load_map(now_ms, || match &self.paths {
-            Ok((root, trust)) => overview(root, trust).map(crate::state::with_configured_envs),
-            Err(reason) => Err(ReceiptError::Invalid(reason.clone())),
+            Ok((root, trust)) => status(root, trust).map(crate::state::with_configured_envs),
+            Err(reason) => Err(ReceiptError::Invalid(reason.clone()).into()),
         })
     }
 

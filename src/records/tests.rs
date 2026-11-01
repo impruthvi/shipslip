@@ -90,6 +90,48 @@ fn receipt_list_is_empty_when_no_runs_are_recorded() {
 }
 
 #[test]
+fn status_is_empty_when_this_mac_has_no_records() {
+    let root = TempRoot::new();
+    assert_eq!(
+        to_json(versioned(
+            status(&root.0, &root.0.join("trust.json")).unwrap()
+        )),
+        json!({"schema": 1, "repos": [], "problems": []})
+    );
+}
+
+#[test]
+fn status_records_code_and_the_last_attempt_with_absolute_times() {
+    let root = TempRoot::new();
+    let mut value = deploy();
+    value["repo_root"] = json!(root.0.join("missing-checkout").to_string_lossy());
+    write_receipt(&root.0, &value);
+    let result = to_json(versioned(
+        status(&root.0, &root.0.join("trust.json")).unwrap(),
+    ));
+    let repo = &result["repos"][0];
+    let env = &repo["envs"][0];
+    assert_eq!(result["schema"], 1);
+    assert_eq!(repo["path_missing"], true);
+    assert_eq!(env["mark"], "recorded");
+    assert_eq!(env["needs_attention"], false);
+    assert_eq!(
+        env["code"],
+        json!({
+            "kind": "recorded", "sha": "2222222222222222222222222222222222222222",
+            "complete": true, "evidence": "fast_forward", "run_id": "aaaa0001-0", "at_ms": 165000
+        })
+    );
+    assert_eq!(env["last_attempt"]["started_at_ms"], 1000);
+    assert_eq!(
+        env["last_attempt"]["badge"]["outcome"],
+        json!({"kind": "succeeded", "unfinished": false})
+    );
+    assert_eq!(env["code_run"], env["last_attempt"]);
+    assert_eq!(result["problems"], json!([]));
+}
+
+#[test]
 fn receipt_list_reports_an_unreadable_directory_as_a_typed_error() {
     let root = TempRoot::new();
     std::fs::write(root.0.join("not-a-directory"), "x").unwrap();
