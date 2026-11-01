@@ -370,8 +370,15 @@ pub struct LogsDetail {
     #[serde(flatten)]
     pub snapshot: LogsSummary,
     pub group: LogGroup,
-    pub latest: LogEntry,
+    pub latest: LatestEntry,
     pub same_request: SameRequest,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LatestEntry {
+    #[serde(flatten)]
+    pub entry: LogEntry,
+    pub frames: Vec<LogFrame>,
 }
 
 #[derive(Debug, Serialize)]
@@ -382,7 +389,6 @@ pub struct LogEntry {
     pub file: Untrusted,
     pub text: Untrusted,
     pub truncated: bool,
-    pub frames: Vec<LogFrame>,
     pub clipped: bool,
     pub bytes: usize,
 }
@@ -444,7 +450,10 @@ pub fn logs_detail(
     let mut record = LogsDetail {
         snapshot: logs_summary(snapshot, &Groups::default(), level, text),
         group: group_record(snapshot, group),
-        latest: entry_record(snapshot, group.latest),
+        latest: LatestEntry {
+            entry: entry_record(snapshot, group.latest),
+            frames: frames(&snapshot.entries[group.latest].text),
+        },
         same_request,
     };
     record.snapshot.text_fields =
@@ -461,7 +470,6 @@ fn entry_record(snapshot: &Snapshot, index: usize) -> LogEntry {
         file: entry.file.clone().into(),
         text: entry.text.clone().into(),
         truncated: entry.truncated,
-        frames: frames(&entry.text),
         clipped: false,
         bytes: entry.text.len(),
     }

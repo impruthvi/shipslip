@@ -101,6 +101,45 @@ fn detail_keeps_full_evidence_frames_and_same_request_correlation() {
         1
     );
     assert_eq!(record["same_request"]["after"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        record["same_request"]["before"][0],
+        json!({
+            "time":"2026-10-01 01:00:00", "level":"info", "channel":"laravel",
+            "file":"storage/logs/laravel.log", "text":snapshot.entries[0].text,
+            "truncated":false, "clipped":false, "bytes":snapshot.entries[0].text.len()
+        })
+    );
+    assert_eq!(record["same_request"]["more"], 0);
+    assert_eq!(record["same_request"]["may_be_missing"], false);
+}
+
+#[test]
+fn detail_marks_a_truncated_entry_and_keeps_every_same_request_entry_in_the_cli() {
+    let text = (0..25)
+        .map(|second| {
+            let level = if second == 12 { "ERROR" } else { "INFO" };
+            format!("[2026-10-01 01:00:{second:02}] production.{level}: step {second} {{\"request_id\":\"req-12345678\"}}\n")
+        })
+        .collect::<String>();
+    let mut snapshot = fixture(&text);
+    snapshot.entries[12].truncated = true;
+    snapshot.channels[0].complete = false;
+    let groups = group(&snapshot, Level::Error, None);
+    let record = serde_json::to_value(crate::records::logs_detail(
+        &snapshot,
+        &groups.groups[0],
+        Level::Error,
+        None,
+    ))
+    .unwrap();
+    assert_eq!(record["latest"]["truncated"], true);
+    assert_eq!(record["latest"]["text"], snapshot.entries[12].text);
+    let shared = &record["same_request"];
+    assert_eq!(shared["kind"], "shared");
+    assert_eq!(shared["before"].as_array().unwrap().len(), 12);
+    assert_eq!(shared["after"].as_array().unwrap().len(), 12);
+    assert_eq!(shared["more"], 0);
+    assert_eq!(shared["may_be_missing"], true);
 }
 
 #[test]

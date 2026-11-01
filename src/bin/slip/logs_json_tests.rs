@@ -75,3 +75,105 @@ fn every_logs_failure_has_a_schema_one_kind_and_the_text_commands_exit_code() {
         }
     }
 }
+
+struct LogReply(String);
+
+impl shipslip::transport::Transport for LogReply {
+    async fn run(
+        &self,
+        script: &str,
+        output: tokio::sync::mpsc::Sender<String>,
+        _line_limit: usize,
+    ) -> Result<i32, TransportError> {
+        use base64::{engine::general_purpose::STANDARD, Engine as _};
+        let reply = if script.contains("@time") {
+            format!("@time 1790812800 1790726400 2026-09-30 00:00:00 2026-09-30 +0000 +0000\n@marker missing\n@reflog missing\n@file 1 {} 1790812800 1 2026-10-01 00:00:00 checksum {}\n{}\n@end", self.0.len(), STANDARD.encode("/srv/app/storage/logs/laravel.log"), STANDARD.encode("storage/logs/laravel.log"))
+        } else {
+            let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+            gzip.write_all(self.0.as_bytes()).unwrap();
+            format!("@data 0\n{}\n@end", STANDARD.encode(gzip.finish().unwrap()))
+        };
+        for line in reply.lines() {
+            output.send(line.into()).await.unwrap();
+        }
+        Ok(0)
+    }
+
+    async fn reconnect(&self) -> Result<(), TransportError> {
+        panic!("log reads never reconnect")
+    }
+}
+
+async fn read(text: &str) -> logs::Snapshot {
+    let target = DeployTarget {
+        env: "production".into(),
+        production: true,
+        ssh_alias: "app".into(),
+        path: "/srv/app".into(),
+        branch: "main".into(),
+        steps: Vec::new(),
+        maintenance: false,
+        watch_log: false,
+        log: None,
+        log_daily: false,
+        smoke_url: None,
+        timezone: None,
+        logs: Default::default(),
+    };
+    logs::snapshot(&LogReply(text.into()), &target, &logs::Request::default())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn detail_json_finds_a_group_by_row_short_id_or_full_id_and_reports_lookup_failures() {
+    let text = (0..20)
+        .map(|n| format!("[2026-10-01 02:00:00] production.ERROR: Problem{n}Exception: failed\n"))
+        .collect::<String>();
+    let snapshot = read(&text).await;
+    let groups = logs::group(&snapshot, Level::Error, None);
+    let (summary, code) = logs_json_record(&snapshot, &groups, None, Level::Error, None).unwrap();
+    assert_eq!(code, 0);
+    let rows = summary["groups"].as_array().unwrap();
+    assert_eq!(rows.len(), 20);
+    let id = rows[1]["id"].as_str().unwrap();
+    let full_id = rows[1]["full_id"].as_str().unwrap();
+    for query in ["2", id, &id.to_uppercase(), full_id] {
+        let (record, code) =
+            logs_json_record(&snapshot, &groups, Some(query), Level::Error, None).unwrap();
+        assert_eq!(code, 0, "{query}");
+        assert_eq!(record["schema"], 1);
+        assert_eq!(record["group"], rows[1]);
+        assert_eq!(record["groups"], json!([]));
+        assert!(record["latest"]["text"]
+            .as_str()
+            .unwrap()
+            .contains(rows[1]["exception"].as_str().unwrap()));
+    }
+
+    for query in ["0", "21", "zzzz"] {
+        let (record, code) =
+            logs_json_record(&snapshot, &groups, Some(query), Level::Error, None).unwrap();
+        assert_eq!(code, 1, "{query}");
+        assert_eq!(record, json!({"schema":1, "error":{"kind":"missing"}}));
+    }
+
+    // Twenty 16-hex-digit IDs must share a first digit.
+    let sharing = |prefix: &str| {
+        rows.iter()
+            .filter(|row| row["full_id"].as_str().unwrap().starts_with(prefix))
+            .map(|row| row["id"].clone())
+            .collect::<Vec<_>>()
+    };
+    let prefix = (0..16)
+        .map(|digit| format!("{digit:x}"))
+        .find(|prefix| sharing(prefix).len() > 1)
+        .unwrap();
+    let (record, code) =
+        logs_json_record(&snapshot, &groups, Some(&prefix), Level::Error, None).unwrap();
+    assert_eq!(code, 2);
+    assert_eq!(
+        record,
+        json!({"schema":1, "error":{"kind":"ambiguous", "ids":sharing(&prefix)}})
+    );
+}

@@ -48,9 +48,10 @@ The full entry text is the source of truth; odd traces can yield no frames.
 
 `same_request.kind` is `shared`, `no_id`, or `cut`. `shared` carries the ID
 `key` and `value`, `conflict` (context and extra disagreed; context won),
-`before` and `after` entries, `more`, and `may_be_missing`. These entries are
-correlation, never cause. `no_id` means no usable ID; `cut` means an entry
-was truncated before an ID could be found.
+`before` and `after` entries (the `latest` shape without `frames`), `more`,
+and `may_be_missing`. These entries are correlation, never cause. `no_id`
+means no usable ID; `cut` means an entry was truncated before an ID could be
+found. `--full` has no effect with `--json`: JSON text is always full.
 
 Each channel has `name`, `kind`, `files`, `omitted_files`, `coverage`,
 `changed_during_read` files, `size`, nullable `last_write`, `format`, and
