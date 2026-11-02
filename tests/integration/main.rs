@@ -3220,6 +3220,108 @@ async fn log_watch_reports_only_errors_written_during_the_deploy() {
 }
 
 #[tokio::test]
+async fn log_watch_recovers_after_mux_master_is_killed_without_repeating_the_step() {
+    let server = Server::start().await;
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("watch-reconnect");
+    server.exec(
+        &format!(
+            "mkdir -p {path}/storage/logs; printf '%s\\n' \
+                  '[2026-09-30 10:00:00] production.ERROR: OldException: before deploy' \
+                  > {path}/storage/logs/laravel.log"
+        ),
+        "",
+    );
+    let step = "echo once >> launches; echo started; \
+                while [ ! -e continue-log ]; do sleep 0.1; done; \
+                printf '%s\\n' '[2026-10-01 10:00:01] production.ERROR: AfterException: after reconnect' >> storage/logs/laravel.log; \
+                echo finished";
+    let t = DeployTarget {
+        watch_log: true,
+        ..target(&path, &[step, "echo second >> launches"])
+    };
+    let preview = prepare(&trusted(t), &*ssh).await.unwrap();
+    let journal = Arc::new(
+        ReceiptJournal::create(&server.dir.join("receipts"), "app", &server.dir, &preview).unwrap(),
+    );
+    let confirmation = Confirmation::from(&preview, None).unwrap();
+    let (mut events, handle) =
+        execute_recorded(preview, confirmation, ssh.clone(), journal.clone()).unwrap();
+
+    let deploy = async {
+        while let Some(event) = events.recv().await {
+            if is_output("started")(&event) {
+                break;
+            }
+        }
+
+        // Only kill the local master using this container's unique SSH config.
+        let processes = Command::new("ps")
+            .args(["-axo", "pid=,command="])
+            .output()
+            .unwrap();
+        assert!(processes.status.success());
+        let config = server.config().display().to_string();
+        let masters: Vec<i32> = String::from_utf8(processes.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                let pid = fields.next()?.parse().ok()?;
+                let command = fields.next()?;
+                (Path::new(command).file_name()? == "ssh"
+                    && line.contains(" -M ")
+                    && line.contains(&config))
+                .then_some(pid)
+            })
+            .collect();
+        assert_eq!(masters.len(), 1, "expected exactly this test's mux master");
+        assert_eq!(unsafe { libc::kill(masters[0], libc::SIGKILL) }, 0);
+
+        server.exec(&format!("printf '%s\\n' '[2026-10-01 10:00:00] production.ERROR: DuringException: during disconnect' >> {path}/storage/logs/laravel.log"), "");
+        // Observe only: the watch or step observer must establish the new master.
+        loop {
+            if run(&ssh, "true").await.0 == Ok(0) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        server.exec(&format!("touch {path}/continue-log"), "");
+        let mut outcome = None;
+        while let Some(event) = events.recv().await {
+            if matches!(&event, DeployEvent::NewLogError { message, .. } if message.starts_with("AfterException:"))
+            {
+                handle.cancel_watch();
+            }
+            if let DeployEvent::Finished(result) = event {
+                outcome = Some(result);
+            }
+        }
+        assert_eq!(outcome, Some(DeployOutcome::Succeeded));
+    };
+    tokio::time::timeout(Duration::from_secs(60), deploy)
+        .await
+        .expect("watch did not recover after the mux master was killed");
+
+    let saved = ReceiptJournal::load(journal.path()).unwrap().snapshot();
+    let watch = saved.watch.unwrap();
+    assert_eq!(watch.status, WatchStatus::Cancelled, "{watch:#?}");
+    assert_eq!(watch.baseline_signatures, 1);
+    assert_eq!(watch.observed_lines, 2, "{watch:#?}");
+    let exceptions: Vec<_> = watch
+        .new_errors
+        .iter()
+        .map(|group| group.exception.as_str())
+        .collect();
+    assert_eq!(exceptions, ["DuringException", "AfterException"]);
+    assert!(watch.warnings.is_empty(), "{:?}", watch.warnings);
+    assert_eq!(
+        server.exec(&format!("cat {path}/launches"), ""),
+        "once\nsecond"
+    );
+}
+
+#[tokio::test]
 async fn stopping_the_post_deploy_watch_finishes_the_run_and_releases_the_lock() {
     let server = Server::start().await;
     let ssh = Arc::new(server.connect().await);
