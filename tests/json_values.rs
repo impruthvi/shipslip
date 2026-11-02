@@ -2,6 +2,7 @@
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use shipslip::logs::*;
+use shipslip::observation::CheckSkipReason;
 use shipslip::receipt::{ReceiptKind, ReceiptStepStatus};
 use shipslip::records::*;
 use shipslip::{LogPhase, RunPlan, WatchStatus};
@@ -444,6 +445,13 @@ fn serialized_fixed_values_match_the_json_reference() {
             Cancelled,
             NotRun,
             NoLogSeen,
+        }),
+        None,
+    );
+    reference.check(
+        "receipt.checks_skip_reason",
+        every!(CheckSkipReason {
+            AppLeftInMaintenance
         }),
         None,
     );

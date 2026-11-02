@@ -1,4 +1,4 @@
-use crate::observation::{LogPhase, SmokeResult, WatchResult};
+use crate::observation::{CheckSkipReason, LogPhase, SmokeResult, WatchResult};
 use crate::preflight::AbortReason;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -210,6 +210,10 @@ pub enum DeployEvent {
     /// The post-deploy log watch started; it runs for about `window`.
     WatchStarted {
         window: Duration,
+    },
+    /// Both checks are skipped for this reason; their results follow.
+    ChecksSkipped {
+        reason: CheckSkipReason,
     },
     WatchFinished(WatchResult),
     SmokeFinished(SmokeResult),

@@ -16,7 +16,9 @@ use crate::event::{
     StopReason,
 };
 use crate::lock::{self, Acquire, Break, LockInfo, LockOwner};
-use crate::observation::{self, LogObserver, SmokeResult, WatchResult, WatchStatus};
+use crate::observation::{
+    self, CheckSkipReason, LogObserver, SmokeResult, WatchResult, WatchStatus,
+};
 use crate::preflight::{self, AbortReason, BlockReason, State};
 use crate::receipt::{
     now_ms, Receipt, ReceiptJournal, ReceiptKind, ReceiptPhase, ReceiptStatus, ReceiptStepStatus,
@@ -1168,7 +1170,6 @@ async fn run_steps<T: Transport>(
         receipt.outcome.as_ref()?;
         Some((receipt.watch.clone()?, receipt.smoke.clone()?))
     });
-    let using_saved_checks = saved_checks.is_some();
     let observer = if preview.target.watch_log && saved_checks.is_none() {
         Some(
             LogObserver::start(
@@ -1215,7 +1216,14 @@ async fn run_steps<T: Transport>(
             return;
         }
     }
-    let post_checks = matches!(&end, End::Finished(outcome) if should_run_post_checks(outcome));
+    let skip_reason = app_down.then_some(CheckSkipReason::AppLeftInMaintenance);
+    let saved_checks = saved_checks.filter(|_| !app_down);
+    let using_saved_checks = saved_checks.is_some();
+    if let Some(reason) = skip_reason {
+        let _ = events.send(DeployEvent::ChecksSkipped { reason });
+    }
+    let post_checks =
+        !app_down && matches!(&end, End::Finished(outcome) if should_run_post_checks(outcome));
     let watch_status = if post_checks {
         WatchStatus::Complete
     } else if matches!(
@@ -1233,6 +1241,10 @@ async fn run_steps<T: Transport>(
     let checks = async {
         let watch = async {
             match observer {
+                Some(observer) if app_down => {
+                    observer.abort();
+                    WatchResult::not_run()
+                }
                 Some(observer) => {
                     if watch_status == WatchStatus::Complete {
                         let _ = events.send(DeployEvent::WatchStarted {
@@ -1275,9 +1287,10 @@ async fn run_steps<T: Transport>(
         );
     }
     if let Some(previous) = resume.as_ref().and_then(|receipt| receipt.watch.as_ref()) {
-        if resume
-            .as_ref()
-            .is_some_and(|receipt| receipt.outcome.is_none())
+        if !app_down
+            && resume
+                .as_ref()
+                .is_some_and(|receipt| receipt.outcome.is_none())
         {
             merge_previous_watch(&mut watch_result, previous);
             watch_result.status = WatchStatus::Partial;
@@ -1286,9 +1299,9 @@ async fn run_steps<T: Transport>(
                 .push("Previous observation was interrupted".into());
         }
     }
-    let saved = journal
-        .as_ref()
-        .map(|journal| journal.observation(watch_result.clone(), smoke_result.clone()));
+    let saved = journal.as_ref().map(|journal| {
+        journal.observation(watch_result.clone(), smoke_result.clone(), skip_reason)
+    });
     if let Some(Err(error)) = saved {
         send_run_error(
             &events,
@@ -4385,6 +4398,352 @@ mod tests {
             .count()
     }
 
+    async fn smoke_endpoint() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let requests = Arc::new(AtomicUsize::new(0));
+        let counted = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    socket.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+                socket.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            }
+        });
+        (url, requests, server)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_run_left_in_maintenance_skips_checks_and_releases_lock_promptly() {
+        let (url, requests, server) = smoke_endpoint().await;
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .on("artisan down", &[], 0)
+                .on("migrate", &[], 1),
+        );
+        let mut target = maintenance_target(false, &["migrate"]);
+        target.watch_log = true;
+        target.smoke_url = Some(url);
+        let preview = prepare(&trusted(target), &*fake).await.unwrap();
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let release_journal = journal.clone();
+        *fake.on_lock_release.lock().unwrap() = Some(Box::new(move || {
+            let receipt = release_journal.snapshot();
+            assert_eq!(receipt.status, ReceiptStatus::InProgress);
+            assert!(receipt.finished_at_ms.is_none());
+            assert_eq!(
+                receipt.checks_skip_reason,
+                Some(CheckSkipReason::AppLeftInMaintenance)
+            );
+        }));
+        let confirm = Confirmation::from(&preview, None).unwrap();
+        let (mut rx, _handle) =
+            execute_recorded(preview, confirm, fake.clone(), journal.clone()).unwrap();
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            let left_down = event == DeployEvent::AppLeftDown;
+            events.push(event);
+            if left_down {
+                break;
+            }
+        }
+        events.extend(
+            tokio::time::timeout(post_window() / 2, collect(rx))
+                .await
+                .expect("maintenance skips the watch window so recovery can take the lock"),
+        );
+        server.abort();
+
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            0,
+            "no maintenance-page request"
+        );
+        assert_eq!(watch_started(&events), 0);
+        assert!(events.contains(&DeployEvent::SmokeFinished(SmokeResult::Skipped)));
+        assert!(matches!(
+            events.last(),
+            Some(DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                step: 1,
+                ..
+            }))
+        ));
+        assert!(
+            fake.lock.lock().unwrap().owner.is_none(),
+            "lock released before Finished"
+        );
+        let receipt = crate::receipt::read(journal.path()).unwrap();
+        assert!(receipt.app_left_down);
+        assert_eq!(receipt.watch.as_ref().unwrap().status, WatchStatus::NotRun);
+        assert_eq!(receipt.smoke, Some(SmokeResult::Skipped));
+        assert_eq!(
+            serde_json::to_value(&receipt).unwrap()["checks_skip_reason"],
+            "AppLeftInMaintenance"
+        );
+        assert_eq!(receipt.version, 1);
+        for details in [false, true] {
+            let markdown = crate::receipt::markdown(&receipt, details);
+            assert!(
+                markdown.contains("## Log watch\n\nSkipped: app left in maintenance mode."),
+                "{markdown}"
+            );
+            assert!(
+                markdown.contains("## Smoke check\n\nSkipped: app left in maintenance mode."),
+                "{markdown}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stopped_run_left_in_maintenance_skips_checks_for_recovery() {
+        for during_down in [false, true] {
+            let (url, requests, server) = smoke_endpoint().await;
+            let gate = Arc::new(Notify::new());
+            let fake = if during_down {
+                preflight().gated("artisan down", gate.clone())
+            } else {
+                preflight()
+                    .on("artisan down", &[], 0)
+                    .on("git merge --ff-only", &[], 0)
+                    .gated("migrate", gate.clone())
+            };
+            let fake = Arc::new(fake);
+            let mut target = maintenance_target(false, &["migrate", "optimize"]);
+            target.watch_log = true;
+            target.smoke_url = Some(url);
+            let preview = prepare(&trusted(target), &*fake).await.unwrap();
+            let dir = TempReceipts::new();
+            let journal = Arc::new(
+                ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap(),
+            );
+            let confirm = Confirmation::from(&preview, None).unwrap();
+            let (mut rx, handle) =
+                execute_recorded(preview, confirm, fake.clone(), journal.clone()).unwrap();
+            while let Some(event) = rx.recv().await {
+                if (during_down
+                    && matches!(
+                        event,
+                        DeployEvent::MaintenanceStarted {
+                            phase: MaintenancePhase::Down
+                        }
+                    ))
+                    || (!during_down && matches!(event, DeployEvent::StepStarted { index: 1, .. }))
+                {
+                    handle.stop_after_step();
+                    gate.notify_one();
+                    break;
+                }
+            }
+            let events = collect(rx).await;
+            server.abort();
+            assert_eq!(requests.load(Ordering::SeqCst), 0);
+            assert_eq!(watch_started(&events), 0);
+            assert!(events.contains(&DeployEvent::SmokeFinished(SmokeResult::Skipped)));
+            assert!(fake.lock.lock().unwrap().owner.is_none());
+            assert_eq!(fake.launched("optimize"), 0);
+            let receipt = crate::receipt::read(journal.path()).unwrap();
+            assert_eq!(receipt.watch.as_ref().unwrap().status, WatchStatus::NotRun);
+            assert_eq!(
+                serde_json::to_value(&receipt).unwrap()["checks_skip_reason"],
+                "AppLeftInMaintenance"
+            );
+            if during_down {
+                assert!(matches!(
+                    receipt.outcome,
+                    Some(DeployOutcome::StoppedInMaintenance(_))
+                ));
+                assert_eq!(fake.launched("git merge --ff-only"), 0);
+            } else {
+                assert!(matches!(
+                    receipt.outcome,
+                    Some(DeployOutcome::StoppedAfterStep { step: 1, .. })
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_run_without_maintenance_still_smokes_and_watches() {
+        let (url, requests, server) = smoke_endpoint().await;
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .on("migrate", &[], 1),
+        );
+        let mut target = target(false, &["migrate"]);
+        target.watch_log = true;
+        target.smoke_url = Some(url);
+        let preview = prepare(&trusted(target), &*fake).await.unwrap();
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirm = Confirmation::from(&preview, None).unwrap();
+        let (rx, _handle) =
+            execute_recorded(preview, confirm, fake.clone(), journal.clone()).unwrap();
+        let events = collect(rx).await;
+        server.abort();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(watch_started(&events), 1);
+        assert!(matches!(
+            events.last(),
+            Some(DeployEvent::Finished(DeployOutcome::FailedAtStep {
+                step: 1,
+                ..
+            }))
+        ));
+        assert!(fake.lock.lock().unwrap().owner.is_none());
+        let receipt = crate::receipt::read(journal.path()).unwrap();
+        assert!(!receipt.app_left_down);
+        assert!(matches!(
+            receipt.smoke,
+            Some(SmokeResult::Passed { status: 204, .. })
+        ));
+        assert_eq!(
+            receipt.watch.as_ref().unwrap().status,
+            WatchStatus::NoLogSeen
+        );
+        assert!(serde_json::to_value(&receipt)
+            .unwrap()
+            .get("checks_skip_reason")
+            .is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_maintenance_phases_and_fast_forward_skip_post_checks() {
+        for (down, fast_forward, up) in [(1, 0, 0), (0, 1, 0), (0, 0, 1)] {
+            let fake = Arc::new(
+                preflight()
+                    .on("artisan down", &[], down)
+                    .on("git merge --ff-only", &[], fast_forward)
+                    .on("artisan up", &[], up),
+            );
+            let mut target = maintenance_target(false, &[]);
+            target.watch_log = true;
+            let preview = prepare(&trusted(target), &*fake).await.unwrap();
+            let confirm = Confirmation::from(&preview, None).unwrap();
+            let (rx, _handle) = execute(preview, confirm, fake.clone()).unwrap();
+            let events = collect(rx).await;
+            assert!(events.contains(&DeployEvent::AppLeftDown));
+            assert!(events.contains(&DeployEvent::ChecksSkipped {
+                reason: CheckSkipReason::AppLeftInMaintenance
+            }));
+            assert_eq!(watch_started(&events), 0);
+            assert!(events.iter().any(|event| matches!(event, DeployEvent::WatchFinished(result) if result.status == WatchStatus::NotRun)));
+            assert!(fake.lock.lock().unwrap().owner.is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn attaching_left_down_with_older_saved_checks_records_skips_without_replaying() {
+        let (url, requests, server) = smoke_endpoint().await;
+        let fake = Arc::new(preflight());
+        let mut target = maintenance_target(false, &[]);
+        target.watch_log = true;
+        target.smoke_url = Some(url);
+        let preview = prepare(&trusted(target), &*fake).await.unwrap();
+        let dir = TempReceipts::new();
+        let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        journal.confirm().unwrap();
+        journal
+            .begin_maintenance(MaintenancePhase::Down, now_ms())
+            .unwrap();
+        journal
+            .finish_maintenance(
+                MaintenancePhase::Down,
+                StepStatus::Ok,
+                Some(0),
+                StepTimes::default(),
+            )
+            .unwrap();
+        journal.begin_step(0, now_ms()).unwrap();
+        journal
+            .finish_step(0, StepStatus::Failed, Some(1), StepTimes::default())
+            .unwrap();
+        journal
+            .record_outcome(DeployOutcome::FailedAtStep {
+                step: 0,
+                partial_update: false,
+            })
+            .unwrap();
+        let mut previous = WatchResult::not_run();
+        previous.status = WatchStatus::Partial;
+        journal
+            .observation(
+                previous,
+                SmokeResult::Failed {
+                    status: Some(503),
+                    reason: "HTTP 503".into(),
+                },
+                None,
+            )
+            .unwrap();
+        let path = journal.path().to_path_buf();
+        drop(journal);
+        let journal = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (rx, _handle) = attach(
+            &trusted(journal.snapshot().target),
+            journal.clone(),
+            fake.clone(),
+        )
+        .unwrap();
+        let events = collect(rx).await;
+        server.abort();
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        assert_eq!(watch_started(&events), 0);
+        assert!(events.contains(&DeployEvent::SmokeFinished(SmokeResult::Skipped)));
+        assert!(fake.launched.lock().unwrap().is_empty());
+        assert!(fake.lock.lock().unwrap().owner.is_none());
+        let receipt = crate::receipt::read(&path).unwrap();
+        assert_eq!(receipt.watch.as_ref().unwrap().status, WatchStatus::NotRun);
+        assert_eq!(receipt.smoke, Some(SmokeResult::Skipped));
+        assert_eq!(
+            receipt.checks_skip_reason,
+            Some(CheckSkipReason::AppLeftInMaintenance)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unknown_run_left_in_maintenance_skips_checks_but_keeps_lock() {
+        let fake = Arc::new(
+            preflight()
+                .on("artisan down", &[], 0)
+                .on("git merge --ff-only", &[], 0)
+                .vanishes("migrate"),
+        );
+        let mut target = maintenance_target(false, &["migrate"]);
+        target.watch_log = true;
+        let preview = prepare(&trusted(target), &*fake).await.unwrap();
+        let confirm = Confirmation::from(&preview, None).unwrap();
+        let (rx, _handle) = execute(preview, confirm, fake.clone()).unwrap();
+        let events = collect(rx).await;
+        assert_eq!(watch_started(&events), 0);
+        assert!(events.contains(&DeployEvent::ChecksSkipped {
+            reason: CheckSkipReason::AppLeftInMaintenance
+        }));
+        assert!(matches!(
+            events.last(),
+            Some(DeployEvent::Finished(DeployOutcome::Unknown {
+                step: 1,
+                ..
+            }))
+        ));
+        assert!(
+            fake.lock.lock().unwrap().owner.is_some(),
+            "unknown outcomes retain their lock for inspection"
+        );
+    }
+
     async fn watched_run(fake: Fake, steps: &[&str]) -> Vec<DeployEvent> {
         let fake = Arc::new(fake);
         let mut target = maintenance_target(false, steps);
@@ -4531,7 +4890,7 @@ mod tests {
         let mut watch = WatchResult::not_run();
         watch.status = WatchStatus::Complete;
         journal
-            .observation(watch, SmokeResult::NotConfigured)
+            .observation(watch, SmokeResult::NotConfigured, None)
             .unwrap();
         let path = journal.path().to_path_buf();
         drop(journal);

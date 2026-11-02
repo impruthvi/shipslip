@@ -143,14 +143,18 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
 
     if let Some(watch) = &receipt.watch {
         out.push_str("\n## Log watch\n\n");
-        let _ = writeln!(
-            out,
-            "Status: {}, {}, {} lines read from {}.",
-            describe_watch(watch.status),
-            format_duration(u128::from(watch.duration_ms)),
-            watch.observed_lines,
-            code(watch.log_path.as_ref().unwrap_or(&target.log_path).raw())
-        );
+        if let Some(reason) = receipt.checks_skip_reason {
+            let _ = writeln!(out, "Skipped: {}.", reason.description());
+        } else {
+            let _ = writeln!(
+                out,
+                "Status: {}, {}, {} lines read from {}.",
+                describe_watch(watch.status),
+                format_duration(u128::from(watch.duration_ms)),
+                watch.observed_lines,
+                code(watch.log_path.as_ref().unwrap_or(&target.log_path).raw())
+            );
+        }
         if !watch.new_errors.is_empty() {
             out.push_str("\n| New error | File | Count |\n|---|---|---|\n");
             for group in &watch.new_errors {
@@ -200,7 +204,10 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
         out.push_str("\n## Smoke check\n\n");
         let text = match smoke {
             Smoke::NotConfigured => "Not configured.".into(),
-            Smoke::Skipped => "Skipped.".into(),
+            Smoke::Skipped => receipt.checks_skip_reason.map_or_else(
+                || "Skipped.".into(),
+                |reason| format!("Skipped: {}.", reason.description()),
+            ),
             Smoke::Passed { status, latency_ms } => {
                 format!("Passed: HTTP {status} in {latency_ms} ms.")
             }
