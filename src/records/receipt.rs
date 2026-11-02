@@ -36,6 +36,8 @@ pub struct ReceiptRecord {
     pub steps: Vec<StepRow>,
     pub watch: Option<Watch>,
     pub smoke: Option<Smoke>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checks_skip_reason: Option<crate::observation::CheckSkipReason>,
     pub notes: Vec<Untrusted>,
     pub next_steps: NextSteps,
 }
@@ -133,6 +135,7 @@ impl ReceiptRecord {
             steps: receipt.step_rows(),
             watch: receipt.watch.as_ref().map(Watch::from),
             smoke: receipt.smoke.as_ref().map(Smoke::from),
+            checks_skip_reason: receipt.checks_skip_reason,
             notes: receipt
                 .last_message
                 .iter()

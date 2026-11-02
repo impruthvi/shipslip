@@ -185,6 +185,9 @@ pub struct Receipt {
     pub watch: Option<WatchResult>,
     #[serde(default)]
     pub smoke: Option<SmokeResult>,
+    /// Applies to the smoke check and post-run log watch; absent in older receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks_skip_reason: Option<crate::observation::CheckSkipReason>,
     /// Who started the run; `None` in receipts written before it was recorded.
     #[serde(default)]
     pub actor: Option<Actor>,
@@ -290,6 +293,7 @@ impl Receipt {
             warnings: Vec::new(),
             watch: None,
             smoke: None,
+            checks_skip_reason: None,
             actor: Some(Actor::local(repo_root)),
         }
     }
@@ -353,6 +357,7 @@ impl Receipt {
             warnings: Vec::new(),
             watch: None,
             smoke: None,
+            checks_skip_reason: None,
             actor: Some(Actor::local(repo_root)),
         }
     }
@@ -630,10 +635,16 @@ impl ReceiptJournal {
         self.update(|receipt| receipt.outcome = Some(outcome))
     }
 
-    pub fn observation(&self, watch: WatchResult, smoke: SmokeResult) -> Result<(), ReceiptError> {
+    pub fn observation(
+        &self,
+        watch: WatchResult,
+        smoke: SmokeResult,
+        skip_reason: Option<crate::observation::CheckSkipReason>,
+    ) -> Result<(), ReceiptError> {
         self.update(|receipt| {
             receipt.watch = Some(watch);
             receipt.smoke = Some(smoke);
+            receipt.checks_skip_reason = skip_reason;
         })
     }
 

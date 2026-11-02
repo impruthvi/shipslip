@@ -68,6 +68,15 @@ CLI JSON never clips text for display; `--full` has no effect with `--json`.
 `--json` rejects `--raw`, `--channels`, and `--md`. It still honors log-read
 budgets such as `--max-bytes`; `truncated` and coverage report reader limits.
 
+## Receipt checks
+
+Receipt records may include the optional `checks_skip_reason` field. Its fixed
+value `AppLeftInMaintenance` means the smoke check (`skipped`) and post-run log
+watch (`NotRun`) were skipped because the app was left in maintenance mode.
+The local receipt stores the same optional field without changing its version.
+Older receipts omit it; an absent reason does not imply a quiet log or a passed
+smoke check. An unconfigured smoke check stays `not_configured`.
+
 ## MCP
 
 Launch `slip mcp` for local records only, or `slip mcp --read-logs` to also
@@ -165,6 +174,7 @@ including `anchor.plan`, `server_marker_outcome`, and `check.reason`.
   "receipt.flag.kind": ["new_errors", "log_not_fully_observed", "log_not_recorded", "smoke_failed", "smoke_not_recorded", "app_left_down"],
   "receipt.step.kind": ["maintenance_down", "step", "maintenance_up"],
   "receipt.step.status": ["pending", "running", "ok", "failed", "unknown", "not_started", "skipped"],
+  "receipt.checks_skip_reason": ["AppLeftInMaintenance"],
   "receipt.watch.status": ["Complete", "Partial", "Unavailable", "Cancelled", "NotRun", "NoLogSeen"],
   "receipt.watch.phase": ["During", "After"],
   "receipt.smoke.kind": ["not_configured", "skipped", "passed", "failed"],

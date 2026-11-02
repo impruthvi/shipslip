@@ -14,6 +14,7 @@ use shipslip::config::{
 use shipslip::github_auth::discover_repository;
 use shipslip::interrupt::{next_stage, on_interrupt, Interrupt, Stage};
 use shipslip::logs::{self, Level, Since};
+use shipslip::observation::CheckSkipReason;
 use shipslip::receipt::{
     default_receipts_root, duration_suffix, find_open, strip_color, ReceiptJournal, ReceiptKind,
 };
@@ -510,7 +511,17 @@ fn watch_left_text(left: Duration) -> Option<String> {
     (secs > 0).then(|| format!("Log watch: {secs} s left"))
 }
 
-fn watch_summary(result: &WatchResult) -> String {
+fn skipped_check(name: &str, reason: Option<CheckSkipReason>) -> String {
+    match reason {
+        Some(reason) => format!("{name}: skipped ({})", reason.description()),
+        None => format!("{name}: skipped"),
+    }
+}
+
+fn watch_summary(result: &WatchResult, skip_reason: Option<CheckSkipReason>) -> String {
+    if result.status == WatchStatus::NotRun && skip_reason.is_some() {
+        return skipped_check("Log watch", skip_reason);
+    }
     let errors = match result.new_errors.len() {
         0 => "no new errors".to_string(),
         1 => "1 new error group".to_string(),
@@ -541,6 +552,7 @@ async fn follow_events(
     interrupts: &mut Interrupts,
     view: &RunView,
 ) -> Result<ExitCode, Box<dyn Error>> {
+    let mut checks_skip_reason = None;
     let mut succeeded = false;
     let mut stage = Stage::Running;
     let mut interrupted_in = None;
@@ -666,9 +678,12 @@ async fn follow_events(
                     Instant::now() + window,
                 ));
             }
+            DeployEvent::ChecksSkipped { reason } => {
+                checks_skip_reason = Some(reason);
+            }
             DeployEvent::WatchFinished(result) => {
                 progress = None;
-                println!("{}", watch_summary(&result));
+                println!("{}", watch_summary(&result, checks_skip_reason));
                 for warning in result.warnings {
                     eprintln!("  {}", server_field(&warning));
                 }
@@ -684,7 +699,9 @@ async fn follow_events(
                         .unwrap_or_default(),
                     server_field(&reason)
                 ),
-                SmokeResult::Skipped => println!("Smoke check: skipped"),
+                SmokeResult::Skipped => {
+                    println!("{}", skipped_check("Smoke check", checks_skip_reason))
+                }
                 SmokeResult::NotConfigured => {}
             },
             DeployEvent::Detached { index } => {
@@ -2355,7 +2372,7 @@ mod tests {
         let summary = |status| {
             let mut result = WatchResult::not_run();
             result.status = status;
-            watch_summary(&result)
+            watch_summary(&result, None)
         };
         assert_eq!(
             summary(WatchStatus::Complete),
@@ -2366,6 +2383,15 @@ mod tests {
             "Log watch: stopped early, no new errors"
         );
         assert_eq!(summary(WatchStatus::NotRun), "Log watch: not run");
+        let reason = Some(CheckSkipReason::AppLeftInMaintenance);
+        assert_eq!(
+            watch_summary(&WatchResult::not_run(), reason),
+            "Log watch: skipped (app left in maintenance mode)"
+        );
+        assert_eq!(
+            skipped_check("Smoke check", reason),
+            "Smoke check: skipped (app left in maintenance mode)"
+        );
         assert_eq!(
             summary(WatchStatus::NoLogSeen),
             "Log watch: no log file found"

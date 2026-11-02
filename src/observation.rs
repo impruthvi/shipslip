@@ -101,6 +101,20 @@ impl WatchResult {
     }
 }
 
+/// Why both post-run checks were deliberately skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CheckSkipReason {
+    AppLeftInMaintenance,
+}
+
+impl CheckSkipReason {
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::AppLeftInMaintenance => "app left in maintenance mode",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SmokeResult {
     NotConfigured,
