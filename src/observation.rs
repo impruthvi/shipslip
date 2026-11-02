@@ -4,12 +4,13 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use base64::Engine as _;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
+use tokio::time::Instant;
 
 use crate::event::DeployEvent;
 use crate::receipt::HistoryPaths;
@@ -160,7 +161,7 @@ impl LogObserver {
             fetch(&*transport, &spec, &state.cursor, true),
         )
         .await
-        .unwrap_or_else(|_| Fetch::Unavailable("log baseline timed out".into()))
+        .unwrap_or(Fetch::Disconnected)
         {
             Fetch::File {
                 path,
@@ -185,6 +186,10 @@ impl LogObserver {
                 state.partial = true;
                 state.unavailable = true;
                 state.warn(reason);
+            }
+            Fetch::Disconnected => {
+                state.unavailable = true;
+                state.interrupted = Some(state.started);
             }
         }
         let (control, receiver) = watch::channel(Mode::Idle);
@@ -256,6 +261,7 @@ enum Fetch {
     },
     Missing,
     Unavailable(String),
+    Disconnected,
 }
 
 fn fetch_script(spec: &LogSpec, cursor: &Cursor, baseline: bool) -> String {
@@ -360,7 +366,7 @@ async fn fetch<T: Transport>(
     let (result, lines) = run_collect(transport, &fetch_script(spec, cursor, baseline)).await;
     match result {
         Ok(code) => parse_fetch(code, &lines),
-        Err(error) => Fetch::Unavailable(error.to_string()),
+        Err(_) => Fetch::Disconnected,
     }
 }
 
@@ -383,6 +389,8 @@ struct LogState {
     saw_file: bool,
     partial: bool,
     unavailable: bool,
+    interrupted: Option<Instant>,
+    missing_during_disconnect: Option<Duration>,
     /// The last read stopped before the end of the file.
     behind: bool,
     started: Instant,
@@ -418,6 +426,8 @@ impl LogState {
             saw_file: false,
             partial: false,
             unavailable: false,
+            interrupted: None,
+            missing_during_disconnect: None,
             behind: false,
             started: Instant::now(),
         }
@@ -564,6 +574,21 @@ impl LogState {
             return (WatchResult::not_run(), Vec::new());
         }
         self.flush(false, events);
+        if let Some(since) = self.interrupted.take() {
+            *self.missing_during_disconnect.get_or_insert(Duration::ZERO) += since.elapsed();
+        }
+        if let Some(missing_for) = self.missing_during_disconnect {
+            self.partial = true;
+            let seconds = missing_for.as_secs().max(1);
+            let duration = if seconds >= 60 {
+                format!("{}m {}s", seconds / 60, seconds % 60)
+            } else {
+                format!("{seconds}s")
+            };
+            self.warn(format!(
+                "Lost the connection for {duration}; log lines from that time may be missing"
+            ));
+        }
         if self.behind {
             self.partial = true;
             self.warn("Log grew faster than it could be read; later entries were not checked");
@@ -574,7 +599,7 @@ impl LogState {
             WatchStatus::NotRun => WatchStatus::NotRun,
             WatchStatus::Cancelled => WatchStatus::Cancelled,
             WatchStatus::Partial => WatchStatus::Partial,
-            _ if self.unavailable => WatchStatus::Unavailable,
+            _ if self.unavailable && !self.saw_file => WatchStatus::Unavailable,
             _ if !self.saw_file => WatchStatus::NoLogSeen,
             _ if self.partial
                 || (self.result.observed_lines >= 20
@@ -805,13 +830,17 @@ async fn watch_loop<T: Transport>(
         } else {
             LogPhase::During
         };
+        if state.interrupted.is_some() {
+            let _ = tokio::time::timeout(Duration::from_secs(15), transport.reconnect()).await;
+        }
         let recovering_baseline = state.unavailable && !state.saw_file;
+        let polled_at = Instant::now();
         match tokio::time::timeout(
             Duration::from_secs(10),
             fetch(&*transport, &spec, &state.cursor, recovering_baseline),
         )
         .await
-        .unwrap_or_else(|_| Fetch::Unavailable("log poll timed out".into()))
+        .unwrap_or(Fetch::Disconnected)
         {
             Fetch::File {
                 path,
@@ -821,9 +850,21 @@ async fn watch_loop<T: Transport>(
                 bytes,
                 rotated,
             } => {
+                let interrupted = state.interrupted.take();
+                if let Some(since) = interrupted {
+                    if recovering_baseline || rotated || start != state.cursor.offset {
+                        *state
+                            .missing_during_disconnect
+                            .get_or_insert(Duration::ZERO) += since.elapsed();
+                    }
+                }
                 if rotated && state.saw_file {
                     state.partial = true;
-                    state.warn("Log rotated or truncated during watch");
+                    if interrupted.is_none() && state.missing_during_disconnect.is_none() {
+                        state.warn(
+                            "Log rotated or truncated during watch; log lines may be missing",
+                        );
+                    }
                     state.partial_line.clear();
                     state.flush(false, &events);
                 }
@@ -842,9 +883,9 @@ async fn watch_loop<T: Transport>(
                 };
                 state.bytes(&bytes, phase, recovering_baseline, &events);
                 if recovering_baseline {
+                    state.partial = true;
                     state.flush(true, &events);
                     state.partial_line.clear();
-                    state.warn("Log baseline recovered; entries during the gap may be missing");
                 } else if bytes.is_empty()
                     && state.current_entry.is_some()
                     && state.last_entry_update.elapsed() >= Duration::from_secs(1)
@@ -854,6 +895,16 @@ async fn watch_loop<T: Transport>(
             }
             // The log directory was readable, so a file created later is new.
             Fetch::Missing => {
+                if state.saw_file {
+                    state.partial = true;
+                    if let Some(since) = state.interrupted.take() {
+                        *state
+                            .missing_during_disconnect
+                            .get_or_insert(Duration::ZERO) += since.elapsed();
+                    } else if state.missing_during_disconnect.is_none() {
+                        state.warn("Log file disappeared during watch; log lines may be missing");
+                    }
+                }
                 state.unavailable = false;
                 state.behind = false;
             }
@@ -862,7 +913,11 @@ async fn watch_loop<T: Transport>(
                 state.unavailable = true;
                 state.behind = false;
                 state.warn(reason);
-                let _ = transport.reconnect().await;
+            }
+            Fetch::Disconnected => {
+                state.interrupted.get_or_insert(polled_at);
+                state.unavailable = true;
+                state.behind = false;
             }
         }
     }
@@ -1043,6 +1098,9 @@ mod tests {
     struct LogTransport {
         reads: Mutex<Vec<Read>>,
         scripts: Mutex<Vec<String>>,
+        connected: AtomicBool,
+        reconnect_failures: Mutex<usize>,
+        reconnect_hangs: AtomicBool,
     }
 
     impl LogTransport {
@@ -1050,6 +1108,9 @@ mod tests {
             Arc::new(Self {
                 reads: Mutex::new(reads),
                 scripts: Mutex::new(Vec::new()),
+                connected: AtomicBool::new(true),
+                reconnect_failures: Mutex::new(0),
+                reconnect_hangs: AtomicBool::new(false),
             })
         }
 
@@ -1071,6 +1132,9 @@ mod tests {
             _line_limit: usize,
         ) -> Result<i32, TransportError> {
             self.scripts.lock().unwrap().push(script.into());
+            if !self.connected.load(Ordering::Relaxed) {
+                return Err(TransportError::Connect("raw openssh mux error".into()));
+            }
             let read = {
                 let mut reads = self.reads.lock().unwrap();
                 if reads.len() > 1 {
@@ -1080,7 +1144,10 @@ mod tests {
                 }
             };
             match read {
-                Read::Lost => Err(TransportError::ConnectionLost("lost".into())),
+                Read::Lost => {
+                    self.connected.store(false, Ordering::Relaxed);
+                    Err(TransportError::ConnectionLost("raw openssh EOF".into()))
+                }
                 Read::Missing => {
                     let _ = output.send("@missing".into()).await;
                     Ok(0)
@@ -1102,6 +1169,17 @@ mod tests {
         }
 
         async fn reconnect(&self) -> Result<(), TransportError> {
+            if self.reconnect_hangs.load(Ordering::Relaxed) {
+                std::future::pending::<()>().await;
+            }
+            let mut failures = self.reconnect_failures.lock().unwrap();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(TransportError::Connect(
+                    "raw openssh reconnect error".into(),
+                ));
+            }
+            self.connected.store(true, Ordering::Relaxed);
             Ok(())
         }
     }
@@ -1156,6 +1234,109 @@ mod tests {
             start: 0,
             bytes,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_recovers_after_failed_polls_without_losing_lines_or_claiming_a_gap() {
+        let transport = LogTransport::new(vec![
+            whole(OLD_ERROR),
+            Read::Lost,
+            Read::File {
+                size: OLD_ERROR.len() + NEW_ERROR.len(),
+                start: OLD_ERROR.len(),
+                bytes: NEW_ERROR,
+            },
+            Read::File {
+                size: OLD_ERROR.len() + NEW_ERROR.len(),
+                start: OLD_ERROR.len() + NEW_ERROR.len(),
+                bytes: b"",
+            },
+        ]);
+        *transport.reconnect_failures.lock().unwrap() = 199;
+        let (result, events) = observe(&transport, Duration::from_secs(101)).await;
+
+        assert_eq!(result.observed_lines, 1);
+        assert_eq!(result.new_errors[0].exception, "NewException");
+        assert_eq!(new_error_events(&events), 1);
+        assert_eq!(result.status, WatchStatus::Complete);
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_reports_one_plain_gap_warning_when_connection_never_recovers() {
+        let transport = LogTransport::new(vec![whole(OLD_ERROR), Read::Lost]);
+        *transport.reconnect_failures.lock().unwrap() = 1000;
+        let (result, _) = observe(&transport, Duration::from_secs(100)).await;
+
+        assert_eq!(result.status, WatchStatus::Partial);
+        assert_eq!(result.observed_lines, 0);
+        assert_eq!(
+            result.warnings,
+            ["Lost the connection for 1m 40s; log lines from that time may be missing"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_reports_one_gap_when_the_log_rotates_during_a_disconnect() {
+        let transport = LogTransport::new(vec![
+            whole(OLD_ERROR),
+            Read::Lost,
+            whole(NEW_ERROR),
+            Read::File {
+                size: NEW_ERROR.len(),
+                start: NEW_ERROR.len(),
+                bytes: b"",
+            },
+        ]);
+        let (result, _) = observe(&transport, Duration::from_secs(2)).await;
+
+        assert_eq!(result.status, WatchStatus::Partial);
+        assert_eq!(result.observed_lines, 1);
+        assert_eq!(result.new_errors[0].exception, "NewException");
+        assert_eq!(
+            result.warnings,
+            ["Lost the connection for 1s; log lines from that time may be missing"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_reports_one_gap_when_the_log_disappears_during_a_disconnect() {
+        let transport = LogTransport::new(vec![
+            whole(OLD_ERROR),
+            Read::Lost,
+            Read::Missing,
+            Read::Missing,
+            whole(NEW_ERROR),
+            Read::File {
+                size: NEW_ERROR.len(),
+                start: NEW_ERROR.len(),
+                bytes: b"",
+            },
+        ]);
+        let (result, _) = observe(&transport, Duration::from_secs(3)).await;
+
+        assert_eq!(result.status, WatchStatus::Partial);
+        assert_eq!(result.observed_lines, 1);
+        assert_eq!(
+            result.warnings,
+            ["Lost the connection for 1s; log lines from that time may be missing"]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_can_finish_when_reconnecting_stalls() {
+        let transport = LogTransport::new(vec![whole(OLD_ERROR), Read::Lost]);
+        transport.reconnect_hangs.store(true, Ordering::Relaxed);
+        let (result, _) = tokio::time::timeout(
+            Duration::from_secs(20),
+            observe(&transport, Duration::from_secs(1)),
+        )
+        .await
+        .expect("a stalled reconnect must not block the watch indefinitely");
+
+        assert_eq!(result.status, WatchStatus::Partial);
+        assert_eq!(result.warnings.len(), 1);
+        assert!(result.warnings[0].contains("log lines from that time may be missing"));
     }
 
     #[tokio::test]
