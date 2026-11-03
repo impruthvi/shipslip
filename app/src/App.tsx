@@ -310,6 +310,11 @@ export default function App() {
               production={entry?.kind === "ready" && entry.production}
             />
           }
+          attachRunId={
+            entry?.kind === "ready" && entry.recovery?.actions.some((a) => a.kind === "attach")
+              ? entry.recovery.runId
+              : null
+          }
           entry={
             <DeployEntryBar
               entry={entry}

@@ -1589,6 +1589,43 @@ fn quitting_while_bringing_the_app_up_waits_for_it_and_ends_keep_awake() {
 }
 
 #[test]
+fn quit_now_records_that_the_app_closed_in_each_open_run() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let (_hold, gate) = tauri::async_runtime::channel(1);
+        *remote.observe_gate.lock().await = Some(gate);
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        let review = sessions.review_up(root, "production".into()).await.unwrap();
+        sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        until(|| remote.observe_entered.load(Ordering::SeqCst) == 1);
+        sessions.close_hard();
+
+        let dir = fx.receipts().join("example/production");
+        let path = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.extension().is_some_and(|ext| ext == "json"))
+            .unwrap();
+        let saved = receipt::read(&path).unwrap();
+        assert_eq!(saved.status, ReceiptStatus::InProgress);
+        assert_eq!(
+            saved.unfinished_cause,
+            Some(receipt::UnfinishedCause::AppClosed)
+        );
+        assert_eq!(
+            saved.last_message.as_deref(),
+            Some("The app closed while maintenance mode was being turned off.")
+        );
+    });
+}
+
+#[test]
 fn quitting_while_connecting_stops_the_run_before_it_launches_anything() {
     tauri::async_runtime::block_on(async {
         let fx = Fixture::new();

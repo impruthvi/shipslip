@@ -3,7 +3,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use super::{Flag, Outcome, ReceiptQueryError, StepRow, Untrusted};
-use crate::receipt::{self, Listed, Receipt, ReceiptKind};
+use crate::receipt::{self, Listed, Receipt, ReceiptKind, UnfinishedCause};
 use crate::RunPlan;
 
 pub const DEFAULT_RECEIPTS_LIMIT: usize = 20;
@@ -51,6 +51,9 @@ pub struct ReceiptSummary {
     pub outcome: Outcome,
     pub flags: Vec<Flag>,
     pub app_left_down: bool,
+    /// Why this Mac stopped watching an open run, when that was recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unfinished_cause: Option<UnfinishedCause>,
     pub recipe_steps: usize,
     pub steps: Vec<StepRow>,
 }
@@ -70,6 +73,7 @@ impl From<&Receipt> for ReceiptSummary {
             outcome: badge.outcome,
             flags: badge.flags,
             app_left_down: receipt.app_left_down,
+            unfinished_cause: receipt.unfinished_cause,
             recipe_steps: receipt.target.steps.len(),
             steps: receipt.step_rows(),
         }

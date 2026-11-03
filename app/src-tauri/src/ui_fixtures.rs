@@ -510,6 +510,12 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
         "(RecoveryView | null)[]",
         deploy("recoveries"),
     );
+    item(
+        &mut out,
+        "unfinishedRecoveries",
+        "Record<string, RecoveryView | null>",
+        deploy("unfinishedRecoveries"),
+    );
     item(&mut out, "liveRuns", "LiveRuns", deploy("liveRuns"));
     out
 }

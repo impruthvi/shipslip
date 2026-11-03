@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,8 @@ use crate::observation::{
 };
 use crate::preflight::{self, AbortReason, BlockReason, State};
 use crate::receipt::{
-    now_ms, Receipt, ReceiptJournal, ReceiptKind, ReceiptPhase, ReceiptStatus, ReceiptStepStatus,
+    now_ms, Receipt, ReceiptError, ReceiptJournal, ReceiptKind, ReceiptPhase, ReceiptStatus,
+    ReceiptStepStatus,
 };
 use crate::runner::{self, run_collect, run_collect_each, StepResult};
 use crate::script::{is_full_sha, is_safe_branch, wrap_step};
@@ -262,6 +263,8 @@ pub struct ExecutionHandle {
     stop: Arc<AtomicBool>,
     detach: watch::Sender<bool>,
     watch_cancel: Arc<AtomicBool>,
+    /// Weak, so the handle never keeps the receipt claim alive.
+    journal: Weak<ReceiptJournal>,
 }
 
 impl ExecutionHandle {
@@ -278,6 +281,16 @@ impl ExecutionHandle {
     /// Stop watching the Laravel log; the deploy outcome is unchanged.
     pub fn cancel_watch(&self) {
         self.watch_cancel.store(true, Ordering::SeqCst);
+    }
+
+    /// The front-end is about to exit without detaching. Records that in the
+    /// receipt, so the next session can tell the app closed from a lost
+    /// connection. Nothing is sent to the server.
+    pub fn closing_hard(&self) -> Result<(), ReceiptError> {
+        match self.journal.upgrade() {
+            Some(journal) => journal.app_closed(),
+            None => Ok(()),
+        }
     }
 }
 
@@ -582,6 +595,7 @@ fn spawn_up<T: Transport>(
         stop: Arc::new(AtomicBool::new(false)),
         detach: detach_tx,
         watch_cancel: Arc::new(AtomicBool::new(false)),
+        journal: Arc::downgrade(&journal),
     };
     tokio::spawn(run_up(
         preview,
@@ -683,7 +697,7 @@ async fn run_up<T: Transport>(
             return;
         }
         End::Detached(index) => {
-            let _ = journal.message("detached while observing `php artisan up`".into());
+            let _ = journal.detached("detached while observing `php artisan up`".into());
             journal.release_claim();
             drop(journal);
             let _ = events.send(DeployEvent::Detached { index });
@@ -925,6 +939,7 @@ fn spawn_run<T: Transport>(
         stop: Arc::new(AtomicBool::new(false)),
         detach: detach_tx,
         watch_cancel: Arc::new(AtomicBool::new(false)),
+        journal: journal.as_ref().map_or_else(Weak::new, Arc::downgrade),
     };
     tokio::spawn(run_steps(
         preview,
@@ -1389,7 +1404,7 @@ async fn run_steps<T: Transport>(
         }
         End::Detached(index) => {
             if let Some(journal) = &journal {
-                let _ = journal.message(format!("detached while observing step {index}"));
+                let _ = journal.detached(format!("detached while observing step {index}"));
             }
             DeployEvent::Detached { index }
         }
@@ -4650,6 +4665,100 @@ mod tests {
         assert_eq!(events, vec![DeployEvent::Detached { index: 1 }]);
     }
 
+    /// A recorded run whose step 1 waits on the returned gate, stopped at
+    /// that step's start.
+    async fn recorded_at_step_one(
+        dir: &TempReceipts,
+    ) -> (RunEvents, ExecutionHandle, Arc<ReceiptJournal>, Arc<Notify>) {
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .gated("migrate", gate.clone()),
+        );
+        let preview = prepared(&fake, false, &["php artisan migrate --force"]).await;
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (mut rx, handle) =
+            execute_recorded(preview, confirmation, fake, journal.clone()).unwrap();
+        while !matches!(
+            rx.recv().await,
+            Some(DeployEvent::StepStarted { index: 1, .. })
+        ) {}
+        (rx, handle, journal, gate)
+    }
+
+    #[tokio::test]
+    async fn closing_hard_records_that_the_app_closed_during_the_step() {
+        let dir = TempReceipts::new();
+        let (_rx, handle, journal, _gate) = recorded_at_step_one(&dir).await;
+        handle.closing_hard().unwrap();
+
+        let receipt = crate::receipt::read(journal.path()).unwrap();
+        assert_eq!(receipt.status, ReceiptStatus::InProgress);
+        assert_eq!(
+            receipt.unfinished_cause,
+            Some(crate::receipt::UnfinishedCause::AppClosed)
+        );
+        assert_eq!(
+            receipt.last_message.as_deref(),
+            Some("The app closed while step 1 was running.")
+        );
+    }
+
+    #[tokio::test]
+    async fn closing_hard_after_the_run_ended_leaves_the_receipt_alone() {
+        let dir = TempReceipts::new();
+        let (rx, handle, journal, gate) = recorded_at_step_one(&dir).await;
+        gate.notify_one();
+        assert!(matches!(
+            collect(rx).await.last(),
+            Some(DeployEvent::Finished(DeployOutcome::Succeeded))
+        ));
+        handle.closing_hard().unwrap();
+
+        let receipt = crate::receipt::read(journal.path()).unwrap();
+        assert_eq!(receipt.status, ReceiptStatus::Final);
+        assert_eq!(receipt.unfinished_cause, None);
+    }
+
+    #[tokio::test]
+    async fn the_app_closing_stays_the_cause_when_the_run_ends_while_exiting() {
+        let dir = TempReceipts::new();
+        let (rx, handle, journal, _gate) = recorded_at_step_one(&dir).await;
+        handle.closing_hard().unwrap();
+        handle.detach();
+        collect(rx).await;
+
+        let receipt = crate::receipt::read(journal.path()).unwrap();
+        assert_eq!(
+            receipt.unfinished_cause,
+            Some(crate::receipt::UnfinishedCause::AppClosed)
+        );
+    }
+
+    #[tokio::test]
+    async fn detach_records_the_detached_cause() {
+        let dir = TempReceipts::new();
+        let (rx, handle, journal, _gate) = recorded_at_step_one(&dir).await;
+        handle.detach();
+        assert_eq!(
+            collect(rx).await.last(),
+            Some(&DeployEvent::Detached { index: 1 })
+        );
+
+        let receipt = crate::receipt::read(journal.path()).unwrap();
+        assert_eq!(
+            receipt.unfinished_cause,
+            Some(crate::receipt::UnfinishedCause::Detached)
+        );
+        assert_eq!(
+            receipt.last_message.as_deref(),
+            Some("detached while observing step 1")
+        );
+    }
+
     // `#[tokio::test]` is single-threaded: the deploy task does not start
     // until the test awaits, so the handle call lands before step 0.
     #[tokio::test]
@@ -5987,12 +6096,18 @@ mod tests {
         drop(journal);
 
         let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        assert_eq!(
+            resumed.snapshot().unfinished_cause,
+            Some(crate::receipt::UnfinishedCause::Detached)
+        );
         let (events, _handle) = attach(
             &trusted(resumed.snapshot().target),
             resumed.clone(),
             fake.clone(),
         )
         .unwrap();
+        // The attaching session owns the run now; the old cause is cleared.
+        assert_eq!(crate::receipt::read(&path).unwrap().unfinished_cause, None);
         gate.notify_one();
         let events = collect_timed(events).await;
         assert_eq!(
@@ -6471,6 +6586,10 @@ mod tests {
             .detail
             .contains("refused"));
         assert_eq!(receipt.last_message.as_deref(), Some("The connection was lost. Shipslip could not re-attach. The step's result is not known."));
+        assert_eq!(
+            receipt.unfinished_cause,
+            Some(crate::receipt::UnfinishedCause::ConnectionLost)
+        );
         assert_eq!(
             events
                 .iter()

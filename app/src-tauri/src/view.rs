@@ -462,6 +462,9 @@ pub struct Guidance {
     pub lines: Vec<Vec<Span>>,
     /// Some line names a command, but none could be offered for copying.
     pub copy_withheld: bool,
+    /// The line that names `slip attach`, left out where the app offers its
+    /// own Attach.
+    pub attach_line: Option<usize>,
 }
 
 /// A receipt's next steps as spans. Commands become copyable only when the
@@ -504,6 +507,7 @@ pub fn guidance(next: &NextSteps, repo_root: &str) -> Guidance {
     Guidance {
         lines,
         copy_withheld: !next.copy_safe && names_a_command,
+        attach_line: next.steps.iter().position(|step| step.runs("attach")),
     }
 }
 
@@ -895,6 +899,7 @@ mod span_tests {
         let next = steps(&fx, &unfinished("staging", "/work/app"));
         let guidance = guidance(&next, "/work/app");
         assert!(!guidance.copy_withheld);
+        assert_eq!(guidance.attach_line, Some(0));
         assert_eq!(
             guidance.lines[0],
             [

@@ -130,6 +130,19 @@ impl ReceiptStep {
     }
 }
 
+/// Why this Mac stopped watching a run that is still open, as recorded at
+/// the time. Absent when nothing was recorded, for example after a crash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnfinishedCause {
+    /// The user detached; the running step kept running on the server.
+    Detached,
+    /// The front-end closed without detaching.
+    AppClosed,
+    /// The connection was lost and Shipslip could not re-attach.
+    ConnectionLost,
+}
+
 /// What a run did on the server.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -200,6 +213,9 @@ pub struct Receipt {
     pub server_head_at_end: Option<String>,
     pub tree_dirty: Option<bool>,
     pub last_message: Option<String>,
+    /// Absent in receipts written before it was recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unfinished_cause: Option<UnfinishedCause>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
     #[serde(default)]
@@ -319,6 +335,7 @@ impl Receipt {
             server_head_at_end: None,
             tree_dirty: None,
             last_message: None,
+            unfinished_cause: None,
             warnings: Vec::new(),
             watch: None,
             smoke: None,
@@ -389,6 +406,7 @@ impl Receipt {
             server_head_at_end: None,
             tree_dirty: None,
             last_message: None,
+            unfinished_cause: None,
             warnings: Vec::new(),
             watch: None,
             smoke: None,
@@ -406,6 +424,7 @@ impl Receipt {
     }
 }
 
+#[derive(Debug)]
 pub struct ReceiptJournal {
     path: PathBuf,
     state: Mutex<Receipt>,
@@ -515,8 +534,13 @@ impl ReceiptJournal {
         self.state.lock().unwrap().clone()
     }
 
+    /// A new session takes over the run; why the last one let go no longer
+    /// describes it.
     pub fn set_owner_pid(&self, pid: u32) -> Result<(), ReceiptError> {
-        self.update(|receipt| receipt.owner_pid = pid)
+        self.update(|receipt| {
+            receipt.owner_pid = pid;
+            receipt.unfinished_cause = None;
+        })
     }
 
     pub fn confirm(&self) -> Result<(), ReceiptError> {
@@ -669,6 +693,7 @@ impl ReceiptJournal {
                 }
             }
             receipt.last_message = Some(message.clone());
+            keep_app_closed(receipt, UnfinishedCause::ConnectionLost);
         })?;
         Ok(message)
     }
@@ -766,6 +791,44 @@ impl ReceiptJournal {
         self.update(|receipt| receipt.last_message = Some(message))
     }
 
+    pub(crate) fn detached(&self, message: String) -> Result<(), ReceiptError> {
+        self.update(|receipt| {
+            receipt.last_message = Some(message);
+            keep_app_closed(receipt, UnfinishedCause::Detached);
+        })
+    }
+
+    /// Records that the front-end is closing without detaching. Does nothing
+    /// once the run has let go of the receipt, so a run that already ended
+    /// keeps its own record.
+    pub(crate) fn app_closed(&self) -> Result<(), ReceiptError> {
+        let claim = self
+            .claim
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if claim.is_none() {
+            return Ok(());
+        }
+        if self.state.lock().unwrap().status == ReceiptStatus::Final {
+            return Ok(());
+        }
+        self.write(|next| {
+            next.last_message = Some(match next.phase {
+                ReceiptPhase::Step(index) => {
+                    format!("The app closed while step {index} was running.")
+                }
+                ReceiptPhase::MaintenanceDown => {
+                    "The app closed while maintenance mode was being turned on.".into()
+                }
+                ReceiptPhase::MaintenanceUp => {
+                    "The app closed while maintenance mode was being turned off.".into()
+                }
+                _ => "The app closed before the run finished.".into(),
+            });
+            next.unfinished_cause = Some(UnfinishedCause::AppClosed);
+        })
+    }
+
     pub fn record_outcome(&self, outcome: DeployOutcome) -> Result<(), ReceiptError> {
         self.update(|receipt| receipt.outcome = Some(outcome))
     }
@@ -815,11 +878,17 @@ impl ReceiptJournal {
             receipt.phase = ReceiptPhase::Finished;
             receipt.finished_at_ms = Some(now_ms());
             receipt.outcome = Some(outcome);
+            receipt.unfinished_cause = None;
         })
     }
 
     fn update(&self, change: impl FnOnce(&mut Receipt)) -> Result<(), ReceiptError> {
         self.claim()?;
+        self.write(change)
+    }
+
+    /// Writes a change durably. The caller holds the claim.
+    fn write(&self, change: impl FnOnce(&mut Receipt)) -> Result<(), ReceiptError> {
         let mut receipt = self.state.lock().unwrap();
         let mut next = receipt.clone();
         change(&mut next);
@@ -836,6 +905,14 @@ impl ReceiptJournal {
 pub struct HistoryPaths {
     pub current: PathBuf,
     pub legacy: PathBuf,
+}
+
+/// The run may end on its own while the app is exiting; the app closing is
+/// still why nobody watched it finish.
+fn keep_app_closed(receipt: &mut Receipt, cause: UnfinishedCause) {
+    if receipt.unfinished_cause != Some(UnfinishedCause::AppClosed) {
+        receipt.unfinished_cause = Some(cause);
+    }
 }
 
 fn is_zero(value: &usize) -> bool {

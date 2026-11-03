@@ -642,7 +642,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "notes": [],
       "nextSteps": {
         "lines": [],
-        "copyWithheld": false
+        "copyWithheld": false,
+        "attachLine": null
       }
     }
   },
@@ -762,7 +763,8 @@ export const receipts: Record<string, ReceiptResult> = {
             }
           ]
         ],
-        "copyWithheld": false
+        "copyWithheld": false,
+        "attachLine": null
       }
     }
   },
@@ -896,7 +898,8 @@ export const receipts: Record<string, ReceiptResult> = {
             }
           ]
         ],
-        "copyWithheld": false
+        "copyWithheld": false,
+        "attachLine": null
       }
     }
   },
@@ -1021,7 +1024,8 @@ export const receipts: Record<string, ReceiptResult> = {
             }
           ]
         ],
-        "copyWithheld": false
+        "copyWithheld": false,
+        "attachLine": null
       }
     }
   },
@@ -1104,7 +1108,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "notes": [],
       "nextSteps": {
         "lines": [],
-        "copyWithheld": false
+        "copyWithheld": false,
+        "attachLine": null
       }
     }
   },
@@ -1243,7 +1248,8 @@ export const receipts: Record<string, ReceiptResult> = {
             }
           ]
         ],
-        "copyWithheld": false
+        "copyWithheld": false,
+        "attachLine": null
       }
     }
   },
@@ -1332,7 +1338,8 @@ export const receipts: Record<string, ReceiptResult> = {
             }
           ]
         ],
-        "copyWithheld": false
+        "copyWithheld": false,
+        "attachLine": null
       }
     }
   },
@@ -1415,7 +1422,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "notes": [],
       "nextSteps": {
         "lines": [],
-        "copyWithheld": false
+        "copyWithheld": false,
+        "attachLine": null
       }
     }
   },
@@ -1498,7 +1506,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "notes": [],
       "nextSteps": {
         "lines": [],
-        "copyWithheld": false
+        "copyWithheld": false,
+        "attachLine": null
       }
     }
   },
@@ -1560,7 +1569,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "notes": [],
       "nextSteps": {
         "lines": [],
-        "copyWithheld": false
+        "copyWithheld": false,
+        "attachLine": null
       }
     }
   }
@@ -1822,6 +1832,7 @@ export const slips: Record<string, SlipView> = {
     "fromSha": "1111111111111111111111111111111111111111",
     "kind": "receipt",
     "nextSteps": {
+      "attachLine": 0,
       "copyWithheld": false,
       "lines": [
         [
@@ -1967,6 +1978,7 @@ export const slips: Record<string, SlipView> = {
     "fromSha": "1111111111111111111111111111111111111111",
     "kind": "receipt",
     "nextSteps": {
+      "attachLine": null,
       "copyWithheld": true,
       "lines": [
         [
@@ -2066,6 +2078,7 @@ export const slips: Record<string, SlipView> = {
     "fromSha": "1111111111111111111111111111111111111111",
     "kind": "receipt",
     "nextSteps": {
+      "attachLine": 0,
       "copyWithheld": false,
       "lines": [
         [
@@ -2167,6 +2180,7 @@ export const slips: Record<string, SlipView> = {
     "fromSha": "1111111111111111111111111111111111111111",
     "kind": "receipt",
     "nextSteps": {
+      "attachLine": null,
       "copyWithheld": false,
       "lines": []
     },
@@ -2252,6 +2266,7 @@ export const slips: Record<string, SlipView> = {
     "fromSha": "1111111111111111111111111111111111111111",
     "kind": "receipt",
     "nextSteps": {
+      "attachLine": null,
       "copyWithheld": false,
       "lines": []
     },
@@ -2337,6 +2352,7 @@ export const slips: Record<string, SlipView> = {
     "fromSha": "1111111111111111111111111111111111111111",
     "kind": "receipt",
     "nextSteps": {
+      "attachLine": null,
       "copyWithheld": false,
       "lines": []
     },
@@ -2419,6 +2435,7 @@ export const slips: Record<string, SlipView> = {
     "fromSha": "1111111111111111111111111111111111111111",
     "kind": "receipt",
     "nextSteps": {
+      "attachLine": null,
       "copyWithheld": false,
       "lines": []
     },
@@ -2504,6 +2521,7 @@ export const slips: Record<string, SlipView> = {
     "fromSha": "1111111111111111111111111111111111111111",
     "kind": "receipt",
     "nextSteps": {
+      "attachLine": null,
       "copyWithheld": false,
       "lines": []
     },
@@ -3686,6 +3704,53 @@ export const recoveries: (RecoveryView | null)[] = [
     "sentence": "The run did not finish. It may still be running on the server."
   }
 ];
+
+export const unfinishedRecoveries: Record<string, RecoveryView | null> = {
+  "appClosed": {
+    "actions": [
+      {
+        "command": "slip attach production",
+        "kind": "attach"
+      }
+    ],
+    "advice": null,
+    "runId": "00000001-0",
+    "sentence": "The app closed during step 1. The step may still be running on the server."
+  },
+  "connectionLost": {
+    "actions": [
+      {
+        "command": "slip attach production",
+        "kind": "attach"
+      }
+    ],
+    "advice": null,
+    "runId": "00000001-0",
+    "sentence": "Lost the connection during step 1. The step may still be running on the server."
+  },
+  "detached": {
+    "actions": [
+      {
+        "command": "slip attach production",
+        "kind": "attach"
+      }
+    ],
+    "advice": null,
+    "runId": "00000001-0",
+    "sentence": "Detached on quit during step 1. The step kept running on the server."
+  },
+  "notRecorded": {
+    "actions": [
+      {
+        "command": "slip attach production",
+        "kind": "attach"
+      }
+    ],
+    "advice": null,
+    "runId": "00000001-0",
+    "sentence": "The run did not finish. Step 1 may still be running on the server."
+  }
+};
 
 export const liveRuns: LiveRuns = {
   "closedPreviews": [

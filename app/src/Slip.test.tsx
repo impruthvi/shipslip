@@ -26,7 +26,7 @@ function receiptOf(slip: SlipView): Extract<SlipView, { kind: "receipt" }> {
   return slip;
 }
 
-function show(opened: Opened, cell = cellAt("/Users/you/code/shop", "staging")) {
+function show(opened: Opened, cell = cellAt("/Users/you/code/shop", "staging"), attachOffered = false) {
   const onView = vi.fn();
   render(
     <Slip
@@ -34,6 +34,7 @@ function show(opened: Opened, cell = cellAt("/Users/you/code/shop", "staging")) 
       cell={cell}
       label="shop"
       env="staging"
+      attachOffered={attachOffered}
       context={{
         text: "Latest attempt · recorded code comes from an earlier run",
         links: [{ text: "open", label: "Open the receipt behind the recorded code", view: "code" }],
@@ -105,6 +106,13 @@ describe("receipt slips", () => {
     show(fixtures.slips.unfinished);
     expect(screen.getByText("Unfinished")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Copy slip attach staging" })).toBeInTheDocument();
+  });
+
+  test("unfinished, with the panel's own Attach: no slip attach hint", () => {
+    show(fixtures.slips.unfinished, undefined, true);
+    expect(screen.getByText("Unfinished")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Copy slip attach staging" })).toBeNull();
+    expect(screen.queryByText(/slip attach/)).toBeNull();
   });
 
   test("a finished step shows how long it took", () => {

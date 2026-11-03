@@ -902,6 +902,17 @@ impl<C: Connector> Sessions<C> {
         }
     }
 
+    /// The app is exiting without detaching: each running run records that
+    /// in its receipt, so the next session can say the app closed.
+    pub fn close_hard(&self) {
+        let state = self.registry();
+        for slot in state.slots.values() {
+            if let Phase::Running { control, .. } = &slot.phase {
+                let _ = control.closing_hard();
+            }
+        }
+    }
+
     /// Resolves once no run is starting or running.
     pub async fn wait_idle(&self) {
         let mut idle = {
@@ -2128,6 +2139,28 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         ])
         .unwrap(),
     );
+    let mut causes = serde_json::Map::new();
+    for (name, cause) in [
+        ("detached", Some(receipt::UnfinishedCause::Detached)),
+        ("appClosed", Some(receipt::UnfinishedCause::AppClosed)),
+        (
+            "connectionLost",
+            Some(receipt::UnfinishedCause::ConnectionLost),
+        ),
+        ("notRecorded", None),
+    ] {
+        let mut open = failed_receipt.clone();
+        open.status = ReceiptStatus::InProgress;
+        open.outcome = None;
+        open.steps[1].status = receipt::ReceiptStepStatus::Running;
+        open.steps[1].exit_code = None;
+        open.unfinished_cause = cause;
+        causes.insert(
+            name.into(),
+            to_value(recovery(&ReceiptSummary::from(&open))).unwrap(),
+        );
+    }
+    views.insert("unfinishedRecoveries", causes.into());
     views.insert(
         "liveRuns",
         to_value(LiveRuns {

@@ -52,11 +52,13 @@ interface Props {
   env: string;
   context: Context | null;
   onView: (view: PaneView) => void;
+  /** The panel offers its own Attach for this receipt's run. */
+  attachOffered?: boolean;
 }
 
 /** The receipt slip: header and outcome pinned on top, guidance pinned at the
  * bottom, the rest scrolling between the perforated edges. */
-export function Slip({ opened, cell, label, env, context, onView }: Props) {
+export function Slip({ opened, cell, label, env, context, onView, attachOffered = false }: Props) {
   const contextLine = context && (
     <p className="slip-context muted">
       {context.text}
@@ -73,7 +75,7 @@ export function Slip({ opened, cell, label, env, context, onView }: Props) {
   const name = `${label} · ${env}`;
   switch (opened.kind) {
     case "receipt":
-      return <ReceiptSlip receipt={opened} contextLine={contextLine} />;
+      return <ReceiptSlip receipt={opened} contextLine={contextLine} attachOffered={attachOffered} />;
     case "none":
       return (
         <Paper>
@@ -144,8 +146,20 @@ function Edge({ bottom = false }: { bottom?: boolean }) {
   return <div className={`slip-edge${bottom ? " slip-edge-bottom" : ""}`} aria-hidden />;
 }
 
-function ReceiptSlip({ receipt, contextLine }: { receipt: ReceiptView; contextLine: ReactNode }) {
-  const guidance = receipt.nextSteps;
+function ReceiptSlip({
+  receipt,
+  contextLine,
+  attachOffered,
+}: {
+  receipt: ReceiptView;
+  contextLine: ReactNode;
+  attachOffered: boolean;
+}) {
+  const next = receipt.nextSteps;
+  const guidance =
+    attachOffered && next.attachLine !== null
+      ? { ...next, lines: next.lines.filter((_, index) => index !== next.attachLine) }
+      : next;
   const hasGuidance = guidance.lines.length > 0 || guidance.copyWithheld;
   return (
     <Paper>
