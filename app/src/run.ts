@@ -6,6 +6,7 @@ import type {
   Progress,
   RunBatch,
   RunInfo,
+  RunHeadline,
   RunPlan,
   RunState,
   Terminal,
@@ -104,6 +105,23 @@ export function progressLine(info: RunInfo, state: RunState, rows: RunRow[]): st
   else if (down === "Unknown" || up === "Unknown") parts.push("maintenance mode not known");
   else if (down === "Ok") parts.push("app in maintenance mode");
   return parts.join(" · ");
+}
+
+/** The outcome comes from Rust, independently of the remaining checks. */
+export function headlineLine(headline: RunHeadline): string {
+  switch (headline.kind) {
+    case "failed":
+      return `Failed at step ${headline.step} · ${headline.exitCode === null ? "exit code not known" : `exit ${headline.exitCode}`} · ${headline.command}`;
+    case "stopped": {
+      const after = headline.step === null ? "Stopped in maintenance mode, no steps ran" : `Stopped after step ${headline.step}`;
+      const remaining = headline.notRun.length > 0
+        ? `${headline.notRun.length === 1 ? "Step" : "Steps"} ${headline.notRun.join(", ")} did not run`
+        : "No steps left to run";
+      return `${after} · ${remaining}`;
+    }
+    case "succeeded":
+      return "Succeeded";
+  }
 }
 
 /** The one sentence a finished, stopped or lost run ends with. */

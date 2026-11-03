@@ -2742,9 +2742,14 @@ async fn head_moved_after_the_preview_aborts_before_changes() {
     assert!(
         matches!(
             &events[..],
-            [DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
-                AbortReason::HeadMoved { .. }
-            ))]
+            [
+                DeployEvent::OutcomeKnown(DeployOutcome::AbortedBeforeChanges(
+                    AbortReason::HeadMoved { .. }
+                )),
+                DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
+                    AbortReason::HeadMoved { .. }
+                )),
+            ]
         ),
         "{events:#?}"
     );
@@ -2781,12 +2786,16 @@ async fn fast_forward_that_fails_partway_is_a_partial_update() {
     let events = deploy(ssh, target(&path, &["echo never"])).await;
     let n = events.len();
     assert_eq!(
-        &events[n - 2..],
+        &events[n - 3..],
         [
             DeployEvent::ServerState {
                 head: Some(from),
                 tree_dirty: Some(true),
             },
+            DeployEvent::OutcomeKnown(DeployOutcome::FailedAtStep {
+                step: 0,
+                partial_update: true,
+            }),
             DeployEvent::Finished(DeployOutcome::FailedAtStep {
                 step: 0,
                 partial_update: true,

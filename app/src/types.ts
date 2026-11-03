@@ -424,8 +424,14 @@ export interface SmokeView {
   reason: string | null;
 }
 
+export type RunHeadline =
+  | { kind: "failed"; step: number; exitCode: number | null; command: string }
+  | { kind: "stopped"; step: number | null; notRun: number[] }
+  | { kind: "succeeded" };
+
 export interface RunState {
   terminal: Terminal | null;
+  headline: RunHeadline | null;
   /** Keyed by step index; 0 is the git fast-forward. */
   steps: Record<string, Progress>;
   maintenanceUp: Progress | null;

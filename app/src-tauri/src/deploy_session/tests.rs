@@ -1200,6 +1200,90 @@ fn event_replay_preserves_step_results_and_untrusted_text_as_display_data() {
 }
 
 #[test]
+fn failed_headline_is_immediate_and_survives_the_log_watch() {
+    let feed = display_feed();
+    feed.record(DeployEvent::StepStarted {
+        index: 2,
+        name: "php artisan migrate --force\x1b[2J".into(),
+    });
+    feed.record(DeployEvent::StepFinished {
+        index: 2,
+        status: shipslip::StepStatus::Failed,
+        exit_code: Some(9),
+        times: StepTimes::default(),
+    });
+    let headline = serde_json::json!({
+        "kind": "failed", "step": 2, "exitCode": 9,
+        "command": "php artisan migrate --force\\x1b[2J"
+    });
+    assert_eq!(
+        serde_json::to_value(feed.snapshot()).unwrap()["state"]["headline"],
+        headline
+    );
+    feed.record(DeployEvent::WatchStarted {
+        window: std::time::Duration::from_secs(120),
+    });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert_eq!(view["state"]["headline"], headline);
+    assert!(view["state"]["terminal"].is_null());
+}
+
+#[test]
+fn stopped_headline_names_the_steps_not_run_and_survives_the_log_watch() {
+    let feed = display_feed();
+    feed.record(DeployEvent::OutcomeKnown(
+        shipslip::DeployOutcome::StoppedAfterStep {
+            step: 1,
+            reason: shipslip::StopReason::Requested,
+        },
+    ));
+    let headline = serde_json::json!({ "kind": "stopped", "step": 1, "notRun": [2, 3] });
+    assert_eq!(
+        serde_json::to_value(feed.snapshot()).unwrap()["state"]["headline"],
+        headline
+    );
+    feed.record(DeployEvent::WatchStarted {
+        window: std::time::Duration::from_secs(120),
+    });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert_eq!(view["state"]["headline"], headline);
+    assert!(view["state"]["terminal"].is_null());
+}
+
+#[test]
+fn a_failed_fast_forward_headline_names_its_exact_command() {
+    let feed = display_feed();
+    feed.record(DeployEvent::StepStarted {
+        index: 0,
+        name: "git fast-forward".into(),
+    });
+    feed.record(DeployEvent::StepFinished {
+        index: 0,
+        status: shipslip::StepStatus::Failed,
+        exit_code: Some(1),
+        times: StepTimes::default(),
+    });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert_eq!(
+        view["state"]["headline"]["command"],
+        format!("git merge --ff-only {}", crate::fixture::NEW)
+    );
+}
+
+#[test]
+fn a_step_with_no_observed_exit_never_gets_a_failed_headline() {
+    let feed = display_feed();
+    feed.record(DeployEvent::StepFinished {
+        index: 1,
+        status: shipslip::StepStatus::Unknown,
+        exit_code: None,
+        times: StepTimes::default(),
+    });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert!(view["state"]["headline"].is_null());
+}
+
+#[test]
 fn finished_steps_carry_the_times_on_their_events_and_running_steps_none() {
     let feed = display_feed();
     let timed = StepTimes {

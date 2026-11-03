@@ -367,11 +367,21 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
     let deploy = |name: &str| &fixtures.deploy[name];
     item(&mut out, "deployReview", "DeployReview", deploy("review"));
     item(&mut out, "runInfo", "RunInfo", deploy("runInfo"));
-    let batches: BTreeMap<&str, &Value> =
-        ["running", "watching", "failed", "succeeded", "lockTaken"]
-            .into_iter()
-            .map(|name| (name, deploy(name)))
-            .collect();
+    let batches: BTreeMap<&str, &Value> = [
+        "running",
+        "watching",
+        "failed",
+        "failedHeadline",
+        "failedWatching",
+        "stoppedHeadline",
+        "stoppedWatching",
+        "succeededWatching",
+        "succeeded",
+        "lockTaken",
+    ]
+    .into_iter()
+    .map(|name| (name, deploy(name)))
+    .collect();
     item(&mut out, "runBatches", "Record<string, RunBatch>", &batches);
     item(
         &mut out,

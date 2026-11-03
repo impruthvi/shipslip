@@ -1737,6 +1737,12 @@ export const runBatches: Record<string, RunBatch> = {
     "state": {
       "appLeftDown": true,
       "droppedWarnings": 0,
+      "headline": {
+        "command": "composer install --no-dev",
+        "exitCode": 1,
+        "kind": "failed",
+        "step": 1
+      },
       "maintenanceDown": {
         "exitCode": 0,
         "name": null,
@@ -1780,6 +1786,119 @@ export const runBatches: Record<string, RunBatch> = {
     "subscription": "sub-1",
     "through": 10
   },
+  "failedHeadline": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "run-1",
+    "output": [
+      {
+        "sequence": 4,
+        "source": {
+          "index": 0,
+          "kind": "step"
+        },
+        "text": "git fast-forward: working"
+      },
+      {
+        "sequence": 7,
+        "source": {
+          "index": 1,
+          "kind": "step"
+        },
+        "text": "composer install --no-dev: working"
+      }
+    ],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "droppedWarnings": 0,
+      "headline": {
+        "command": "composer install --no-dev",
+        "exitCode": 1,
+        "kind": "failed",
+        "step": 1
+      },
+      "maintenanceDown": {
+        "exitCode": 0,
+        "name": null,
+        "status": "Ok",
+        "timing": null
+      },
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {
+        "0": {
+          "exitCode": 0,
+          "name": "git fast-forward",
+          "status": "Ok",
+          "timing": {
+            "duration": "1s",
+            "durationMs": 1200,
+            "kind": "took"
+          }
+        },
+        "1": {
+          "exitCode": 1,
+          "name": "composer install --no-dev",
+          "status": "Failed",
+          "timing": null
+        }
+      },
+      "terminal": null,
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchWindowMs": null
+    },
+    "subscription": "sub-1",
+    "through": 8
+  },
+  "failedWatching": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "run-1",
+    "output": [
+      {
+        "sequence": 2,
+        "source": {
+          "index": 1,
+          "kind": "step"
+        },
+        "text": "composer install: dependency resolution failed"
+      }
+    ],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "droppedWarnings": 0,
+      "headline": {
+        "command": "composer install --no-dev",
+        "exitCode": 9,
+        "kind": "failed",
+        "step": 1
+      },
+      "maintenanceDown": null,
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {
+        "1": {
+          "exitCode": 9,
+          "name": "composer install --no-dev",
+          "status": "Failed",
+          "timing": null
+        }
+      },
+      "terminal": null,
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchWindowMs": 120000
+    },
+    "subscription": "sub-1",
+    "through": 5
+  },
   "lockTaken": {
     "after": 0,
     "droppedOutput": 0,
@@ -1789,6 +1908,7 @@ export const runBatches: Record<string, RunBatch> = {
     "state": {
       "appLeftDown": false,
       "droppedWarnings": 0,
+      "headline": null,
       "maintenanceDown": null,
       "maintenanceUp": null,
       "serverHead": null,
@@ -1836,6 +1956,7 @@ export const runBatches: Record<string, RunBatch> = {
     "state": {
       "appLeftDown": false,
       "droppedWarnings": 0,
+      "headline": null,
       "maintenanceDown": {
         "exitCode": 0,
         "name": null,
@@ -1872,6 +1993,82 @@ export const runBatches: Record<string, RunBatch> = {
     "subscription": "sub-1",
     "through": 7
   },
+  "stoppedHeadline": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "run-1",
+    "output": [],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "droppedWarnings": 0,
+      "headline": {
+        "kind": "stopped",
+        "notRun": [
+          2,
+          3
+        ],
+        "step": 1
+      },
+      "maintenanceDown": null,
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {
+        "1": {
+          "exitCode": 0,
+          "name": "composer install --no-dev",
+          "status": "Ok",
+          "timing": null
+        }
+      },
+      "terminal": null,
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchWindowMs": null
+    },
+    "subscription": "sub-1",
+    "through": 3
+  },
+  "stoppedWatching": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "run-1",
+    "output": [],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "droppedWarnings": 0,
+      "headline": {
+        "kind": "stopped",
+        "notRun": [
+          2,
+          3
+        ],
+        "step": 1
+      },
+      "maintenanceDown": null,
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {
+        "1": {
+          "exitCode": 0,
+          "name": "composer install --no-dev",
+          "status": "Ok",
+          "timing": null
+        }
+      },
+      "terminal": null,
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchWindowMs": 120000
+    },
+    "subscription": "sub-1",
+    "through": 4
+  },
   "succeeded": {
     "after": 0,
     "droppedOutput": 0,
@@ -1891,6 +2088,9 @@ export const runBatches: Record<string, RunBatch> = {
     "state": {
       "appLeftDown": false,
       "droppedWarnings": 0,
+      "headline": {
+        "kind": "succeeded"
+      },
       "maintenanceDown": null,
       "maintenanceUp": null,
       "serverHead": null,
@@ -1926,7 +2126,50 @@ export const runBatches: Record<string, RunBatch> = {
       "watchWindowMs": 120000
     },
     "subscription": "sub-1",
-    "through": 6
+    "through": 7
+  },
+  "succeededWatching": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "run-1",
+    "output": [
+      {
+        "sequence": 4,
+        "source": {
+          "fileLine": "app/Billing.php:42",
+          "kind": "log",
+          "phase": "After"
+        },
+        "text": "RuntimeException: Payment gateway timed out"
+      }
+    ],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "droppedWarnings": 0,
+      "headline": {
+        "kind": "succeeded"
+      },
+      "maintenanceDown": null,
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {
+        "0": {
+          "exitCode": 0,
+          "name": "git fast-forward",
+          "status": "Ok",
+          "timing": null
+        }
+      },
+      "terminal": null,
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchWindowMs": 120000
+    },
+    "subscription": "sub-1",
+    "through": 5
   },
   "watching": {
     "after": 0,
@@ -1947,6 +2190,7 @@ export const runBatches: Record<string, RunBatch> = {
     "state": {
       "appLeftDown": false,
       "droppedWarnings": 0,
+      "headline": null,
       "maintenanceDown": null,
       "maintenanceUp": null,
       "serverHead": null,

@@ -3,7 +3,7 @@ import type { Announce } from "./Announcer";
 import { deploy } from "./deployApi";
 import { StepIcon } from "./Mark";
 import { StepTime } from "./StepTime";
-import { applyBatch, progressLine, runRows, watching, type RunLog } from "./run";
+import { applyBatch, headlineLine, progressLine, runRows, watching, type RunLog } from "./run";
 import { countdown, elapsed, spoken } from "./time";
 import type { CommandError, OutputLine, ProgressStatus, RunInfo, Terminal } from "./types";
 
@@ -106,6 +106,17 @@ export function Running({
   const state = log?.state ?? null;
   const rows = useMemo(() => (state ? runRows(info, state) : []), [info, state]);
   const terminal = state?.terminal ?? null;
+  const headline = state?.headline ?? null;
+  const headlineText = headline ? headlineLine(headline) : null;
+  const failedStep = headline?.kind === "failed" ? String(headline.step) : null;
+
+  useEffect(() => {
+    if (failedStep !== null) setOpen((prev) => ({ ...prev, [failedStep]: true }));
+  }, [failedStep]);
+
+  useEffect(() => {
+    if (headlineText) props.current.announce(headlineText, true);
+  }, [headlineText]);
 
   // Announcements as each step starts and ends.
   useEffect(() => {
@@ -183,11 +194,22 @@ export function Running({
     <>
       <div className="workspace-body">
         {state && !terminal && (
-          <p className="run-progress">
-            {[progressLine(info, state, rows), elapsed(Math.max(now, info.startedAtMs) - info.startedAtMs)]
-              .filter(Boolean)
-              .join(" · ")}
-          </p>
+          headline ? (
+            <div className="run-outcome">
+              <h2 className={`run-progress${headline.kind === "failed" ? " tone-bad" : headline.kind === "stopped" ? " tone-attention" : ""}`}>
+                {headlineText}
+              </h2>
+              {watchingNow && watchLeft !== null && (
+                <p className="muted">Watching the log · {countdown(watchLeft)} left</p>
+              )}
+            </div>
+          ) : (
+            <p className="run-progress">
+              {[progressLine(info, state, rows), elapsed(Math.max(now, info.startedAtMs) - info.startedAtMs)]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
+          )
         )}
         <section className="workspace-section" aria-labelledby="run-steps">
           <h2 id="run-steps" className="caps">
@@ -230,7 +252,7 @@ export function Running({
             <h2 id="run-watch" className="caps">
               Log watch
             </h2>
-            {watchingNow && watchLeft !== null && <p>{countdown(watchLeft)} left</p>}
+            {watchingNow && !headline && watchLeft !== null && <p>{countdown(watchLeft)} left</p>}
             {logLines.length === 0 ? (
               <p className="muted">No new errors so far</p>
             ) : (
@@ -260,22 +282,18 @@ export function Running({
           </button>
         ) : (
           // Bringing the app up is one step: there is no step after it to stop before.
-          info.operation !== "up" && (
+          info.operation !== "up" && !headline && (
             <button
               type="button"
               className="button"
               disabled={stopping !== null || !state || terminal !== null}
               onClick={() => stop("afterStep")}
             >
-              Stop after this step
+              {stopping === "afterStep" ? "Stopping after this step…" : "Stop after this step"}
             </button>
           )
         )}
-        {stopping && (
-          <span className="muted">
-            {stopping === "watch" && watchingNow ? "Stopping the log watch…" : "Stopping after this step…"}
-          </span>
-        )}
+        {stopping === "watch" && watchingNow && <span className="muted">Stopping the log watch…</span>}
         {stopError && <span className="tone-bad">{stopError}</span>}
         <div className="footer-end">
           <button type="button" className="button" onClick={onLeave}>
