@@ -2,6 +2,7 @@
 // Do not edit: real command results, typed so tsc checks them against types.ts.
 
 import type {
+  CellView,
   CommandError,
   CompareResult,
   DeployEntry,
@@ -332,6 +333,119 @@ export const map: LoadResult = {
         ]
       }
     ]
+  }
+};
+
+export const smokeCells: Record<string, CellView> = {
+  "failed": {
+    "age": "8m ago",
+    "atMs": 1791794495000,
+    "evidence": [],
+    "flags": [
+      {
+        "bad": true,
+        "kind": "smokeFailed",
+        "newErrors": false,
+        "text": "smoke 503"
+      }
+    ],
+    "kind": "present",
+    "lastAttempt": {
+      "age": "2m ago",
+      "atMs": 1791794880000,
+      "flags": [
+        {
+          "bad": true,
+          "kind": "smokeFailed",
+          "newErrors": false,
+          "text": "smoke 503"
+        }
+      ],
+      "outcome": {
+        "kind": "succeeded",
+        "text": "Succeeded",
+        "tone": "good"
+      },
+      "receipt": 1
+    },
+    "mark": "recorded",
+    "needsAttention": true,
+    "outcome": {
+      "kind": "succeeded",
+      "text": "Succeeded",
+      "tone": "good"
+    },
+    "qualifiers": [],
+    "receipt": 0,
+    "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "shortSha": "aaaaaaa",
+    "staleReceipt": null,
+    "target": "staging1:/var/www/shop",
+    "targetMoved": null,
+    "words": ""
+  },
+  "passed": {
+    "age": "8m ago",
+    "atMs": 1791794495000,
+    "evidence": [],
+    "flags": [],
+    "kind": "present",
+    "lastAttempt": {
+      "age": "2m ago",
+      "atMs": 1791794880000,
+      "flags": [],
+      "outcome": {
+        "kind": "succeeded",
+        "text": "Succeeded",
+        "tone": "good"
+      },
+      "receipt": 1
+    },
+    "mark": "recorded",
+    "needsAttention": false,
+    "outcome": {
+      "kind": "succeeded",
+      "text": "Succeeded",
+      "tone": "good"
+    },
+    "qualifiers": [],
+    "receipt": 0,
+    "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "shortSha": "aaaaaaa",
+    "staleReceipt": null,
+    "target": "staging1:/var/www/shop",
+    "targetMoved": null,
+    "words": ""
+  },
+  "upOnlyFailed": {
+    "age": null,
+    "atMs": null,
+    "evidence": [],
+    "flags": [
+      {
+        "bad": true,
+        "kind": "smokeFailed",
+        "newErrors": false,
+        "text": "smoke 503"
+      }
+    ],
+    "kind": "present",
+    "lastAttempt": null,
+    "mark": "noCode",
+    "needsAttention": true,
+    "outcome": {
+      "kind": "succeeded",
+      "text": "Succeeded",
+      "tone": "good"
+    },
+    "qualifiers": [],
+    "receipt": 0,
+    "sha": null,
+    "shortSha": null,
+    "staleReceipt": null,
+    "target": "staging1:/var/www/shop",
+    "targetMoved": null,
+    "words": "no code change in the last run"
   }
 };
 
@@ -1677,6 +1791,7 @@ export const deployReview: DeployReview = {
   "production": true,
   "recipeHash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "runPlan": "Deploy",
+  "smokeConfigured": false,
   "sshAlias": "shop-prod",
   "steps": [
     "composer install --no-dev",

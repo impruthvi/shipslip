@@ -261,6 +261,121 @@ fn a_successful_up_clears_the_maintenance_flag_without_changing_the_code() {
 }
 
 #[test]
+fn a_successful_up_smoke_replaces_the_older_failed_smoke_without_changing_code() {
+    let fixture = Fixture::new();
+    let mut deploy = run(1, "staging");
+    deploy["watch"] = serde_json::to_value(crate::WatchResult::not_run()).unwrap();
+    deploy["smoke"] = json!({"Failed": {"status": 503, "reason": "HTTP 503"}});
+    fixture.save(&deploy);
+    assert!(cell(&fixture.overview(), "/work/app", "staging").needs_attention());
+    let mut up = up(2, true);
+    up["smoke"] = json!({"Passed": {"status": 200, "latency_ms": 5}});
+    fixture.save(&up);
+    let overview = fixture.overview();
+    let staging = cell(&overview, "/work/app", "staging");
+    assert_eq!(staging.code, recorded(NEW, true, Evidence::FastForward, 1));
+    assert!(!staging.needs_attention());
+    assert!(!staging
+        .code_run
+        .as_ref()
+        .unwrap()
+        .badge
+        .flags
+        .iter()
+        .any(|flag| matches!(flag, Flag::SmokeFailed { .. } | Flag::SmokeNotRecorded)));
+}
+
+#[test]
+fn newest_made_or_skipped_smoke_wins_even_when_the_latest_run_has_no_smoke() {
+    for (newest_smoke, expected_failure) in [
+        (json!("Skipped"), None),
+        (json!({"Passed": {"status": 200, "latency_ms": 5}}), None),
+        (
+            json!({"Failed": {"status": 502, "reason": "HTTP 502"}}),
+            Some(502),
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let mut deploy = run(1, "staging");
+        deploy["smoke"] = json!({"Failed": {"status": 503, "reason": "HTTP 503"}});
+        fixture.save(&deploy);
+        let mut checked = if newest_smoke == json!("Skipped") {
+            let mut skipped = cancelled(2, "staging");
+            skipped["outcome"] = json!({"StoppedInMaintenance": "LockLost"});
+            skipped["app_left_down"] = json!(true);
+            skipped["checks_skip_reason"] = json!("AppLeftInMaintenance");
+            skipped
+        } else {
+            up(2, true)
+        };
+        checked["smoke"] = newest_smoke;
+        fixture.save(&checked);
+        fixture.save(&up(3, true));
+        let overview = fixture.overview();
+        let staging = cell(&overview, "/work/app", "staging");
+        let smoke_flags: Vec<_> = staging
+            .code_run
+            .as_ref()
+            .unwrap()
+            .badge
+            .flags
+            .iter()
+            .filter(|flag| matches!(flag, Flag::SmokeFailed { .. } | Flag::SmokeNotRecorded))
+            .collect();
+        if let Some(status) = expected_failure {
+            assert_eq!(
+                smoke_flags,
+                [&Flag::SmokeFailed {
+                    status: Some(status)
+                }]
+            );
+            assert!(staging.needs_attention());
+        } else {
+            assert!(smoke_flags.is_empty(), "{smoke_flags:?}");
+        }
+    }
+}
+
+#[test]
+fn smoke_selection_can_walk_past_the_code_run_but_never_uses_another_target_or_environment() {
+    let fixture = Fixture::new();
+    let mut checked = up(1, true);
+    checked["smoke"] = json!({"Failed": {"status": 503, "reason": "HTTP 503"}});
+    fixture.save(&checked);
+    let mut other_target = up(2, true);
+    other_target["target"]["path"] = json!("/srv/old-app");
+    other_target["smoke"] = json!({"Passed": {"status": 200, "latency_ms": 5}});
+    fixture.save(&other_target);
+    fixture.save(&run(3, "staging"));
+    let mut production = run(4, "production");
+    production["smoke"] = json!({"Passed": {"status": 200, "latency_ms": 5}});
+    fixture.save(&production);
+    let overview = fixture.overview();
+    let staging = cell(&overview, "/work/app", "staging");
+    assert_eq!(staging.code, recorded(NEW, true, Evidence::FastForward, 3));
+    assert!(staging
+        .code_run
+        .as_ref()
+        .unwrap()
+        .badge
+        .flags
+        .contains(&Flag::SmokeFailed { status: Some(503) }));
+}
+
+#[test]
+fn searching_for_older_smoke_does_not_make_newer_code_stale() {
+    let fixture = Fixture::new();
+    let mut old = run(1, "staging");
+    old["version"] = json!(99);
+    fixture.save(&old);
+    fixture.save(&run(2, "staging"));
+    let overview = fixture.overview();
+    let staging = cell(&overview, "/work/app", "staging");
+    assert_eq!(staging.code, recorded(NEW, true, Evidence::FastForward, 2));
+    assert!(staging.stale_hint.is_none());
+}
+
+#[test]
 fn a_failed_up_keeps_the_maintenance_flag() {
     let fixture = Fixture::new();
     fixture.save(&left_down(1));

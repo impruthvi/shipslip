@@ -332,6 +332,7 @@ export interface DeployReview {
   maintenance: boolean;
   /** How long the log is watched after the last step; null when it isn't. */
   watchMs: number | null;
+  smokeConfigured: boolean;
   recipeHash: string;
   fromSha: string;
   targetSha: string;

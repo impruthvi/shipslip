@@ -316,6 +316,39 @@ async fn approve<C: Connector>(sessions: &Arc<Sessions<C>>, root: &std::path::Pa
 }
 
 #[test]
+fn preview_reports_whether_the_environment_has_a_smoke_check() {
+    tauri::async_runtime::block_on(async {
+        for configured in [false, true] {
+            let fx = Fixture::new();
+            let root = checkout(&fx, "one");
+            if configured {
+                let path = root.join(".shipslip.toml");
+                let text = std::fs::read_to_string(&path).unwrap();
+                std::fs::write(
+                    path,
+                    text.replace(
+                        "production = true",
+                        "production = true\nsmoke_url = \"https://example.com/up\"",
+                    ),
+                )
+                .unwrap();
+            }
+            let sessions = Sessions::new(fx.receipts(), fx.trust(), Arc::new(Remote::default()));
+            approve(&sessions, &root).await;
+            let review = sessions
+                .prepare(root, "production".into(), RunPlan::Deploy)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(&review).unwrap()["smokeConfigured"],
+                configured
+            );
+            sessions.cancel(&review.handle).await.unwrap();
+        }
+    });
+}
+
+#[test]
 fn preview_cancel_is_single_use_and_reload_releases_its_lock() {
     tauri::async_runtime::block_on(async {
         let fx = Fixture::new();

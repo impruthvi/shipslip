@@ -488,7 +488,8 @@ const UP_COMMAND: &str = "php artisan up";
 /// as a recorded run. Takes the deploy lock, so it cannot run during a
 /// deploy, reads the server HEAD, and writes the receipt before the command
 /// is sent; then follows it in the background like [`execute`]. Ask the user
-/// before calling. The code on the server does not change.
+/// before calling. After success, checks the smoke URL when configured.
+/// The code on the server does not change.
 ///
 /// Must be called within a Tokio runtime.
 pub async fn bring_app_up<T: Transport>(
@@ -697,6 +698,26 @@ async fn run_up<T: Transport>(
         }
         End::Finished(outcome) => outcome,
     };
+    if outcome == DeployOutcome::Succeeded && preview.target.smoke_url.is_some() {
+        let smoke = if let Some(saved) = journal.snapshot().smoke {
+            saved
+        } else {
+            let smoke = tokio::select! {
+                smoke = observation::smoke_check(preview.target.smoke_url.as_deref()) => smoke,
+                () = heartbeat_forever(&*transport, path, run_id) => unreachable!("heartbeat never ends"),
+            };
+            if let Err(error) = journal.smoke(smoke.clone()) {
+                send_run_error(
+                    &events,
+                    Some(journal),
+                    format!("could not save the smoke check: {error}"),
+                );
+                return;
+            }
+            smoke
+        };
+        let _ = events.send(DeployEvent::SmokeFinished(smoke));
+    }
     // After an unknown result the server needs checking first, so the lock
     // is kept and goes stale.
     if !matches!(outcome, DeployOutcome::Unknown { .. }) {
@@ -3557,11 +3578,169 @@ mod tests {
         assert_eq!(receipt.steps[0].command, UP_COMMAND);
         assert_eq!(receipt.steps[0].status, ReceiptStepStatus::Ok);
         assert_eq!(receipt.steps[0].output, ["back up"]);
+        assert!(receipt.smoke.is_none());
+        assert!(receipt.watch.is_none());
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, DeployEvent::SmokeFinished(_))));
         assert!(receipt.badge().flags.is_empty());
         assert_eq!(
             receipt.summary().unwrap().raw(),
             "The app was brought up (`php artisan up` succeeded)."
         );
+    }
+
+    #[tokio::test]
+    async fn up_smokes_once_after_the_command_succeeds_without_watching_the_log() {
+        let (url, requests, server) = smoke_endpoint().await;
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(preflight().gated(UP_COMMAND, gate.clone()));
+        let mut target = target(false, &[]);
+        target.smoke_url = Some(url);
+        target.watch_log = true;
+        let dir = TempReceipts::new();
+        let (mut events, _handle) = bring_app_up(&trusted(target), fake.clone(), &dir.0)
+            .await
+            .unwrap();
+        assert!(matches!(
+            events.recv().await,
+            Some(DeployEvent::MaintenanceStarted { .. })
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        gate.notify_one();
+        let events = collect(events).await;
+        let smoke = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    DeployEvent::SmokeFinished(SmokeResult::Passed { status: 204, .. })
+                )
+            })
+            .expect("Up must smoke after success");
+        let up = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    DeployEvent::MaintenanceFinished {
+                        status: StepStatus::Ok,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        assert!(up < smoke);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, DeployEvent::SmokeFinished(_)))
+                .count(),
+            1
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(watch_started(&events), 0);
+        assert_eq!(fake.launched(UP_COMMAND), 1);
+        assert_eq!(fake.lock_owner(), None);
+        let receipt = crate::receipt::read(&up_receipt_path(&dir)).unwrap();
+        assert_eq!(receipt.version, 2);
+        assert!(matches!(
+            receipt.smoke,
+            Some(SmokeResult::Passed { status: 204, .. })
+        ));
+        assert!(receipt.watch.is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn up_keeps_a_failed_smoke_check_as_a_failure_flag_after_bringing_the_app_up() {
+        let (url, requests, server) = smoke_endpoint_with_status(503).await;
+        let fake = Arc::new(preflight().on(UP_COMMAND, &[], 0));
+        let mut target = target(false, &[]);
+        target.smoke_url = Some(url);
+        let dir = TempReceipts::new();
+        let (events, _) = bring_app_up(&trusted(target), fake.clone(), &dir.0)
+            .await
+            .unwrap();
+        let events = collect(events).await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DeployEvent::SmokeFinished(SmokeResult::Failed {
+                status: Some(503),
+                ..
+            })
+        )));
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let receipt = crate::receipt::read(&up_receipt_path(&dir)).unwrap();
+        assert!(!receipt.app_left_down);
+        assert!(receipt
+            .badge()
+            .flags
+            .contains(&crate::records::Flag::SmokeFailed { status: Some(503) }));
+        assert!(crate::receipt::markdown(&receipt, false).contains("Failed: HTTP 503"));
+        assert_eq!(fake.lock_owner(), None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unsuccessful_up_does_not_smoke() {
+        let (url, requests, server) = smoke_endpoint().await;
+        for fake in [
+            preflight().on(UP_COMMAND, &[], 1),
+            preflight().vanishes(UP_COMMAND),
+        ] {
+            let mut target = target(false, &[]);
+            target.smoke_url = Some(url.clone());
+            let dir = TempReceipts::new();
+            let (events, _) = bring_app_up(&trusted(target), Arc::new(fake), &dir.0)
+                .await
+                .unwrap();
+            let events = collect(events).await;
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, DeployEvent::SmokeFinished(_))));
+            assert!(crate::receipt::read(&up_receipt_path(&dir))
+                .unwrap()
+                .smoke
+                .is_none());
+        }
+        assert_eq!(requests.load(Ordering::SeqCst), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn up_smoke_journal_failure_keeps_the_receipt_unfinished_and_never_claims_success() {
+        let dir = TempReceipts::new();
+        let env_dir = dir.0.join("app/staging");
+        let blocked = env_dir.clone();
+        let (url, requests, server) =
+            smoke_endpoint_with_hook(204, move || block_receipt_directory(&blocked)).await;
+        let fake = Arc::new(preflight().on(UP_COMMAND, &[], 0));
+        let mut target = target(false, &[]);
+        target.smoke_url = Some(url);
+        let (events, _) = bring_app_up(&trusted(target), fake.clone(), &dir.0)
+            .await
+            .unwrap();
+        let events = collect(events).await;
+        assert!(
+            matches!(events.last(), Some(DeployEvent::RunError { reason }) if reason.contains("could not save the smoke check"))
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            DeployEvent::Finished(_) | DeployEvent::SmokeFinished(_)
+        )));
+        restore_receipt_directory(&env_dir);
+        let receipt = crate::receipt::read(&up_receipt_path(&dir)).unwrap();
+        assert_eq!(receipt.status, ReceiptStatus::InProgress);
+        assert!(receipt.smoke.is_none());
+        assert_eq!(fake.launched(UP_COMMAND), 1);
+        assert!(fake.lock_owner().is_some());
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        server.abort();
     }
 
     #[tokio::test]
@@ -3763,8 +3942,11 @@ mod tests {
     #[tokio::test]
     async fn up_result_and_finalization_failures_stay_attachable_without_replay() {
         for fail_finalization in [false, true] {
+            let (url, requests, server) = smoke_endpoint().await;
             let dir = TempReceipts::new();
-            let target = trusted(target(false, &[]));
+            let mut target = target(false, &[]);
+            target.smoke_url = Some(url);
+            let target = trusted(target);
             let env_dir = dir.0.join("app/staging");
             let blocked = env_dir.clone();
             let fake = if fail_finalization {
@@ -3800,6 +3982,12 @@ mod tests {
             );
             assert_eq!(fake.launched(UP_COMMAND), 1);
             assert_eq!(journal.snapshot().status, ReceiptStatus::Final);
+            assert_eq!(
+                requests.load(Ordering::SeqCst),
+                1,
+                "attach reuses a saved smoke result"
+            );
+            server.abort();
         }
     }
 
@@ -4399,6 +4587,19 @@ mod tests {
     }
 
     async fn smoke_endpoint() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        smoke_endpoint_with_status(204).await
+    }
+
+    async fn smoke_endpoint_with_status(
+        status: u16,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+        smoke_endpoint_with_hook(status, || {}).await
+    }
+
+    async fn smoke_endpoint_with_hook(
+        status: u16,
+        on_request: impl Fn() + Send + 'static,
+    ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4415,7 +4616,8 @@ mod tests {
                     request.push(byte[0]);
                 }
                 counted.fetch_add(1, Ordering::SeqCst);
-                socket.write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                on_request();
+                socket.write_all(format!("HTTP/1.1 {status} Test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
             }
         });
         (url, requests, server)

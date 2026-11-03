@@ -117,8 +117,8 @@ impl Flag {
 impl Receipt {
     pub fn badge(&self) -> Badge {
         let mut flags = Vec::new();
-        // Checks never apply to bringing the app up, or to a run that
-        // stopped before changing anything.
+        // Only deploys require observation fields: Up runs never watch
+        // logs, and older Up receipts have no smoke result.
         let checks_apply = self.kind == ReceiptKind::Deploy
             && !matches!(
                 (self.status, &self.outcome),

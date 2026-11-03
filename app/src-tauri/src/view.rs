@@ -344,11 +344,7 @@ fn cell_view(cell: &EnvCell, now_ms: u128, locators: &mut Locators) -> EnvCellVi
         words: text.words,
         evidence: text.evidence,
         outcome: opened.map(|run| outcome(&run.badge)),
-        flags: cell
-            .code_run
-            .as_ref()
-            .map(|run| flags(&run.badge))
-            .unwrap_or_default(),
+        flags: opened.map(|run| flags(&run.badge)).unwrap_or_default(),
         target: cell.target.as_ref().map(Untrusted::field),
         target_moved: target_moved_text(cell),
         needs_attention: cell.needs_attention(),

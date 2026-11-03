@@ -215,6 +215,18 @@ test("a refusal shows its title, the command to copy and the raw error under Det
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
 });
 
+test("preview says when the environment has no smoke check", async () => {
+  const { pending } = await openWorkspace();
+  await act(async () => pending.resolve(fixtures.deployReview));
+  expect(screen.getByText("No smoke check configured for this environment.")).toBeInTheDocument();
+});
+
+test("a configured smoke check does not show the no-smoke notice", async () => {
+  const { pending } = await openWorkspace();
+  await act(async () => pending.resolve({ ...fixtures.deployReview, smokeConfigured: true }));
+  expect(screen.queryByText("No smoke check configured for this environment.")).not.toBeInTheDocument();
+});
+
 test("preview shows what ships; production deploys only once its name is typed", async () => {
   const { pending } = await openWorkspace();
   await act(async () => pending.resolve(production));
