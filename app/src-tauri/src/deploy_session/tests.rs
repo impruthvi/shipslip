@@ -2217,3 +2217,147 @@ fn lock_held_refusals_say_live_or_stale_and_offer_break_lock() {
     assert_eq!(current.blocked_kind, Some(BlockedKind::UpToDate));
     assert!(current.message.contains("Rerun"));
 }
+
+#[test]
+fn connection_gap_state_changes_only_on_matching_connection_events() {
+    use shipslip::ConnectionTarget;
+    let feed = display_feed();
+    let target = ConnectionTarget::Step { index: 2 };
+    feed.record(DeployEvent::StepStarted {
+        index: 2,
+        name: "migrate".into(),
+    });
+    feed.record(DeployEvent::ConnectionLost {
+        target,
+        at_ms: 10_000,
+        detail: "raw ssh error".into(),
+    });
+    let gap = serde_json::json!({ "target": { "kind": "step", "index": 2 }, "lostAtMs": 10_000 });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert_eq!(view["state"]["connectionGap"], gap);
+    assert_eq!(view["info"]["connectionGap"], gap);
+    assert_eq!(view["state"]["steps"]["2"]["status"], "Running");
+    assert!(!view.to_string().contains("raw ssh error"));
+    feed.record(DeployEvent::Warning {
+        reason: "waiting".into(),
+    });
+    feed.record(DeployEvent::Reattached {
+        target: ConnectionTarget::Step { index: 1 },
+        at_ms: 11_000,
+    });
+    assert_eq!(
+        serde_json::to_value(feed.snapshot()).unwrap()["state"]["connectionGap"],
+        gap
+    );
+    feed.record(DeployEvent::Reattached {
+        target,
+        at_ms: 12_000,
+    });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert!(view["state"]["connectionGap"].is_null());
+    assert!(view["info"]["connectionGap"].is_null());
+    assert_eq!(view["state"]["steps"]["2"]["reattachedAtMs"], 12_000);
+    feed.record(DeployEvent::StepFinished {
+        index: 2,
+        status: shipslip::StepStatus::Ok,
+        exit_code: Some(0),
+        times: StepTimes::default(),
+    });
+    assert_eq!(
+        serde_json::to_value(feed.snapshot()).unwrap()["state"]["steps"]["2"]["reattachedAtMs"],
+        12_000
+    );
+}
+
+#[test]
+fn maintenance_and_log_watch_gaps_survive_replay_and_keep_reattach_notes() {
+    use shipslip::ConnectionTarget;
+    for phase in [
+        shipslip::MaintenancePhase::Down,
+        shipslip::MaintenancePhase::Up,
+    ] {
+        let feed = display_feed();
+        let target = ConnectionTarget::Maintenance { phase };
+        feed.record(DeployEvent::MaintenanceStarted { phase });
+        feed.record(DeployEvent::ConnectionLost {
+            target,
+            at_ms: 10_000,
+            detail: "ssh".into(),
+        });
+        assert!(feed.snapshot().state.connection_gap.is_some());
+        feed.record(DeployEvent::Reattached {
+            target,
+            at_ms: 12_000,
+        });
+        feed.record(DeployEvent::MaintenanceFinished {
+            phase,
+            status: shipslip::StepStatus::Ok,
+            exit_code: Some(0),
+            times: StepTimes::default(),
+        });
+        let view = serde_json::to_value(feed.snapshot()).unwrap();
+        let key = if phase == shipslip::MaintenancePhase::Down {
+            "maintenanceDown"
+        } else {
+            "maintenanceUp"
+        };
+        assert!(view["state"]["connectionGap"].is_null());
+        assert_eq!(view["state"][key]["reattachedAtMs"], 12_000);
+    }
+    let feed = display_feed();
+    feed.record(DeployEvent::WatchStarted {
+        window: std::time::Duration::from_secs(120),
+    });
+    feed.record(DeployEvent::ConnectionLost {
+        target: ConnectionTarget::LogWatch,
+        at_ms: 20_000,
+        detail: "ssh".into(),
+    });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert_eq!(view["state"]["connectionGap"]["target"]["kind"], "logWatch");
+    feed.record(DeployEvent::Reattached {
+        target: ConnectionTarget::LogWatch,
+        at_ms: 22_000,
+    });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert!(view["state"]["connectionGap"].is_null());
+    assert_eq!(view["state"]["watchReattachedAtMs"], 22_000);
+}
+
+#[test]
+fn running_list_reads_connection_gaps_without_a_window_subscription() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let remote = Arc::new(Remote::default());
+        let (release, gate) = tauri::async_runtime::channel(1);
+        *remote.observe_gate.lock().await = Some(gate);
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), remote.clone());
+        approve(&sessions, &root).await;
+        let review = sessions.review_up(root, "production".into()).await.unwrap();
+        let run = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        until(|| remote.observe_entered.load(Ordering::SeqCst) == 1);
+        let feed = sessions.registry().feeds[&run.handle].clone();
+        let target = shipslip::ConnectionTarget::Maintenance {
+            phase: shipslip::MaintenancePhase::Up,
+        };
+        feed.record(DeployEvent::ConnectionLost {
+            target,
+            at_ms: 10_000,
+            detail: "ssh".into(),
+        });
+        let view = serde_json::to_value(sessions.live_runs()).unwrap();
+        assert_eq!(view["runs"][0]["connectionGap"]["lostAtMs"], 10_000);
+        feed.record(DeployEvent::Reattached {
+            target,
+            at_ms: 12_000,
+        });
+        let view = serde_json::to_value(sessions.live_runs()).unwrap();
+        assert!(view["runs"][0]["connectionGap"].is_null());
+        release.send(()).await.unwrap();
+        until(|| sessions.current_runs().runs.is_empty());
+    });
+}

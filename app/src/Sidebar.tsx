@@ -2,6 +2,7 @@ import type { ReactNode, Ref } from "react";
 import { Flap, reason, status, type StatusTone } from "./Cell";
 import { Footer } from "./Footer";
 import { Mark } from "./Mark";
+import { ConnectionGap } from "./ConnectionGap";
 import { ProblemsStrip } from "./ProblemsStrip";
 import { twinFolder } from "./text";
 import { elapsed } from "./time";
@@ -86,7 +87,7 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
                 >
                   <span className="side-line">
                     <span className="side-mark" aria-hidden>
-                      <Mark kind="live" />
+                      <Mark kind={run.connectionGap ? "notKnown" : "live"} />
                     </span>
                     <span className="side-name" title={run.checkout}>
                       {run.project}
@@ -101,7 +102,11 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
                           run.checkout,
                         )} />
                       {" · "}
-                      <span className="side-meta">{elapsed(now - run.startedAtMs)}</span>
+                      <span className="side-meta">
+                        {run.connectionGap
+                          ? <ConnectionGap gap={run.connectionGap} now={now} />
+                          : elapsed(now - run.startedAtMs)}
+                      </span>
                     </span>
                   </span>
                 </Item>

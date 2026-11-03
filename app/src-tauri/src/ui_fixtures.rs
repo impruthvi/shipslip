@@ -321,6 +321,24 @@ fn build() -> (Fixtures, Vec<String>) {
     unfinished["steps"][1]["exit_code"] = json!(null);
     unfinished["steps"][1]["finished_at_ms"] = json!(null);
     slips.insert("unfinished", unfinished);
+    let mut gaps = b.deploy("shop", "staging", 2, &sha('a'));
+    gaps["steps"][1]["finished_at_ms"] = json!(null);
+    gaps["steps"][1]["result_seen_at_ms"] = json!(NOW - 60_000);
+    gaps["steps"][1]["connection_gaps"] = json!([
+        { "lost_at_ms": NOW - 100_000, "reattached_at_ms": NOW - 90_000, "detail": "raw ssh detail" },
+        { "lost_at_ms": NOW - 80_000, "reattached_at_ms": NOW - 60_000, "detail": "raw ssh detail" }
+    ]);
+    gaps["status"] = json!("InProgress");
+    gaps["phase"] = json!("MaintenanceUp");
+    gaps["outcome"] = json!(null);
+    gaps["finished_at_ms"] = json!(null);
+    gaps["app_left_down"] = json!(true);
+    gaps["maintenance_up_status"] = json!("Unknown");
+    gaps["maintenance_up_started_at_ms"] = json!(NOW - 50_000);
+    gaps["maintenance_up_connection_gaps"] = json!([
+        { "lost_at_ms": NOW - 40_000, "reattached_at_ms": null, "detail": "raw ssh detail" }
+    ]);
+    slips.insert("connectionGaps", gaps);
     let mut withheld = b.deploy("shop", "qa", 10, &sha('a'));
     withheld["target"]["env"] = json!("qa;eu");
     withheld["app_left_down"] = json!(true);
@@ -450,8 +468,13 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
     let deploy = |name: &str| &fixtures.deploy[name];
     item(&mut out, "deployReview", "DeployReview", deploy("review"));
     item(&mut out, "runInfo", "RunInfo", deploy("runInfo"));
+    item(&mut out, "gapRunInfo", "RunInfo", deploy("gapRunInfo"));
     let batches: BTreeMap<&str, &Value> = [
         "running",
+        "stepGap",
+        "stepReattached",
+        "watchGap",
+        "watchReattached",
         "watching",
         "failed",
         "failedHeadline",

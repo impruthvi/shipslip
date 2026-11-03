@@ -144,6 +144,11 @@ export type StepTiming =
   | { kind: "took"; duration: string; durationMs: number }
   | { kind: "endNotKnown"; startedAtMs: number };
 
+export interface RecordedConnectionGap {
+  lostAtMs: number;
+  reattachedAtMs: number | null;
+}
+
 export interface StepView {
   index: string;
   command: string;
@@ -151,6 +156,8 @@ export interface StepView {
   label: string;
   exitCode: number | null;
   timing: StepTiming | null;
+  resultSeenAtMs: number | null;
+  connectionGaps: RecordedConnectionGap[];
   output: string[];
 }
 
@@ -390,6 +397,7 @@ export interface RunInfo {
   runPlan: RunPlan | null;
   watchMs: number | null;
   startedAtMs: number;
+  connectionGap: ConnectionGapView | null;
 }
 
 export type ProgressStatus =
@@ -401,12 +409,23 @@ export type ProgressStatus =
   | "NotStarted"
   | "Skipped";
 
+export type ConnectionTargetView =
+  | { kind: "step"; index: number }
+  | { kind: "maintenance"; phase: "Down" | "Up" }
+  | { kind: "logWatch" };
+
+export interface ConnectionGapView {
+  target: ConnectionTargetView;
+  lostAtMs: number;
+}
+
 export interface Progress {
   name: string | null;
   status: ProgressStatus;
   exitCode: number | null;
   /** From the finished event; `null` while running. */
   timing: StepTiming | null;
+  reattachedAtMs: number | null;
 }
 
 export type Terminal =
@@ -438,6 +457,8 @@ export type RunHeadline =
 export interface RunState {
   terminal: Terminal | null;
   headline: RunHeadline | null;
+  connectionGap: ConnectionGapView | null;
+  watchReattachedAtMs: number | null;
   /** Keyed by step index; 0 is the git fast-forward. */
   steps: Record<string, Progress>;
   maintenanceUp: Progress | null;

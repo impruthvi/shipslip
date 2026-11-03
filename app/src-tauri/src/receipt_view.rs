@@ -84,7 +84,16 @@ pub struct StepView {
     pub label: String,
     pub exit_code: Option<i32>,
     pub timing: Option<StepTiming>,
+    pub result_seen_at_ms: Option<u64>,
+    pub connection_gaps: Vec<RecordedConnectionGap>,
     pub output: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordedConnectionGap {
+    pub lost_at_ms: u64,
+    pub reattached_at_ms: Option<u64>,
 }
 
 /// What this Mac recorded of a step's run time. `None` when it recorded nothing.
@@ -243,6 +252,15 @@ fn step(row: &StepRow) -> StepView {
         label: step_label(row.status).into(),
         exit_code: row.exit_code,
         timing: step_timing(row.times()),
+        result_seen_at_ms: row.result_seen_at_ms.map(millis),
+        connection_gaps: row
+            .connection_gaps
+            .iter()
+            .map(|gap| RecordedConnectionGap {
+                lost_at_ms: millis(gap.lost_at_ms),
+                reattached_at_ms: gap.reattached_at_ms.map(millis),
+            })
+            .collect(),
         output: row
             .output
             .iter()
@@ -460,6 +478,31 @@ mod tests {
                 unseen(180_000)
             ]
         );
+    }
+
+    #[test]
+    fn receipt_step_gaps_keep_observation_times_without_transport_detail() {
+        let fx = Fixture::new();
+        let mut receipt = run(1, "staging");
+        receipt["steps"][1]["started_at_ms"] = json!(1_000);
+        receipt["steps"][1]["finished_at_ms"] = json!(null);
+        receipt["steps"][1]["result_seen_at_ms"] = json!(5_000);
+        receipt["steps"][1]["connection_gaps"] = json!([
+            { "lost_at_ms": 2_000, "reattached_at_ms": 3_000, "detail": "secret raw ssh text" },
+            { "lost_at_ms": 4_000, "reattached_at_ms": null, "detail": "more ssh text" }
+        ]);
+        let view = serde_json::to_value(open(&fx, &receipt)).unwrap();
+        let step = &view["steps"][1];
+        assert_eq!(
+            step["connectionGaps"],
+            json!([
+                { "lostAtMs": 2_000, "reattachedAtMs": 3_000 },
+                { "lostAtMs": 4_000, "reattachedAtMs": null }
+            ])
+        );
+        assert_eq!(step["timing"]["kind"], "endNotKnown");
+        assert_eq!(step["resultSeenAtMs"], 5_000);
+        assert!(!view.to_string().contains("ssh text"));
     }
 
     #[test]

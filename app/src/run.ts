@@ -75,7 +75,7 @@ export function runRows(info: RunInfo, state: RunState): RunRow[] {
     command: state.steps[index]?.name ?? command,
     progress:
       state.steps[index] ??
-      (index > 0 && index < first ? { name: null, status: "Skipped", exitCode: null, timing: null } : null),
+      (index > 0 && index < first ? { name: null, status: "Skipped", exitCode: null, timing: null, reattachedAtMs: null } : null),
     owns: (s) => s.kind === "step" && s.index === index,
   });
   if (info.maintenance) rows.push(on);

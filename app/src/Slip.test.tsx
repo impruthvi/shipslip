@@ -174,3 +174,17 @@ describe("slips without a readable receipt", () => {
     expect(screen.getByText("<b>EOF</b> at line 1")).toBeInTheDocument();
   });
 });
+
+test("a receipt lists each step's gaps and separates an unknown end from when the result was seen", () => {
+  show(fixtures.slips.connectionGaps);
+  const step = screen.getByText("php artisan migrate --force").closest("li")!;
+  expect(within(step).getAllByText(/^Connection lost at/)).toHaveLength(2);
+  expect(step).toHaveTextContent("end not known");
+  expect(within(step).getByText(/^Result seen at/)).toBeInTheDocument();
+  expect(step.querySelectorAll("time")).toHaveLength(6);
+  expect(step.querySelector('time[datetime="2026-10-12T08:48:20.000Z"]')).toBeInTheDocument();
+  const maintenance = screen.getByText("Maintenance off: php artisan up").closest("li")!;
+  expect(maintenance).toHaveTextContent("not re-attached");
+  expect(maintenance).toHaveTextContent("end not known");
+  expect(screen.queryByText(/raw ssh detail/)).toBeNull();
+});
