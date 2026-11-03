@@ -271,7 +271,7 @@ export function Workspace({
   };
   /** The refusal's way forward, if it has one. */
   const refusalAction = (error: CommandError, retry: RunPlan | null) => {
-    if (error.blockedKind === "lockHeld" && retry !== null) {
+    if ((error.blockedKind === "lockHeld" || error.blockedKind === "staleLock") && retry !== null) {
       return { label: "Check again", run: () => prepare(retry) };
     }
     if (error.blockedKind === "upToDate" && retry === "Deploy") {

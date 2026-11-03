@@ -376,7 +376,7 @@ export interface CommandError {
   code: ErrorCode;
   message: string;
   connectionKind?: "hostKeyUnknown" | "hostKeyChanged" | "keyNotLoaded" | "other";
-  blockedKind?: "lockHeld" | "fetchFailed" | "upToDate";
+  blockedKind?: "lockHeld" | "staleLock" | "fetchFailed" | "upToDate";
   nextStep?: Span;
 }
 

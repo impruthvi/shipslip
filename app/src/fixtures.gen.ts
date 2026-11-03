@@ -3533,7 +3533,13 @@ export const refusal: CommandError = {
 export const lockHeld: CommandError = {
   "blockedKind": "lockHeld",
   "code": "blocked",
-  "message": "Deploy lock held, last heartbeat 30s ago (live). Check the old run on the server; use slip break-lock production only after reviewing the holder.",
+  "message": "alex@MacBook · target 1234567. Last heartbeat 30 seconds ago."
+};
+
+export const staleLock: CommandError = {
+  "blockedKind": "staleLock",
+  "code": "blocked",
+  "message": "alex@MacBook · target 1234567. The holder stopped sending a heartbeat 10 minutes ago. Review the holder and check the old run on the server before breaking the lock.",
   "nextStep": {
     "command": "slip break-lock production",
     "copyText": "cd '/Users/you/code/shop' && slip break-lock production",
