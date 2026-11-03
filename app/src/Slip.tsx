@@ -6,6 +6,7 @@ import type { Context, PaneView } from "./slipTarget";
 import { isTime, stamp, utcStamp } from "./time";
 import type {
   EnvCellView,
+  FlagKind,
   FlagView,
   GroupView,
   Guidance,
@@ -20,6 +21,20 @@ import type { Opened } from "./useReceipt";
 const toneClass: Record<Tone, string> = { good: "tone-good", bad: "tone-bad", neutral: "" };
 
 const COMMITS_SHOWN = 5;
+
+function flagClass(kind: FlagKind | null): string {
+  switch (kind) {
+    case "newErrors":
+    case "smokeFailed":
+      return "tone-bad";
+    case "logWatchInterrupted":
+    case "logUnreadable":
+    case "appLeftDown":
+      return "tone-attention";
+    default:
+      return "muted";
+  }
+}
 
 /** Red only for a step that failed; a stop or a lost result is amber. */
 function outcomeClass(outcome: OutcomeView): string {
@@ -232,7 +247,7 @@ function Flag({ flag }: { flag: FlagView }) {
   return (
     <p className="slip-flag">
       {flag.newErrors && <span className="chip">NEW</span>}
-      <span className={`sentence ${flag.bad ? "tone-bad" : "muted"}`}>{flag.text}</span>
+      <span className={`sentence ${flagClass(flag.kind)}`}>{flag.text}</span>
     </p>
   );
 }
@@ -302,7 +317,7 @@ function LogWatch({ watch }: { watch: WatchView }) {
         <span className="caps mono muted">Log watch</span>
         {newGroups > 0 && <span className="chip">NEW {newGroups}</span>}
       </h3>
-      <p className="mono muted slip-watch-status">
+      <p className={`mono ${flagClass(watch.kind)} slip-watch-status`}>
         {watch.status} · {watch.duration} · {watch.linesRead} lines · {watch.logPath}
       </p>
       {watch.groups.map((group, index) => (

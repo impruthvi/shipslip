@@ -485,7 +485,7 @@ fn flags_carry_their_numbers() {
         to_json(query(value))["flags"],
         json!([
             {"kind": "new_errors", "groups": 3},
-            {"kind": "log_not_fully_observed"},
+            {"kind": "log_watch_interrupted"},
             {"kind": "smoke_failed", "status": 500},
             {"kind": "app_left_down"},
         ])

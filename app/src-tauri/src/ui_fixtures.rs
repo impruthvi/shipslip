@@ -194,6 +194,7 @@ fn release_map(fx: &Fixture) {
 /// Every answer the UI handles, keyed so the preview can serve them.
 struct Fixtures {
     map: LoadResult,
+    watch_results: LoadResult,
     compares: BTreeMap<String, Value>,
     receipts: BTreeMap<String, ReceiptResult>,
     first_run: LoadResult,
@@ -298,13 +299,39 @@ fn build() -> (Fixtures, Vec<String>) {
         serde_json::to_value(slip(read(&newer_path))).unwrap(),
     );
 
-    let homes = [fx.dir(), empty.dir(), broken.dir()]
+    let watch_fx = Fixture::new();
+    let mut watch_builder = Builder {
+        fx: &watch_fx,
+        next: 200,
+    };
+    for (name, status, skipped) in [
+        ("watchInterrupted", "Partial", false),
+        ("watchUnreadable", "Unavailable", false),
+        ("watchNoFile", "NoLogSeen", false),
+        ("watchStopped", "Cancelled", false),
+        ("watchSkipped", "NotRun", true),
+    ] {
+        let mut receipt = watch_builder.deploy(name, "staging", 1, &sha('a'));
+        receipt["watch"] = serde_json::to_value(shipslip::WatchResult::not_run()).unwrap();
+        receipt["watch"]["status"] = json!(status);
+        receipt["watch"]["duration_ms"] = json!(if skipped { 0 } else { 120_000 });
+        if skipped {
+            receipt["checks_skip_reason"] = json!("AppLeftInMaintenance");
+        }
+        let path = watch_fx.save(&receipt);
+        slips.insert(name, serde_json::to_value(slip(read(&path))).unwrap());
+    }
+    let watch_results =
+        AppState::default().load_map(|| NOW, || overview(&watch_fx.receipts(), &watch_fx.trust()));
+
+    let homes = [fx.dir(), empty.dir(), broken.dir(), watch_fx.dir()]
         .iter()
         .map(|dir| dir.to_string_lossy().into_owned())
         .collect();
     (
         Fixtures {
             map,
+            watch_results,
             compares,
             receipts,
             first_run,
@@ -359,6 +386,12 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
     item(&mut out, "coalesced", "LoadResult", &fixtures.coalesced);
     item(
         &mut out,
+        "watchResults",
+        "LoadResult",
+        &fixtures.watch_results,
+    );
+    item(
+        &mut out,
         "slips",
         "Record<string, SlipView>",
         &fixtures.slips,
@@ -406,6 +439,26 @@ mod erased {
         fn pretty(&self) -> String {
             serde_json::to_string_pretty(self).unwrap()
         }
+    }
+}
+
+#[test]
+fn log_watch_fixture_wording() {
+    let (fixtures, _) = build();
+    for (name, expected) in [
+        (
+            "watchInterrupted",
+            "log watch interrupted · entries may be missing",
+        ),
+        ("watchUnreadable", "log could not be read"),
+        ("watchNoFile", "no log file yet"),
+        ("watchStopped", "log watch stopped early"),
+        (
+            "watchSkipped",
+            "log watch skipped · app left in maintenance",
+        ),
+    ] {
+        assert_eq!(fixtures.slips[name]["watch"]["status"], expected, "{name}");
     }
 }
 

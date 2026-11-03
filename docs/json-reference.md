@@ -77,6 +77,13 @@ The local receipt stores the same optional field without changing its version.
 Older receipts omit it; an absent reason does not imply a quiet log or a passed
 smoke check. An unconfigured smoke check stays `not_configured`.
 
+Log watch flags distinguish `log_watch_interrupted` and `log_unreadable`
+(attention) from `no_log_file_yet`, `log_watch_stopped_early`, and
+`log_watch_skipped_in_maintenance` (quiet information). These replace the
+former `log_not_fully_observed` flag. A complete watch and `NotRun` without
+a skip reason add no log watch flag. New errors and other run problems still
+need attention independently of the log watch result.
+
 ## MCP
 
 Launch `slip mcp` for local records only, or `slip mcp --read-logs` to also
@@ -171,7 +178,7 @@ including `anchor.plan`, `server_marker_outcome`, and `check.reason`.
   "receipt.run_plan": ["Deploy", "Rerun", "FromStep"],
   "receipt.row.state": ["receipt", "newer", "unreadable"],
   "receipt.outcome.kind": ["succeeded", "failed_at_step", "stopped_after_step", "stopped_in_maintenance", "unknown", "cancelled_before_changes", "aborted_before_changes", "not_recorded"],
-  "receipt.flag.kind": ["new_errors", "log_not_fully_observed", "log_not_recorded", "smoke_failed", "smoke_not_recorded", "app_left_down"],
+  "receipt.flag.kind": ["new_errors", "log_watch_interrupted", "log_unreadable", "no_log_file_yet", "log_watch_stopped_early", "log_watch_skipped_in_maintenance", "log_not_recorded", "smoke_failed", "smoke_not_recorded", "app_left_down"],
   "receipt.step.kind": ["maintenance_down", "step", "maintenance_up"],
   "receipt.step.status": ["pending", "running", "ok", "failed", "unknown", "not_started", "skipped"],
   "receipt.checks_skip_reason": ["AppLeftInMaintenance"],

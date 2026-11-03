@@ -406,7 +406,11 @@ fn serialized_fixed_values_match_the_json_reference() {
         "receipt.flag.kind",
         every!(Flag {
             NewErrors { groups: 1 },
-            LogNotFullyObserved,
+            LogWatchInterrupted,
+            LogUnreadable,
+            NoLogFileYet,
+            LogWatchStoppedEarly,
+            LogWatchSkippedInMaintenance,
             LogNotRecorded,
             SmokeFailed { status: None },
             SmokeNotRecorded,

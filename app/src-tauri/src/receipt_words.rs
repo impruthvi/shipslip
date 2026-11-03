@@ -1,4 +1,5 @@
 use shipslip::records::{Outcome, OutcomeKind, Smoke, StepState};
+#[cfg(test)]
 use shipslip::WatchStatus;
 
 fn outcome_label(kind: OutcomeKind) -> Option<String> {
@@ -57,17 +58,6 @@ pub(crate) fn smoke_text(smoke: &Smoke) -> String {
             status: None,
             reason,
         } => format!("failed: {}", reason.field()),
-    }
-}
-
-pub(crate) fn describe_watch(status: WatchStatus) -> &'static str {
-    match status {
-        WatchStatus::Complete => "complete",
-        WatchStatus::Partial => "partial",
-        WatchStatus::Unavailable => "unavailable",
-        WatchStatus::Cancelled => "cancelled",
-        WatchStatus::NotRun => "not run",
-        WatchStatus::NoLogSeen => "no log file seen",
     }
 }
 
@@ -157,13 +147,16 @@ mod tests {
         }
         for (state, expected) in [
             (WatchStatus::Complete, "complete"),
-            (WatchStatus::Partial, "partial"),
-            (WatchStatus::Unavailable, "unavailable"),
-            (WatchStatus::Cancelled, "cancelled"),
+            (
+                WatchStatus::Partial,
+                "log watch interrupted · entries may be missing",
+            ),
+            (WatchStatus::Unavailable, "log could not be read"),
+            (WatchStatus::Cancelled, "log watch stopped early"),
             (WatchStatus::NotRun, "not run"),
-            (WatchStatus::NoLogSeen, "no log file seen"),
+            (WatchStatus::NoLogSeen, "no log file yet"),
         ] {
-            assert_eq!(describe_watch(state), expected);
+            assert_eq!(state.description(None), expected);
         }
     }
     #[test]

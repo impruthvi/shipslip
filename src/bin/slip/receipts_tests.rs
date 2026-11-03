@@ -143,6 +143,41 @@ fn receipt(changes: impl FnOnce(&mut serde_json::Value)) -> Receipt {
 }
 
 #[test]
+fn receipt_log_watch_results_match_markdown_wording() {
+    use shipslip::observation::CheckSkipReason;
+    use shipslip::WatchResult;
+
+    for (status, reason, expected) in [
+        (
+            WatchStatus::Partial,
+            None,
+            "log watch interrupted · entries may be missing",
+        ),
+        (WatchStatus::Unavailable, None, "log could not be read"),
+        (WatchStatus::NoLogSeen, None, "no log file yet"),
+        (WatchStatus::Cancelled, None, "log watch stopped early"),
+        (
+            WatchStatus::NotRun,
+            Some(CheckSkipReason::AppLeftInMaintenance),
+            "log watch skipped · app left in maintenance",
+        ),
+    ] {
+        let record = receipt(|value| {
+            let mut watch = WatchResult::not_run();
+            watch.status = status;
+            value["watch"] = serde_json::to_value(watch).unwrap();
+            value["checks_skip_reason"] = serde_json::to_value(reason).unwrap();
+        });
+        let output = render_show(&record);
+        assert!(
+            output.contains(&format!("\nLog watch: {expected}")),
+            "{output}"
+        );
+        assert!(shipslip::receipt::markdown(&record, false).contains(expected));
+    }
+}
+
+#[test]
 fn show_escapes_server_text_and_cannot_forge_fields() {
     let text = render_show(&receipt(|value| {
         value["steps"][0]["output"] = json!(["\u{1b}[32mok\u{1b}[0m \u{1b}]0;pwned\u{7}"]);
@@ -768,7 +803,10 @@ fn receipt_flags_preserve_the_terminal_symbols_and_counts() {
     for (flag, expected) in [
         (Flag::NewErrors { groups: 1 }, "⚠ 1 new error group"),
         (Flag::NewErrors { groups: 3 }, "⚠ 3 new error groups"),
-        (Flag::LogNotFullyObserved, "ⓘ log not fully observed"),
+        (
+            Flag::LogWatchInterrupted,
+            "ⓘ log watch interrupted · entries may be missing",
+        ),
         (Flag::LogNotRecorded, "ⓘ log not recorded"),
         (Flag::SmokeFailed { status: Some(500) }, "⚠ smoke 500"),
         (Flag::SmokeFailed { status: None }, "⚠ smoke failed"),
@@ -795,12 +833,15 @@ fn receipt_step_and_watch_labels_preserve_every_state() {
     }
     for (state, expected) in [
         (WatchStatus::Complete, "complete"),
-        (WatchStatus::Partial, "partial"),
-        (WatchStatus::Unavailable, "unavailable"),
-        (WatchStatus::Cancelled, "cancelled"),
+        (
+            WatchStatus::Partial,
+            "log watch interrupted · entries may be missing",
+        ),
+        (WatchStatus::Unavailable, "log could not be read"),
+        (WatchStatus::Cancelled, "log watch stopped early"),
         (WatchStatus::NotRun, "not run"),
-        (WatchStatus::NoLogSeen, "no log file seen"),
+        (WatchStatus::NoLogSeen, "no log file yet"),
     ] {
-        assert_eq!(describe_watch(state), expected);
+        assert_eq!(state.description(None), expected);
     }
 }

@@ -519,22 +519,12 @@ fn skipped_check(name: &str, reason: Option<CheckSkipReason>) -> String {
 }
 
 fn watch_summary(result: &WatchResult, skip_reason: Option<CheckSkipReason>) -> String {
-    if result.status == WatchStatus::NotRun && skip_reason.is_some() {
-        return skipped_check("Log watch", skip_reason);
-    }
     let errors = match result.new_errors.len() {
         0 => "no new errors".to_string(),
         1 => "1 new error group".to_string(),
         n => format!("{n} new error groups"),
     };
-    let state = match result.status {
-        WatchStatus::Complete => "complete",
-        WatchStatus::Partial => "partial",
-        WatchStatus::Cancelled => "stopped early",
-        WatchStatus::Unavailable => "log could not be read",
-        WatchStatus::NoLogSeen => "no log file found",
-        WatchStatus::NotRun => "not run",
-    };
+    let state = result.status.description(skip_reason);
     let checked = matches!(
         result.status,
         WatchStatus::Complete | WatchStatus::Partial | WatchStatus::Cancelled
@@ -2380,13 +2370,13 @@ mod tests {
         );
         assert_eq!(
             summary(WatchStatus::Cancelled),
-            "Log watch: stopped early, no new errors"
+            "Log watch: log watch stopped early, no new errors"
         );
         assert_eq!(summary(WatchStatus::NotRun), "Log watch: not run");
         let reason = Some(CheckSkipReason::AppLeftInMaintenance);
         assert_eq!(
             watch_summary(&WatchResult::not_run(), reason),
-            "Log watch: skipped (app left in maintenance mode)"
+            "Log watch: log watch skipped · app left in maintenance"
         );
         assert_eq!(
             skipped_check("Smoke check", reason),
@@ -2394,7 +2384,7 @@ mod tests {
         );
         assert_eq!(
             summary(WatchStatus::NoLogSeen),
-            "Log watch: no log file found"
+            "Log watch: no log file yet"
         );
         assert_eq!(
             summary(WatchStatus::Unavailable),

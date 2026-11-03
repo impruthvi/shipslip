@@ -7,6 +7,7 @@ use crate::receipt_view::{step_timing, watch_view, StepTiming, WatchView};
 use serde::Serialize;
 use shipslip::interrupt::{next_stage, Stage};
 use shipslip::logs::escape_field;
+use shipslip::observation::CheckSkipReason;
 use shipslip::receipt::ReceiptStepStatus;
 use shipslip::{DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, SmokeResult};
 
@@ -214,6 +215,7 @@ struct Subscriber {
 }
 
 struct History {
+    checks_skip_reason: Option<CheckSkipReason>,
     sequence: u64,
     stage: String,
     total_output: u64,
@@ -233,6 +235,7 @@ impl RunFeed {
     pub fn new(info: RunInfo) -> Arc<Self> {
         Arc::new(Self {
             inner: Mutex::new(History {
+                checks_skip_reason: None,
                 stage: info.stage.clone(),
                 sequence: 0,
                 total_output: 0,
@@ -361,9 +364,17 @@ impl RunFeed {
                     Some(u64::try_from(window.as_millis()).unwrap_or(u64::MAX));
                 None
             }
+            DeployEvent::ChecksSkipped { reason } => {
+                history.checks_skip_reason = Some(reason);
+                None
+            }
             DeployEvent::WatchFinished(result) => {
                 history.stage = "finishing".into();
-                history.state.watch = Some(watch_view(&result, "not observed"));
+                history.state.watch = Some(watch_view(
+                    &result,
+                    "not observed",
+                    history.checks_skip_reason,
+                ));
                 None
             }
             DeployEvent::SmokeFinished(result) => {

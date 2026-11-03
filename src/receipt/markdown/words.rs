@@ -1,4 +1,5 @@
 use crate::records::{Flag, Outcome, OutcomeKind, StepState};
+#[cfg(test)]
 use crate::WatchStatus;
 
 fn outcome_label(kind: OutcomeKind) -> Option<String> {
@@ -28,18 +29,13 @@ pub(super) fn headline(outcome: Outcome) -> String {
 }
 
 pub(super) fn flag_text(flag: Flag) -> String {
-    match flag {
-        Flag::NewErrors { groups: 1 } => "⚠ 1 new error group".into(),
-        Flag::NewErrors { groups } => format!("⚠ {groups} new error groups"),
-        Flag::LogNotFullyObserved => "ⓘ log not fully observed".into(),
-        Flag::LogNotRecorded => "ⓘ log not recorded".into(),
-        Flag::SmokeFailed {
-            status: Some(status),
-        } => format!("⚠ smoke {status}"),
-        Flag::SmokeFailed { status: None } => "⚠ smoke failed".into(),
-        Flag::SmokeNotRecorded => "ⓘ smoke not recorded".into(),
-        Flag::AppLeftDown => "⛔ app may be in maintenance mode".into(),
-    }
+    let symbol = match flag {
+        Flag::NewErrors { .. } | Flag::SmokeFailed { .. } => "⚠ ",
+        Flag::AppLeftDown => "⛔ ",
+        Flag::NoLogFileYet | Flag::LogWatchStoppedEarly | Flag::LogWatchSkippedInMaintenance => "",
+        _ => "ⓘ ",
+    };
+    format!("{symbol}{}", flag.description())
 }
 
 pub(super) fn step_label(state: StepState) -> &'static str {
@@ -50,17 +46,6 @@ pub(super) fn step_label(state: StepState) -> &'static str {
         StepState::NotStarted | StepState::Pending => "– not run",
         StepState::Running => "? running when saved",
         StepState::Skipped => "↷ skipped",
-    }
-}
-
-pub(super) fn describe_watch(status: WatchStatus) -> &'static str {
-    match status {
-        WatchStatus::Complete => "complete",
-        WatchStatus::Partial => "partial",
-        WatchStatus::Unavailable => "unavailable",
-        WatchStatus::Cancelled => "cancelled",
-        WatchStatus::NotRun => "not run",
-        WatchStatus::NoLogSeen => "no log file seen",
     }
 }
 
@@ -140,7 +125,10 @@ mod tests {
         for (flag, expected) in [
             (Flag::NewErrors { groups: 1 }, "⚠ 1 new error group"),
             (Flag::NewErrors { groups: 3 }, "⚠ 3 new error groups"),
-            (Flag::LogNotFullyObserved, "ⓘ log not fully observed"),
+            (
+                Flag::LogWatchInterrupted,
+                "ⓘ log watch interrupted · entries may be missing",
+            ),
             (Flag::LogNotRecorded, "ⓘ log not recorded"),
             (Flag::SmokeFailed { status: Some(500) }, "⚠ smoke 500"),
             (Flag::SmokeFailed { status: None }, "⚠ smoke failed"),
@@ -167,13 +155,16 @@ mod tests {
         }
         for (state, expected) in [
             (WatchStatus::Complete, "complete"),
-            (WatchStatus::Partial, "partial"),
-            (WatchStatus::Unavailable, "unavailable"),
-            (WatchStatus::Cancelled, "cancelled"),
+            (
+                WatchStatus::Partial,
+                "log watch interrupted · entries may be missing",
+            ),
+            (WatchStatus::Unavailable, "log could not be read"),
+            (WatchStatus::Cancelled, "log watch stopped early"),
             (WatchStatus::NotRun, "not run"),
-            (WatchStatus::NoLogSeen, "no log file seen"),
+            (WatchStatus::NoLogSeen, "no log file yet"),
         ] {
-            assert_eq!(describe_watch(state), expected);
+            assert_eq!(state.description(None), expected);
         }
     }
 }

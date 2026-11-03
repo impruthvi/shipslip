@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use super::Untrusted;
+use crate::observation::CheckSkipReason;
 use crate::receipt::{Receipt, ReceiptKind, ReceiptStatus};
 use crate::{DeployOutcome, RunPlan, SmokeResult, WatchStatus};
 
@@ -94,7 +95,11 @@ pub enum Flag {
     NewErrors {
         groups: u64,
     },
-    LogNotFullyObserved,
+    LogWatchInterrupted,
+    LogUnreadable,
+    NoLogFileYet,
+    LogWatchStoppedEarly,
+    LogWatchSkippedInMaintenance,
     LogNotRecorded,
     SmokeFailed {
         status: Option<u16>,
@@ -104,12 +109,50 @@ pub enum Flag {
 }
 
 impl Flag {
+    pub fn from_watch(status: WatchStatus, skip_reason: Option<CheckSkipReason>) -> Option<Self> {
+        match status {
+            WatchStatus::Partial => Some(Self::LogWatchInterrupted),
+            WatchStatus::Unavailable => Some(Self::LogUnreadable),
+            WatchStatus::NoLogSeen => Some(Self::NoLogFileYet),
+            WatchStatus::Cancelled => Some(Self::LogWatchStoppedEarly),
+            WatchStatus::NotRun if skip_reason == Some(CheckSkipReason::AppLeftInMaintenance) => {
+                Some(Self::LogWatchSkippedInMaintenance)
+            }
+            WatchStatus::Complete | WatchStatus::NotRun => None,
+        }
+    }
+
+    pub fn description(self) -> String {
+        match self {
+            Self::NewErrors { groups: 1 } => "1 new error group".into(),
+            Self::NewErrors { groups } => format!("{groups} new error groups"),
+            Self::LogWatchInterrupted => WatchStatus::Partial.description(None).into(),
+            Self::LogUnreadable => WatchStatus::Unavailable.description(None).into(),
+            Self::NoLogFileYet => WatchStatus::NoLogSeen.description(None).into(),
+            Self::LogWatchStoppedEarly => WatchStatus::Cancelled.description(None).into(),
+            Self::LogWatchSkippedInMaintenance => WatchStatus::NotRun
+                .description(Some(CheckSkipReason::AppLeftInMaintenance))
+                .into(),
+            Self::LogNotRecorded => "log not recorded".into(),
+            Self::SmokeFailed {
+                status: Some(status),
+            } => format!("smoke {status}"),
+            Self::SmokeFailed { status: None } => "smoke failed".into(),
+            Self::SmokeNotRecorded => "smoke not recorded".into(),
+            Self::AppLeftDown => "app may be in maintenance mode".into(),
+        }
+    }
+
     /// Something may be wrong now: new errors, a failed smoke check, or the
-    /// app left in maintenance mode. Other flags say what was not recorded.
+    /// app left in maintenance mode, or a log watch that could not observe.
     pub fn is_bad(self) -> bool {
         matches!(
             self,
-            Self::NewErrors { .. } | Self::SmokeFailed { .. } | Self::AppLeftDown
+            Self::NewErrors { .. }
+                | Self::SmokeFailed { .. }
+                | Self::AppLeftDown
+                | Self::LogWatchInterrupted
+                | Self::LogUnreadable
         )
     }
 }
@@ -139,12 +182,8 @@ impl Receipt {
                 if groups > 0 {
                     flags.push(Flag::NewErrors { groups });
                 }
-                match watch.status {
-                    WatchStatus::Complete | WatchStatus::NotRun => {}
-                    WatchStatus::Partial
-                    | WatchStatus::Unavailable
-                    | WatchStatus::NoLogSeen
-                    | WatchStatus::Cancelled => flags.push(Flag::LogNotFullyObserved),
+                if let Some(flag) = Flag::from_watch(watch.status, self.checks_skip_reason) {
+                    flags.push(flag);
                 }
             }
         }
