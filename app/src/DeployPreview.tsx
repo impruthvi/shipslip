@@ -91,6 +91,7 @@ export function Preview({
             </p>
           )}
           <p className="muted">{facts.join(" · ")}</p>
+          {!review.smokeConfigured && <p className="muted">No smoke check configured for this environment.</p>}
         </div>
         {deploying && (
         <section className="workspace-section" aria-labelledby="preview-commits">

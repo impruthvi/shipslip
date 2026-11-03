@@ -648,6 +648,10 @@ impl ReceiptJournal {
         })
     }
 
+    pub(crate) fn smoke(&self, smoke: SmokeResult) -> Result<(), ReceiptError> {
+        self.update(|receipt| receipt.smoke = Some(smoke))
+    }
+
     /// Where this env's log signature history lives: beside the receipts
     /// root, so a project named `signatures` cannot collide with it.
     pub fn history_paths(&self) -> HistoryPaths {

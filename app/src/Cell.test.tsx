@@ -101,6 +101,17 @@ describe("cells", () => {
   });
 });
 
+test.each([
+  ["passed", "Succeeded", "ink"],
+  ["failed", "Smoke failed", "bad"],
+  ["upOnlyFailed", "Smoke failed", "bad"],
+])("the newest Up smoke result %s earns its status colour", (fixture, word, tone) => {
+  const cell = fixtures.smokeCells[fixture];
+  if (cell.kind !== "present") throw new Error("fixture");
+  render(<Flap status={status(cell)} />);
+  expect(screen.getByText(word)).toHaveClass(`flap-${tone}`);
+});
+
 describe("board status word", () => {
   const at = (repoRoot: string, env: string) => {
     const found = map.rows.find((r) => r.repoRoot === repoRoot)?.cells[map.envs.indexOf(env)];

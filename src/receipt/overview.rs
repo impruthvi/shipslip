@@ -372,21 +372,24 @@ fn walk(owns: &[Own]) -> Walk {
     let mut saw_other_target = false;
     // A newer successful `slip up` turned maintenance mode off.
     let mut brought_up = false;
+    // Smoke evidence is independent of the run that established the code.
+    let mut smoke_flags = None;
     for own in owns {
         if counted == WALK_LIMIT {
-            result.code = CodeState::NoCodeChangeInLast { records: counted };
-            return result;
+            break;
         }
         let receipt = match read_receipt(&own.path) {
             Ok(receipt) => receipt,
             Err(_) => {
                 // Listed as a problem by `slip receipts`; here it only marks
                 // the cell as possibly stale.
-                result
-                    .stale_hint
-                    .get_or_insert(StaleHint::NewestUnreadable {
-                        path: own.path.clone(),
-                    });
+                if result.code_run.is_none() {
+                    result
+                        .stale_hint
+                        .get_or_insert(StaleHint::NewestUnreadable {
+                            path: own.path.clone(),
+                        });
+                }
                 unreadable += 1;
                 continue;
             }
@@ -407,10 +410,29 @@ fn walk(owns: &[Own]) -> Walk {
         }
         counted += 1;
         first_on_target = Some(receipt.run_id.clone());
+        if smoke_flags.is_none()
+            && matches!(
+                receipt.smoke,
+                Some(
+                    crate::SmokeResult::Passed { .. }
+                        | crate::SmokeResult::Failed { .. }
+                        | crate::SmokeResult::Skipped
+                )
+            )
+        {
+            smoke_flags = Some(
+                receipt
+                    .badge()
+                    .flags
+                    .into_iter()
+                    .filter(|flag| matches!(flag, Flag::SmokeFailed { .. }))
+                    .collect::<Vec<_>>(),
+            );
+        }
         brought_up |= receipt.kind == ReceiptKind::Up
             && receipt.status == ReceiptStatus::Final
             && receipt.outcome == Some(DeployOutcome::Succeeded);
-        if let Some(code) = code_of(&receipt) {
+        if let Some(code) = code_of(&receipt).filter(|_| result.code_run.is_none()) {
             let mut code_run = AttemptSummary::of(&receipt, &own.path);
             if brought_up {
                 code_run
@@ -422,8 +444,28 @@ fn walk(owns: &[Own]) -> Walk {
             result.code = code;
             result.code_run = Some(code_run);
             result.decided_at_ms = Some(receipt.started_at_ms);
-            return result;
         }
+        if result.code_run.is_some() && smoke_flags.is_some() {
+            break;
+        }
+    }
+    // Map summaries carry the current smoke signal; the receipts themselves
+    // retain each run's original result.
+    if let Some(smoke_flags) = smoke_flags {
+        for attempt in result
+            .code_run
+            .iter_mut()
+            .chain(result.last_attempt.iter_mut())
+        {
+            attempt
+                .badge
+                .flags
+                .retain(|flag| !matches!(flag, Flag::SmokeFailed { .. } | Flag::SmokeNotRecorded));
+            attempt.badge.flags.extend(smoke_flags.iter().cloned());
+        }
+    }
+    if result.code_run.is_some() {
+        return result;
     }
     result.code = match (current, first_on_target) {
         (Some((alias, path)), Some(run_id)) if saw_other_target => CodeState::TargetChanged {
