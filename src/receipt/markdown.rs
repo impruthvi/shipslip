@@ -141,6 +141,7 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
         );
     }
 
+    render_connection_gaps(&mut out, receipt, details);
     if let Some(watch) = &receipt.watch {
         out.push_str("\n## Log watch\n\n");
         if watch.status == crate::WatchStatus::NotRun {
@@ -268,6 +269,34 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
 
 fn row(out: &mut String, label: &str, value: &str) {
     let _ = writeln!(out, "| {label} | {value} |");
+}
+
+fn render_connection_gaps(out: &mut String, receipt: &ReceiptRecord, details: bool) {
+    let mut heading = false;
+    for step in &receipt.steps {
+        let label = match step.kind {
+            StepKind::Step { index } => format!("Step {index}"),
+            StepKind::MaintenanceDown => "Maintenance on".into(),
+            StepKind::MaintenanceUp => "Maintenance off".into(),
+        };
+        for gap in &step.connection_gaps {
+            if !heading {
+                out.push_str("\n## Connection gaps\n\n");
+                heading = true;
+            }
+            let _ = writeln!(
+                out,
+                "- {label}: connection lost {}; {}.",
+                time_of_day(gap.lost_at_ms),
+                gap.reattached_at_ms
+                    .map(|at| format!("re-attached {}", time_of_day(at)))
+                    .unwrap_or_else(|| "not re-attached".into())
+            );
+            if details {
+                let _ = writeln!(out, "  Detail: {}", inline(gap.detail.raw()));
+            }
+        }
+    }
 }
 
 fn time_of_day(millis: u128) -> String {

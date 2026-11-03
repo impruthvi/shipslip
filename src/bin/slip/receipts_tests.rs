@@ -220,6 +220,28 @@ fn show_escapes_untrusted_text_exactly_once() {
 }
 
 #[test]
+fn show_gives_connection_gaps_and_result_seen_without_guessing_end() {
+    let text = render_show(&receipt(|value| {
+        value["steps"][0]["started_at_ms"] = json!(1000);
+        value["steps"][0]["result_seen_at_ms"] = json!(5000);
+        value["steps"][0]["connection_gaps"] = json!([{
+            "lost_at_ms": 2000, "reattached_at_ms": 5000, "detail": "raw ssh\u{1b}[2J"
+        }]);
+    }));
+    assert!(text.contains("end not known, result seen"), "{text}");
+    assert!(
+        text.contains(&format!(
+            "Connection lost {}; re-attached {}",
+            time_of_day(2000),
+            time_of_day(5000)
+        )),
+        "{text}"
+    );
+    assert!(text.contains("Detail: raw ssh\\x1b[2J"), "{text}");
+    assert!(!text.contains('\u{1b}'));
+}
+
+#[test]
 fn show_gives_a_finished_step_duration_only() {
     let untimed = render_show(&receipt(|_| {}));
     assert!(

@@ -1320,6 +1320,7 @@ fn a_step_with_no_observed_exit_never_gets_a_failed_headline() {
 fn finished_steps_carry_the_times_on_their_events_and_running_steps_none() {
     let feed = display_feed();
     let timed = StepTimes {
+        result_seen_at_ms: None,
         started_at_ms: Some(1_000),
         finished_at_ms: Some(3_400),
     };

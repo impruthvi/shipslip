@@ -21,6 +21,7 @@ pub enum StepStatus {
 pub struct StepTimes {
     pub started_at_ms: Option<u128>,
     pub finished_at_ms: Option<u128>,
+    pub result_seen_at_ms: Option<u128>,
 }
 
 impl StepTimes {
@@ -39,6 +40,28 @@ pub(crate) fn down_may_have_started(status: &StepStatus) -> bool {
 pub enum MaintenancePhase {
     Down,
     Up,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConnectionTarget {
+    Step { index: usize },
+    Maintenance { phase: MaintenancePhase },
+    LogWatch,
+}
+
+impl fmt::Display for ConnectionTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Step { index } => write!(formatter, "step {index}"),
+            Self::Maintenance {
+                phase: MaintenancePhase::Down,
+            } => formatter.write_str("maintenance on"),
+            Self::Maintenance {
+                phase: MaintenancePhase::Up,
+            } => formatter.write_str("maintenance off"),
+            Self::LogWatch => formatter.write_str("the log watch"),
+        }
+    }
 }
 
 /// Why a deploy stopped between steps.
@@ -145,6 +168,15 @@ impl DeployOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DeployEvent {
+    ConnectionLost {
+        target: ConnectionTarget,
+        at_ms: u128,
+        detail: String,
+    },
+    Reattached {
+        target: ConnectionTarget,
+        at_ms: u128,
+    },
     StepStarted {
         index: usize,
         name: String,

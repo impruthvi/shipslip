@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim
 
 RUN apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server bash git procps ca-certificates gzip tzdata \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends openssh-server bash git procps ca-certificates gzip tzdata iptables \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir /run/sshd \
     && useradd --create-home --shell /bin/bash deploy \

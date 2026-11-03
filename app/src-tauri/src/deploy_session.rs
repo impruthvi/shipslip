@@ -1913,6 +1913,7 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
                 status,
                 exit_code,
                 times: StepTimes {
+                    result_seen_at_ms: None,
                     started_at_ms: Some(started),
                     finished_at_ms: Some(started + 1_200),
                 },

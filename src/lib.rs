@@ -40,7 +40,10 @@ pub use engine::{
     ExecuteError, ExecuteRejected, ExecutionHandle, LockStatusError, LogChannel, PrepareError,
     PreparePhase, Preview, RunEvents, RunPlan, POST_DEPLOY_WATCH,
 };
-pub use event::{DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StepTimes, StopReason};
+pub use event::{
+    ConnectionTarget, DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StepTimes,
+    StopReason,
+};
 pub use lock::{LockInfo, LockOwner, STALE_AFTER};
 pub use observation::{ErrorGroup, ErrorVariant, LogPhase, SmokeResult, WatchResult, WatchStatus};
 pub use preflight::{AbortReason, BlockReason};

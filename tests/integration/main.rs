@@ -17,9 +17,9 @@ use shipslip::transport::{
 use shipslip::{
     attach, break_lock, bring_app_up, cancel, execute, execute_recorded, lock_status, prepare,
     prepare_with_plan, prepare_with_progress, AbortReason, BlockReason, BreakLockError,
-    BringUpError, Confirmation, DeployEvent, DeployOutcome, DeployTarget, ExecutionHandle,
-    LogChannel, MaintenancePhase, PrepareError, PreparePhase, RunEvents, RunPlan, SmokeResult,
-    StepStatus, StepTimes, StopReason, WatchStatus, POST_DEPLOY_WATCH,
+    BringUpError, Confirmation, ConnectionTarget, DeployEvent, DeployOutcome, DeployTarget,
+    ExecutionHandle, LogChannel, MaintenancePhase, PrepareError, PreparePhase, RunEvents, RunPlan,
+    SmokeResult, StepStatus, StepTimes, StopReason, WatchStatus, POST_DEPLOY_WATCH,
 };
 use tokio::sync::mpsc;
 
@@ -99,6 +99,10 @@ impl Server {
         self.exec(&format!("cd {}/storage/logs; {body}", quote(path)), "");
     }
     async fn start() -> Self {
+        Self::start_with_options(&[]).await
+    }
+
+    async fn start_with_options(options: &[&str]) -> Self {
         static BUILD: Once = Once::new();
         BUILD.call_once(|| {
             docker(&[
@@ -110,7 +114,10 @@ impl Server {
             ]);
         });
 
-        let container = docker(&["run", "-d", "--rm", "-p", "127.0.0.1::22", IMAGE]);
+        let mut args = vec!["run", "-d", "--rm", "-p", "127.0.0.1::22"];
+        args.extend_from_slice(options);
+        args.push(IMAGE);
+        let container = docker(&args);
         let port = docker(&["port", &container, "22"]);
         let port = port.lines().next().unwrap().rsplit(':').next().unwrap();
         let server = Self {
@@ -2222,6 +2229,114 @@ async fn missing_app_path_blocks_prepare() {
 }
 
 #[tokio::test]
+async fn connection_gap_after_killing_control_master_keeps_step_running_once() {
+    recorded_connection_gap(false).await;
+}
+
+#[tokio::test]
+async fn connection_gap_after_dropping_packets_does_not_guess_step_end() {
+    recorded_connection_gap(true).await;
+}
+
+async fn recorded_connection_gap(drop_packets: bool) {
+    let server = if drop_packets {
+        Server::start_with_options(&["--cap-add=NET_ADMIN"]).await
+    } else {
+        Server::start().await
+    };
+    if drop_packets {
+        let config = std::fs::read_to_string(server.config()).unwrap();
+        std::fs::write(
+            server.config(),
+            format!("{config}  ServerAliveCountMax 1\n"),
+        )
+        .unwrap();
+    }
+    let ssh = Arc::new(server.connect().await);
+    let path = server.app("recorded-gap");
+    let step = if drop_packets {
+        "echo once >> launches; echo started; sleep 2; echo finished"
+    } else {
+        "echo once >> launches; echo started; while [ ! -e continue-step ]; do sleep 0.1; done; echo finished"
+    };
+    let preview = prepare(&trusted(target(&path, &[step])), &*ssh)
+        .await
+        .unwrap();
+    let journal = Arc::new(
+        ReceiptJournal::create(&server.dir.join("receipts"), "app", &server.dir, &preview).unwrap(),
+    );
+    let confirmation = Confirmation::from(&preview, None).unwrap();
+    let (mut receiver, _handle) =
+        execute_recorded(preview, confirmation, ssh, journal.clone()).unwrap();
+    let mut events = Vec::new();
+    tokio::time::timeout(Duration::from_secs(120), async {
+        while let Some(event) = receiver.recv().await {
+            if is_output("started")(&event) {
+                if drop_packets {
+                    server.exec_as("root", "iptables -I OUTPUT -p tcp --sport 22 -j DROP; (sleep 40; iptables -D OUTPUT -p tcp --sport 22 -j DROP) >/tmp/restore-network 2>&1 </dev/null &", "");
+                } else {
+                    let processes = Command::new("ps").args(["-axo", "pid=,command="]).output().unwrap();
+                    assert!(processes.status.success());
+                    let config = server.config().display().to_string();
+                    let masters: Vec<i32> = String::from_utf8(processes.stdout).unwrap().lines().filter_map(|line| {
+                        let mut fields = line.split_whitespace();
+                        let pid = fields.next()?.parse().ok()?;
+                        let command = fields.next()?;
+                        (Path::new(command).file_name()? == "ssh" && line.contains(" -M ") && line.contains(&config)).then_some(pid)
+                    }).collect();
+                    assert_eq!(masters.len(), 1, "expected this test's mux master");
+                    assert_eq!(unsafe { libc::kill(masters[0], libc::SIGKILL) }, 0);
+                }
+            }
+            if matches!(event, DeployEvent::Reattached { target: ConnectionTarget::Step { index: 1 }, .. }) && !drop_packets {
+                server.exec(&format!("touch {path}/continue-step"), "");
+            }
+            events.push(event);
+        }
+    }).await.expect("connection-gap deploy did not finish");
+    assert_eq!(
+        events.last(),
+        Some(&DeployEvent::Finished(DeployOutcome::Succeeded)),
+        "{events:#?}"
+    );
+    let connection_events: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                DeployEvent::ConnectionLost { .. } | DeployEvent::Reattached { .. }
+            )
+        })
+        .collect();
+    let [DeployEvent::ConnectionLost {
+        target: ConnectionTarget::Step { index: 1 },
+        at_ms: lost,
+        ..
+    }, DeployEvent::Reattached {
+        target: ConnectionTarget::Step { index: 1 },
+        at_ms: attached,
+    }] = connection_events.as_slice()
+    else {
+        panic!("expected one ordered gap: {events:#?}");
+    };
+    assert!(lost <= attached);
+    assert_eq!(server.exec(&format!("cat {path}/launches"), ""), "once");
+    assert_eq!(step_output(&events, 1), ["started", "finished"]);
+    let saved = shipslip::receipt::read(journal.path()).unwrap();
+    let step = &saved.steps[1];
+    assert_eq!(step.connection_gaps.len(), 1);
+    assert_eq!(step.connection_gaps[0].lost_at_ms, *lost);
+    assert_eq!(step.connection_gaps[0].reattached_at_ms, Some(*attached));
+    if drop_packets {
+        assert_eq!(step.finished_at_ms, None);
+        assert_eq!(step.result_seen_at_ms, Some(*attached));
+    } else {
+        assert!(step.finished_at_ms.is_some());
+        assert_eq!(step.result_seen_at_ms, None);
+    }
+}
+
+#[tokio::test]
 async fn step_survives_a_dropped_connection() {
     let server = Server::start().await;
     let ssh = Arc::new(server.connect().await);
@@ -2248,9 +2363,10 @@ async fn step_survives_a_dropped_connection() {
             exit_code: Some(3),
             times: StepTimes {
                 started_at_ms: Some(start),
-                finished_at_ms: Some(end),
+                finished_at_ms,
+                result_seen_at_ms,
             },
-        } if start <= end
+        } if finished_at_ms.or(*result_seen_at_ms).is_some_and(|end| *start <= end)
     )));
 }
 
@@ -3056,6 +3172,7 @@ async fn maintenance_up_failure_keeps_deploy_success_and_reports_app_down() {
             status: StepStatus::Failed,
             exit_code: Some(7),
             times: StepTimes {
+                result_seen_at_ms: None,
                 started_at_ms: Some(start),
                 finished_at_ms: Some(end),
             },

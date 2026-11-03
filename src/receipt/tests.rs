@@ -368,6 +368,8 @@ fn step_times_are_optional_and_round_trip() {
     for step in saved["steps"].as_array().unwrap() {
         assert!(step.get("started_at_ms").is_none(), "{step}");
         assert!(step.get("finished_at_ms").is_none(), "{step}");
+        assert!(step.get("result_seen_at_ms").is_none(), "{step}");
+        assert!(step.get("connection_gaps").is_none(), "{step}");
     }
 
     let mut timed = receipt_json("aaaa0001-0", 1000, "staging");
@@ -409,6 +411,7 @@ fn maintenance_times_are_optional_and_round_trip() {
     assert_eq!(
         receipt.maintenance_up_times(),
         StepTimes {
+            result_seen_at_ms: None,
             started_at_ms: Some(20_000),
             finished_at_ms: None,
         }
@@ -446,6 +449,40 @@ fn markdown_shows_maintenance_durations_or_end_not_known() {
         ),
         "{shown}"
     );
+}
+
+#[test]
+fn markdown_shows_connection_gaps_but_keeps_raw_detail_opt_in() {
+    let mut value = receipt_json("aaaa0001-0", 1000, "staging");
+    value["steps"][1]["started_at_ms"] = json!(1000);
+    value["steps"][1]["result_seen_at_ms"] = json!(5000);
+    let gaps = json!([
+        {"lost_at_ms": 2000, "reattached_at_ms": 3000, "detail": "raw ssh secret\u{1b}"},
+        {"lost_at_ms": 4000, "detail": "second raw error"}
+    ]);
+    value["steps"][1]["connection_gaps"] = gaps.clone();
+    value["maintenance_down_status"] = json!("Ok");
+    value["maintenance_down_connection_gaps"] = gaps;
+    let receipt = parse(value);
+    let shown = markdown(&receipt, false);
+    assert!(
+        shown.contains("end not known, result seen 00:00:05Z"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Step 1: connection lost 00:00:02Z; re-attached 00:00:03Z"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Maintenance on: connection lost 00:00:04Z; not re-attached"),
+        "{shown}"
+    );
+    assert!(!shown.contains("raw ssh"));
+    assert!(!shown.contains("second raw"));
+    let detailed = markdown(&receipt, true);
+    assert!(detailed.contains("raw ssh secret\\\\x1b"), "{detailed}");
+    assert!(!detailed.contains('\u{1b}'));
+    assert_eq!(parse(serde_json::to_value(&receipt).unwrap()).version, 1);
 }
 
 #[test]
@@ -719,6 +756,65 @@ fn time_and_color_helpers() {
 }
 
 #[test]
+fn up_receipt_durably_keeps_multiple_gaps_separate_from_plain_warnings() {
+    let root = TempRoot::new();
+    let target = parse(receipt_json("gap-test", 1000, "staging")).target;
+    let journal = ReceiptJournal::create_up(
+        &root.0,
+        "app",
+        Path::new("/repo"),
+        &target,
+        "1111111111111111111111111111111111111111",
+        "abcd-0003",
+        "hash",
+    )
+    .unwrap();
+    journal
+        .begin_maintenance(MaintenancePhase::Up, 2000)
+        .unwrap();
+    let target = ConnectionTarget::Maintenance {
+        phase: MaintenancePhase::Up,
+    };
+    for event in [
+        DeployEvent::ConnectionLost {
+            target,
+            at_ms: 2100,
+            detail: "raw ssh reset".into(),
+        },
+        DeployEvent::Reattached {
+            target,
+            at_ms: 2200,
+        },
+        DeployEvent::ConnectionLost {
+            target,
+            at_ms: 2300,
+            detail: "raw ssh timeout".into(),
+        },
+    ] {
+        journal.connection_event(&event).unwrap();
+    }
+    let saved = read(journal.path()).unwrap();
+    assert_eq!(saved.version, 2);
+    for gaps in [
+        &saved.maintenance_up_connection_gaps,
+        &saved.steps[0].connection_gaps,
+    ] {
+        assert_eq!(gaps.len(), 2);
+        assert_eq!(gaps[0].lost_at_ms, 2100);
+        assert_eq!(gaps[0].reattached_at_ms, Some(2200));
+        assert_eq!(gaps[0].detail, "raw ssh reset");
+        assert_eq!(gaps[1].lost_at_ms, 2300);
+        assert_eq!(gaps[1].reattached_at_ms, None);
+        assert_eq!(gaps[1].detail, "raw ssh timeout");
+    }
+    assert_eq!(
+        saved.warnings,
+        ["The connection was lost while watching maintenance off. The step was not run again."]
+    );
+    assert_eq!(saved.step_rows()[0].connection_gaps.len(), 2);
+}
+
+#[test]
 fn up_output_is_bounded_durable_and_only_exported_with_details() {
     let root = TempRoot::new();
     let target = parse(receipt_json("output-test", 1000, "staging")).target;
@@ -746,6 +842,7 @@ fn up_output_is_bounded_durable_and_only_exported_with_details() {
             StepStatus::Failed,
             Some(7),
             StepTimes {
+                result_seen_at_ms: None,
                 started_at_ms: Some(2000),
                 finished_at_ms: Some(5000),
             },

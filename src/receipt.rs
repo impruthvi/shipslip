@@ -11,8 +11,8 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    DeployOutcome, DeployTarget, MaintenancePhase, Preview, RunPlan, SmokeResult, StepStatus,
-    StepTimes, WatchResult,
+    ConnectionTarget, DeployEvent, DeployOutcome, DeployTarget, MaintenancePhase, Preview, RunPlan,
+    SmokeResult, StepStatus, StepTimes, WatchResult,
 };
 
 mod history;
@@ -95,6 +95,14 @@ impl From<StepStatus> for ReceiptStepStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionGap {
+    pub lost_at_ms: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reattached_at_ms: Option<u128>,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReceiptStep {
     pub index: usize,
     pub command: String,
@@ -106,6 +114,10 @@ pub struct ReceiptStep {
     pub started_at_ms: Option<u128>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finished_at_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_seen_at_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connection_gaps: Vec<ConnectionGap>,
 }
 
 impl ReceiptStep {
@@ -113,6 +125,7 @@ impl ReceiptStep {
         StepTimes {
             started_at_ms: self.started_at_ms,
             finished_at_ms: self.finished_at_ms,
+            result_seen_at_ms: self.result_seen_at_ms,
         }
     }
 }
@@ -173,6 +186,14 @@ pub struct Receipt {
     pub maintenance_up_started_at_ms: Option<u128>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance_up_finished_at_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_down_result_seen_at_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance_up_result_seen_at_ms: Option<u128>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maintenance_down_connection_gaps: Vec<ConnectionGap>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub maintenance_up_connection_gaps: Vec<ConnectionGap>,
     pub app_left_down: bool,
     pub mutation_started: bool,
     pub outcome: Option<DeployOutcome>,
@@ -224,6 +245,7 @@ impl Receipt {
         StepTimes {
             started_at_ms: self.maintenance_down_started_at_ms,
             finished_at_ms: self.maintenance_down_finished_at_ms,
+            result_seen_at_ms: self.maintenance_down_result_seen_at_ms,
         }
     }
 
@@ -231,6 +253,7 @@ impl Receipt {
         StepTimes {
             started_at_ms: self.maintenance_up_started_at_ms,
             finished_at_ms: self.maintenance_up_finished_at_ms,
+            result_seen_at_ms: self.maintenance_up_result_seen_at_ms,
         }
     }
 
@@ -241,6 +264,8 @@ impl Receipt {
         let steps = crate::engine::plan_steps(&target, run_plan, preview.target_sha())
             .into_iter()
             .map(|(index, command)| ReceiptStep {
+                result_seen_at_ms: None,
+                connection_gaps: Vec::new(),
                 index,
                 command,
                 status: if index > 0 && index < first {
@@ -284,6 +309,10 @@ impl Receipt {
             maintenance_down_finished_at_ms: None,
             maintenance_up_started_at_ms: None,
             maintenance_up_finished_at_ms: None,
+            maintenance_down_result_seen_at_ms: None,
+            maintenance_up_result_seen_at_ms: None,
+            maintenance_down_connection_gaps: Vec::new(),
+            maintenance_up_connection_gaps: Vec::new(),
             app_left_down: false,
             mutation_started: false,
             outcome: None,
@@ -329,6 +358,8 @@ impl Receipt {
             more_commits: 0,
             recipe_hash: script_hash.into(),
             steps: vec![ReceiptStep {
+                result_seen_at_ms: None,
+                connection_gaps: Vec::new(),
                 index: 0,
                 command: "php artisan up".into(),
                 status: ReceiptStepStatus::NotStarted,
@@ -347,6 +378,10 @@ impl Receipt {
             maintenance_down_finished_at_ms: None,
             maintenance_up_started_at_ms: None,
             maintenance_up_finished_at_ms: None,
+            maintenance_down_result_seen_at_ms: None,
+            maintenance_up_result_seen_at_ms: None,
+            maintenance_down_connection_gaps: Vec::new(),
+            maintenance_up_connection_gaps: Vec::new(),
             // Up runs because the app may be down.
             app_left_down: true,
             mutation_started: false,
@@ -521,6 +556,7 @@ impl ReceiptJournal {
                 step.exit_code = exit_code;
                 step.started_at_ms = times.started_at_ms;
                 step.finished_at_ms = times.finished_at_ms;
+                step.result_seen_at_ms = times.result_seen_at_ms;
             }
         })
     }
@@ -571,6 +607,7 @@ impl ReceiptJournal {
                     receipt.maintenance_down_exit_code = exit_code;
                     receipt.maintenance_down_started_at_ms = times.started_at_ms;
                     receipt.maintenance_down_finished_at_ms = times.finished_at_ms;
+                    receipt.maintenance_down_result_seen_at_ms = times.result_seen_at_ms;
                     receipt.maintenance_down_done = status == StepStatus::Ok;
                     receipt.app_left_down = crate::event::down_may_have_started(&status);
                 }
@@ -581,14 +618,112 @@ impl ReceiptJournal {
                             step.exit_code = exit_code;
                             step.started_at_ms = times.started_at_ms;
                             step.finished_at_ms = times.finished_at_ms;
+                            step.result_seen_at_ms = times.result_seen_at_ms;
                         }
                     }
                     receipt.maintenance_up_status = Some(status.clone());
                     receipt.maintenance_up_exit_code = exit_code;
                     receipt.maintenance_up_started_at_ms = times.started_at_ms;
                     receipt.maintenance_up_finished_at_ms = times.finished_at_ms;
+                    receipt.maintenance_up_result_seen_at_ms = times.result_seen_at_ms;
                     receipt.maintenance_up_done = status == StepStatus::Ok;
                     receipt.app_left_down = status != StepStatus::Ok;
+                }
+            }
+        })
+    }
+
+    pub(crate) fn interrupted(&self, reason: &str) -> Result<String, ReceiptError> {
+        let mut message = reason.to_string();
+        self.update(|receipt| {
+            let gaps = match receipt.phase {
+                ReceiptPhase::Step(index) => receipt
+                    .steps
+                    .iter_mut()
+                    .find(|step| step.index == index)
+                    .map(|step| &mut step.connection_gaps),
+                ReceiptPhase::MaintenanceDown => {
+                    Some(&mut receipt.maintenance_down_connection_gaps)
+                }
+                ReceiptPhase::MaintenanceUp => Some(&mut receipt.maintenance_up_connection_gaps),
+                _ if receipt.kind == ReceiptKind::Up => {
+                    Some(&mut receipt.maintenance_up_connection_gaps)
+                }
+                _ => None,
+            };
+            if let Some(gap) = gaps
+                .and_then(|gaps| gaps.last_mut())
+                .filter(|gap| gap.reattached_at_ms.is_none())
+            {
+                if gap.detail != reason {
+                    gap.detail.push_str(&format!("\n{reason}"));
+                }
+                message = "The connection was lost. Shipslip could not re-attach. \
+                           The step's result is not known."
+                    .into();
+            }
+            if receipt.kind == ReceiptKind::Up {
+                if let Some(step) = receipt.steps.first_mut() {
+                    step.connection_gaps
+                        .clone_from(&receipt.maintenance_up_connection_gaps);
+                }
+            }
+            receipt.last_message = Some(message.clone());
+        })?;
+        Ok(message)
+    }
+
+    pub fn connection_event(&self, event: &DeployEvent) -> Result<(), ReceiptError> {
+        let (target, at_ms, detail) = match event {
+            DeployEvent::ConnectionLost {
+                target,
+                at_ms,
+                detail,
+            } => (*target, *at_ms, Some(detail)),
+            DeployEvent::Reattached { target, at_ms } => (*target, *at_ms, None),
+            _ => return Ok(()),
+        };
+        self.update(|receipt| {
+            let update = |gaps: &mut Vec<ConnectionGap>| {
+                if let Some(detail) = detail {
+                    gaps.push(ConnectionGap {
+                        lost_at_ms: at_ms,
+                        reattached_at_ms: None,
+                        detail: detail.clone(),
+                    });
+                } else if let Some(gap) =
+                    gaps.last_mut().filter(|gap| gap.reattached_at_ms.is_none())
+                {
+                    gap.reattached_at_ms = Some(at_ms);
+                }
+            };
+            match target {
+                ConnectionTarget::Step { index } => {
+                    if let Some(step) = receipt.steps.iter_mut().find(|step| step.index == index) {
+                        update(&mut step.connection_gaps);
+                    }
+                }
+                ConnectionTarget::Maintenance {
+                    phase: MaintenancePhase::Down,
+                } => update(&mut receipt.maintenance_down_connection_gaps),
+                ConnectionTarget::Maintenance {
+                    phase: MaintenancePhase::Up,
+                } => {
+                    update(&mut receipt.maintenance_up_connection_gaps);
+                    if receipt.kind == ReceiptKind::Up {
+                        if let Some(step) = receipt.steps.first_mut() {
+                            update(&mut step.connection_gaps);
+                        }
+                    }
+                }
+                ConnectionTarget::LogWatch => {}
+            }
+            if detail.is_some() {
+                let warning = format!(
+                    "The connection was lost while watching {target}. The step was not run again."
+                );
+                if !receipt.warnings.contains(&warning) {
+                    receipt.warnings.push(warning);
                 }
             }
         })
@@ -905,6 +1040,16 @@ pub fn duration_suffix(times: StepTimes) -> String {
 /// The duration for a step with both times, or `, started 14:02:11Z, end not
 /// known` for one whose end this Mac did not see.
 pub fn timing_suffix(times: StepTimes, time_of_day: impl Fn(u128) -> String) -> String {
+    if let Some(seen) = times.result_seen_at_ms {
+        return format!(
+            "{}, result seen {}",
+            match times.started_at_ms {
+                Some(started) => format!(", started {}, end not known", time_of_day(started)),
+                None => ", end not known".into(),
+            },
+            time_of_day(seen)
+        );
+    }
     match (times.started_at_ms, times.finished_at_ms) {
         (Some(started), None) => format!(", started {}, end not known", time_of_day(started)),
         _ => duration_suffix(times),

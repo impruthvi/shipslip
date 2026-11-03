@@ -571,6 +571,17 @@ fn step_line(out: &mut String, step: &StepRow) {
             .unwrap_or_default(),
         timing_suffix(step.times(), time_of_day)
     );
+    for gap in &step.connection_gaps {
+        let _ = writeln!(
+            out,
+            "        Connection lost {}; {}",
+            time_of_day(gap.lost_at_ms),
+            gap.reattached_at_ms
+                .map(|at| format!("re-attached {}", time_of_day(at)))
+                .unwrap_or_else(|| "not re-attached".into())
+        );
+        let _ = writeln!(out, "        Detail: {}", gap.detail.field());
+    }
 }
 
 /// A next step on one line, its commands in backticks, every part escaped.
