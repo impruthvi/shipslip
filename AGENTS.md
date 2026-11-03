@@ -81,4 +81,4 @@ app/src/              React UI; styles.css holds every colour and size token
 
 - Issues and specs: GitHub Issues for `impruthvi/shipslip`. See `docs/agents/issue-tracker.md`.
 - Triage labels: see `docs/agents/triage-labels.md`.
-- Domain vocabulary: root `CONTEXT.md` and `docs/adr/` when they exist. See `docs/agents/domain.md`.
+- Domain vocabulary: root `GLOSSARY.md` and `docs/adr/` when they exist. See `docs/agents/domain.md`.
