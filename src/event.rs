@@ -217,6 +217,8 @@ pub enum DeployEvent {
     },
     WatchFinished(WatchResult),
     SmokeFinished(SmokeResult),
+    /// The step outcome is known; post-deploy checks and receipt finalization may remain.
+    OutcomeKnown(DeployOutcome),
     Finished(DeployOutcome),
 }
 

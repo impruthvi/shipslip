@@ -327,13 +327,13 @@ test("back and escape on preview release the lock; a failed release explains it"
   expect(screen.getByText("slip break-lock production")).toBeInTheDocument();
 });
 
-async function startRun() {
+async function startRun(info: RunInfo = fixtures.runInfo) {
   const opened = await openWorkspace();
   await act(async () => opened.pending.resolve(production));
   fireEvent.change(screen.getByLabelText("Type production to deploy"), {
     target: { value: "production" },
   });
-  confirm.mockResolvedValue(fixtures.runInfo);
+  confirm.mockResolvedValue(info);
   fireEvent.click(screen.getByRole("button", { name: "Deploy to production" }));
   await settle();
   return opened;
@@ -372,7 +372,8 @@ test("running lists every step with its mark and follows the running step's outp
 
   fireEvent.click(screen.getByRole("button", { name: "Stop after this step" }));
   expect(stop).toHaveBeenCalledWith("run-1", "afterStep");
-  expect(screen.getByText("Stopping after this step…")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Stopping after this step…" })).toBeDisabled();
+  expect(screen.queryByRole("button", { name: "Stop after this step" })).not.toBeInTheDocument();
 });
 
 test("a step shows the duration its finished event carries, and no timer while it runs", async () => {
@@ -447,6 +448,70 @@ test("the log watch counts down, lists new errors and can be stopped", async () 
   fireEvent.click(screen.getByRole("button", { name: "Stop watching" }));
   expect(stop).toHaveBeenCalledWith("run-1", "watch");
   expect(screen.getByText("Stopping the log watch…")).toBeInTheDocument();
+});
+
+test("a failed step leads with its outcome and opens output even after it was closed", async () => {
+  await startRun();
+  await act(async () => send(fixtures.runBatches.running));
+  const step = () => within(screen.getByRole("region", { name: "Steps" }))
+    .getByRole("button", { name: /composer install/ });
+  fireEvent.click(step());
+  expect(step()).toHaveAttribute("aria-expanded", "false");
+  await act(async () => send(fixtures.runBatches.failedHeadline));
+  expect(screen.getByRole("heading", { name: "Failed at step 1 · exit 1 · composer install --no-dev" }))
+    .toHaveClass("tone-bad");
+  expect(step()).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByRole("region", { name: "Output of step 1" })).toBeInTheDocument();
+  fireEvent.click(step());
+  expect(step()).toHaveAttribute("aria-expanded", "false");
+});
+
+test.each([
+  ["failedWatching", "Failed at step 1 · exit 9 · composer install --no-dev", "tone-bad"],
+  ["stoppedWatching", "Stopped after step 1 · Steps 2, 3 did not run", "tone-attention"],
+  ["succeededWatching", "Succeeded", null],
+] as const)("%s keeps the outcome above the secondary log watch", async (fixture, text, tone) => {
+  vi.useFakeTimers();
+  try {
+    await startRun({ ...fixtures.runInfo, maintenance: false });
+    await act(async () => send(fixtures.runBatches[fixture]!));
+    const headline = screen.getByRole("heading", { name: text });
+    if (tone) expect(headline).toHaveClass(tone);
+    else {
+      for (const statusTone of ["tone-bad", "tone-attention", "tone-good"]) {
+        expect(headline).not.toHaveClass(statusTone);
+      }
+    }
+    const watch = screen.getByText("Watching the log · 2:00 left");
+    expect(headline.compareDocumentPosition(watch) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(watch.parentElement).toBe(headline.parentElement);
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(screen.getByText("Watching the log · 1:59 left")).toBeInTheDocument();
+    expect(headline).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Stop watching" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "Stop after this step" })).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a failed headline keeps command text literal and does not invent an exit code", async () => {
+  await startRun();
+  const batch = fixtures.runBatches.failedHeadline!;
+  await act(async () => send({
+    ...batch,
+    state: { ...batch.state, headline: { kind: "failed", step: 1, exitCode: null, command: "<b>migrate</b>" } },
+  }));
+  const headline = screen.getByRole("heading", { name: "Failed at step 1 · exit code not known · <b>migrate</b>" });
+  expect(headline.querySelector("b")).toBeNull();
+});
+
+test("a stopped headline names steps that did not run before any watch starts", async () => {
+  await startRun();
+  await act(async () => send(fixtures.runBatches.stoppedHeadline));
+  expect(screen.getByRole("heading", { name: "Stopped after step 1 · Steps 2, 3 did not run" }))
+    .toHaveClass("tone-attention");
+  expect(screen.queryByText(/Watching the log/)).not.toBeInTheDocument();
 });
 
 test("a failed stop says why and can be tried again", async () => {

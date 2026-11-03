@@ -1964,6 +1964,7 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         exit_code: Some(1),
         times: StepTimes::default(),
     });
+    views.insert("failedHeadline", batch(&feed));
     feed.record(DeployEvent::AppLeftDown);
     feed.record(DeployEvent::Finished(DeployOutcome::FailedAtStep {
         step: 1,
@@ -1972,6 +1973,65 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
     feed.close();
     views.insert("failed", batch(&feed));
 
+    let no_maintenance = RunInfo {
+        maintenance: false,
+        ..info.clone()
+    };
+    let failed_watch = RunFeed::new(no_maintenance.clone());
+    for event in [
+        DeployEvent::StepStarted {
+            index: 1,
+            name: info.steps[0].clone(),
+        },
+        DeployEvent::Output {
+            index: 1,
+            line: "composer install: dependency resolution failed".into(),
+        },
+        DeployEvent::StepFinished {
+            index: 1,
+            status: StepStatus::Failed,
+            exit_code: Some(9),
+            times: StepTimes::default(),
+        },
+        DeployEvent::OutcomeKnown(DeployOutcome::FailedAtStep {
+            step: 1,
+            partial_update: false,
+        }),
+        DeployEvent::WatchStarted {
+            window: std::time::Duration::from_secs(120),
+        },
+    ] {
+        failed_watch.record(event);
+    }
+    views.insert("failedWatching", batch(&failed_watch));
+
+    let stopped = RunFeed::new(no_maintenance);
+    for event in [
+        DeployEvent::StepStarted {
+            index: 1,
+            name: info.steps[0].clone(),
+        },
+        DeployEvent::StepFinished {
+            index: 1,
+            status: StepStatus::Ok,
+            exit_code: Some(0),
+            times: StepTimes::default(),
+        },
+        DeployEvent::OutcomeKnown(DeployOutcome::StoppedAfterStep {
+            step: 1,
+            reason: shipslip::StopReason::Requested,
+        }),
+    ] {
+        stopped.record(event);
+    }
+    views.insert("stoppedHeadline", batch(&stopped));
+    stopped.record(DeployEvent::WatchStarted {
+        window: std::time::Duration::from_secs(120),
+    });
+    views.insert("stoppedWatching", batch(&stopped));
+
+    watching.record(DeployEvent::OutcomeKnown(DeployOutcome::Succeeded));
+    views.insert("succeededWatching", batch(&watching));
     watching.record(DeployEvent::WatchFinished(shipslip::WatchResult::not_run()));
     watching.record(DeployEvent::Finished(DeployOutcome::Succeeded));
     watching.close();

@@ -1236,6 +1236,7 @@ async fn run_steps<T: Transport>(
             );
             return;
         }
+        let _ = events.send(DeployEvent::OutcomeKnown(outcome.clone()));
     }
     let skip_reason = app_down.then_some(CheckSkipReason::AppLeftInMaintenance);
     let saved_checks = saved_checks.filter(|_| !app_down);
@@ -3191,6 +3192,7 @@ mod tests {
                     exit_code: Some(0),
                     times: StepTimes::default(),
                 },
+                DeployEvent::OutcomeKnown(DeployOutcome::Succeeded),
                 DeployEvent::Finished(DeployOutcome::Succeeded),
             ]
         );
@@ -4479,12 +4481,15 @@ mod tests {
             rx.recv().await,
             Some(DeployEvent::StepFinished { index: 1, .. })
         ) {}
-        for _ in 0..20 {
-            if journal.snapshot().outcome.is_some() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        let outcome = DeployOutcome::StoppedAfterStep {
+            step: 1,
+            reason: StopReason::Requested,
+        };
+        assert_eq!(rx.recv().await, Some(DeployEvent::OutcomeKnown(outcome)));
+        assert!(matches!(
+            rx.recv().await,
+            Some(DeployEvent::WatchStarted { .. })
+        ));
 
         assert_eq!(
             journal.snapshot().outcome,
@@ -4558,7 +4563,10 @@ mod tests {
         let events = collect(rx).await;
         assert_eq!(
             events,
-            vec![DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges)]
+            vec![
+                DeployEvent::OutcomeKnown(DeployOutcome::CancelledBeforeChanges),
+                DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges),
+            ]
         );
         assert_eq!(fake.launched("git merge --ff-only"), 0);
     }
@@ -4574,7 +4582,10 @@ mod tests {
         let events = collect(rx).await;
         assert_eq!(
             events,
-            vec![DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges)]
+            vec![
+                DeployEvent::OutcomeKnown(DeployOutcome::CancelledBeforeChanges),
+                DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges),
+            ]
         );
         assert_eq!(fake.launched("git merge --ff-only"), 0);
     }
@@ -4799,6 +4810,20 @@ mod tests {
         server.abort();
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         assert_eq!(watch_started(&events), 1);
+        let known = events
+            .iter()
+            .position(|event| {
+                matches!(
+                    event,
+                    DeployEvent::OutcomeKnown(DeployOutcome::FailedAtStep { step: 1, .. })
+                )
+            })
+            .unwrap();
+        let watching = events
+            .iter()
+            .position(|event| matches!(event, DeployEvent::WatchStarted { .. }))
+            .unwrap();
+        assert!(known < watching);
         assert!(matches!(
             events.last(),
             Some(DeployEvent::Finished(DeployOutcome::FailedAtStep {
@@ -5133,7 +5158,10 @@ mod tests {
         let events = collect(rx).await;
         assert_eq!(
             events,
-            vec![DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges)]
+            vec![
+                DeployEvent::OutcomeKnown(DeployOutcome::CancelledBeforeChanges),
+                DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges),
+            ]
         );
         assert_eq!(fake.launched("git merge --ff-only"), 0);
         assert_eq!(
@@ -5160,7 +5188,10 @@ mod tests {
 
         assert_eq!(
             collect(rx).await,
-            vec![DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges)]
+            vec![
+                DeployEvent::OutcomeKnown(DeployOutcome::CancelledBeforeChanges),
+                DeployEvent::Finished(DeployOutcome::CancelledBeforeChanges),
+            ]
         );
         assert_eq!(fake.launched("php artisan down"), 0);
     }
@@ -5219,6 +5250,9 @@ mod tests {
                     exit_code: None,
                     times: StepTimes::default(),
                 },
+                DeployEvent::OutcomeKnown(DeployOutcome::AbortedBeforeChanges(
+                    AbortReason::ConnectFailed("could not connect: refused".into())
+                )),
                 DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
                     AbortReason::ConnectFailed("could not connect: refused".into())
                 )),
@@ -5313,9 +5347,12 @@ mod tests {
         let events = deploy(&fake, &[]).await;
         assert_eq!(
             events,
-            [DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(
-                AbortReason::LockLost
-            ))]
+            [
+                DeployEvent::OutcomeKnown(DeployOutcome::AbortedBeforeChanges(
+                    AbortReason::LockLost
+                )),
+                DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(AbortReason::LockLost)),
+            ]
         );
         assert_eq!(fake.launched("git merge --ff-only"), 0);
     }
@@ -5539,10 +5576,12 @@ mod tests {
             let (rx, _h) = execute(p, c, fake.clone()).unwrap();
             let events = collect(rx).await;
 
-            let [DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(reason))] = &events[..]
+            let [DeployEvent::OutcomeKnown(known), DeployEvent::Finished(DeployOutcome::AbortedBeforeChanges(reason))] =
+                &events[..]
             else {
                 panic!("{events:?}");
             };
+            assert_eq!(known, &DeployOutcome::AbortedBeforeChanges(reason.clone()));
             assert!(expected(reason), "{reason:?}");
             assert_eq!(fake.launched("git merge --ff-only"), 0);
             assert_eq!(fake.lock_owner(), None);
@@ -5551,7 +5590,11 @@ mod tests {
 
     fn step_0_failure(events: &[DeployEvent]) -> (&DeployEvent, &DeployEvent) {
         let n = events.len();
-        (&events[n - 2], &events[n - 1])
+        assert!(matches!(
+            events[n - 2],
+            DeployEvent::OutcomeKnown(DeployOutcome::FailedAtStep { step: 0, .. })
+        ));
+        (&events[n - 3], &events[n - 1])
     }
 
     #[tokio::test]

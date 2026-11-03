@@ -1,7 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::Arc;
-use tauri::menu::{Menu, MenuItem, MenuItemKind};
+use tauri::menu::Menu;
+#[cfg(target_os = "macos")]
+use tauri::menu::{MenuItem, MenuItemKind};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
 mod awake;
@@ -128,6 +130,7 @@ fn live(app: &AppHandle) -> bool {
 
 /// A run is live or a preview holds a server lock: quitting goes through
 /// `request_quit` first.
+#[cfg(target_os = "macos")]
 fn quit_needs_app(app: &AppHandle) -> bool {
     live(app) || app.state::<Arc<commands::App>>().previews_open()
 }

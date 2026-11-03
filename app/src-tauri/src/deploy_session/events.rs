@@ -81,10 +81,67 @@ pub enum Terminal {
     },
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum RunHeadline {
+    Failed {
+        step: usize,
+        exit_code: Option<i32>,
+        command: String,
+    },
+    Stopped {
+        step: Option<usize>,
+        not_run: Vec<usize>,
+    },
+    Succeeded,
+}
+
+impl RunHeadline {
+    fn failed(info: &RunInfo, state: &RunState, step: usize) -> Self {
+        let progress = state.steps.get(&step);
+        let command = if step == 0 {
+            info.target_sha
+                .as_ref()
+                .map(|sha| format!("git merge --ff-only {sha}"))
+        } else {
+            progress
+                .and_then(|progress| progress.name.clone())
+                .or_else(|| info.steps.get(step - 1).cloned())
+        }
+        .unwrap_or_else(|| "command not recorded".into());
+        Self::Failed {
+            step,
+            exit_code: progress.and_then(|progress| progress.exit_code),
+            command,
+        }
+    }
+
+    fn from_outcome(info: &RunInfo, state: &RunState, outcome: &DeployOutcome) -> Option<Self> {
+        match outcome {
+            DeployOutcome::FailedAtStep { step, .. } => Some(Self::failed(info, state, *step)),
+            DeployOutcome::StoppedAfterStep { step, .. } => Some(Self::Stopped {
+                step: Some(*step),
+                not_run: (step + 1..=info.steps.len()).collect(),
+            }),
+            DeployOutcome::StoppedInMaintenance(_) => Some(Self::Stopped {
+                step: None,
+                not_run: (1..=info.steps.len()).collect(),
+            }),
+            DeployOutcome::Succeeded => Some(Self::Succeeded),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunState {
     pub terminal: Option<Terminal>,
+    pub headline: Option<RunHeadline>,
     pub steps: BTreeMap<usize, Progress>,
     pub maintenance_up: Option<Progress>,
     pub maintenance_down: Option<Progress>,
@@ -287,6 +344,10 @@ impl RunFeed {
                 progress.status = status.into();
                 progress.exit_code = exit_code;
                 progress.timing = step_timing(times);
+                if progress.status == ReceiptStepStatus::Failed {
+                    history.state.headline =
+                        Some(RunHeadline::failed(&self.info, &history.state, index));
+                }
                 None
             }
             DeployEvent::MaintenanceStarted { phase } => {
@@ -381,7 +442,14 @@ impl RunFeed {
                 history.state.smoke = Some(result.into());
                 None
             }
+            DeployEvent::OutcomeKnown(outcome) => {
+                history.state.headline =
+                    RunHeadline::from_outcome(&self.info, &history.state, &outcome);
+                None
+            }
             DeployEvent::Finished(outcome) => {
+                history.state.headline =
+                    RunHeadline::from_outcome(&self.info, &history.state, &outcome);
                 history.stage = "finished".into();
                 history.state.terminal = Some(Terminal::Finished {
                     label: escape_field(&outcome.label()),
