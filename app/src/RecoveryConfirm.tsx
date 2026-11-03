@@ -18,6 +18,10 @@ export function RecoveryConfirm({
   const [typed, setTyped] = useState("");
   const ready = !review.production || typed === review.env;
   const attach = review.operation === "attach";
+  const watched = review.watched;
+  // A recipe step by number; `php artisan down` or `up` by its command.
+  const watchedName = (step: string) =>
+    watched?.index == null ? <code>{watched?.command}</code> : `${step} ${watched.index}`;
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -29,31 +33,45 @@ export function RecoveryConfirm({
       <div className="workspace-body">
         <div className="workspace-section">
           {attach ? (
-            <>
-              <p className="mono">
-                Run {review.runId} · target {review.targetSha?.slice(0, 7)}
-              </p>
-              <p className="muted">Last phase: {review.phase}</p>
-            </>
+            <p className="mono">
+              Run {review.runId} · target {review.targetSha?.slice(0, 7)}
+            </p>
           ) : (
             <p>{review.phase}</p>
           )}
         </div>
+        {watched && (
+          <section className="workspace-section" aria-labelledby="recovery-watched">
+            <h2 id="recovery-watched" className="caps">
+              Watched
+            </h2>
+            <p>{watchedName("Step")} was running. Shipslip will watch it until it finishes and will not run it again.</p>
+            <ol className="recipe mono">
+              <li>
+                <span className="recipe-index muted">watch</span>
+                <code>{watched.command}</code>
+              </li>
+            </ol>
+          </section>
+        )}
         <section className="workspace-section" aria-labelledby="recovery-steps">
           <h2 id="recovery-steps" className="caps">
-            Steps
+            {attach ? "Steps to run" : "Steps"}
           </h2>
           {review.remainingSteps.length === 0 ? (
             <p className="muted">No steps left to run</p>
           ) : (
-            <ol className="recipe mono">
-              {review.remainingSteps.map((step, i) => (
-                <li key={i}>
-                  <span className="recipe-index muted">{step.index ?? "off"}</span>
-                  <code>{step.command}</code>
-                </li>
-              ))}
-            </ol>
+            <>
+              {watched && <p className="muted">If {watchedName("step")} succeeds, these run next:</p>}
+              <ol className="recipe mono">
+                {review.remainingSteps.map((step, i) => (
+                  <li key={i}>
+                    <span className="recipe-index muted">{step.index ?? "off"}</span>
+                    <code>{step.command}</code>
+                  </li>
+                ))}
+              </ol>
+            </>
           )}
         </section>
       </div>

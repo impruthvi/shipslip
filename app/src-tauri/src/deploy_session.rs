@@ -268,28 +268,94 @@ pub struct RecoveryReview {
     pub path: String,
     pub run_id: Option<String>,
     pub target_sha: Option<String>,
-    pub phase: String,
-    pub remaining_steps: Vec<RemainingStep>,
+    /// What an Up does, in words; `None` for attach.
+    pub phase: Option<String>,
+    /// Attach only: the command the journal says was running. It is watched
+    /// until it ends and never sent again.
+    pub watched: Option<RecoveryStep>,
+    /// What runs next, in order. After a watched step, only if it succeeds.
+    pub remaining_steps: Vec<RecoveryStep>,
 }
 
-/// A step a recovery would run: its recipe number, or `None` for
-/// `php artisan up` on its own.
+impl RecoveryReview {
+    fn attach(handle: String, env: &str, saved: &receipt::Receipt) -> Self {
+        let (watched, remaining_steps) = attach_plan(saved);
+        Self {
+            handle,
+            env: escape_field(env),
+            production: saved.target.production,
+            operation: "attach",
+            ssh_alias: escape_field(&saved.target.ssh_alias),
+            path: escape_field(&saved.target.path),
+            run_id: Some(escape_field(&saved.run_id)),
+            target_sha: Some(escape_field(&saved.target_sha)),
+            phase: None,
+            watched,
+            remaining_steps,
+        }
+    }
+}
+
+/// A command a recovery names: its receipt step number (0 is the
+/// fast-forward), or `None` for `php artisan down` / `php artisan up`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct RemainingStep {
+pub struct RecoveryStep {
     pub index: Option<usize>,
     pub command: String,
 }
 
-/// Where an unfinished run was, in words.
-fn phase_words(phase: &receipt::ReceiptPhase) -> String {
-    match phase {
-        receipt::ReceiptPhase::Preview => "Preview".into(),
-        receipt::ReceiptPhase::MaintenanceDown => "Turning maintenance on".into(),
-        receipt::ReceiptPhase::Step(step) => format!("Step {step}"),
-        receipt::ReceiptPhase::BetweenSteps => "Between steps".into(),
-        receipt::ReceiptPhase::MaintenanceUp => "Turning maintenance off".into(),
-        receipt::ReceiptPhase::Finished => "Finished".into(),
+/// What attaching to an unfinished run does, as the engine re-attaches: the
+/// command that was running is watched, then the steps not yet sent run,
+/// unless the journal already recorded how the run ends.
+fn attach_plan(saved: &receipt::Receipt) -> (Option<RecoveryStep>, Vec<RecoveryStep>) {
+    use receipt::ReceiptPhase;
+    use shipslip::StepStatus;
+    let named = |index, command: &str| RecoveryStep {
+        index,
+        command: escape_field(command),
+    };
+    // An Up run's one command is always observed, even if it was never sent.
+    if saved.kind == receipt::ReceiptKind::Up {
+        return (Some(named(None, "php artisan up")), Vec::new());
     }
+    let ended = saved.outcome.is_some()
+        || !saved.mutation_started
+        || saved
+            .maintenance_down_status
+            .as_ref()
+            .is_some_and(|status| *status != StepStatus::Ok)
+        || saved.maintenance_up_status.is_some()
+        || saved.steps.iter().any(|step| {
+            matches!(
+                step.status,
+                ReceiptStepStatus::Failed
+                    | ReceiptStepStatus::Unknown
+                    | ReceiptStepStatus::NotStarted
+            )
+        });
+    if ended {
+        return (None, Vec::new());
+    }
+    let watched = match saved.phase {
+        ReceiptPhase::MaintenanceDown => Some(named(None, "php artisan down")),
+        ReceiptPhase::MaintenanceUp => Some(named(None, "php artisan up")),
+        ReceiptPhase::Step(index) => saved
+            .steps
+            .iter()
+            .find(|step| step.index == index)
+            .map(|step| named(Some(index), &step.command)),
+        _ => None,
+    };
+    let mut remaining: Vec<_> = saved
+        .steps
+        .iter()
+        .filter(|step| step.status == ReceiptStepStatus::Pending)
+        .map(|step| named(Some(step.index), &step.command))
+        .collect();
+    if saved.target.maintenance && saved.phase != ReceiptPhase::MaintenanceUp {
+        remaining.push(named(None, "php artisan up"));
+    }
+    (watched, remaining)
 }
 
 /// What "Review deploy…" offers for one checkout and env.
@@ -1105,8 +1171,9 @@ impl<C: Connector> Sessions<C> {
             path: escape_field(&target.path),
             run_id: None,
             target_sha: None,
-            phase: "Bring this app out of maintenance mode".into(),
-            remaining_steps: vec![RemainingStep {
+            phase: Some("Bring this app out of maintenance mode".into()),
+            watched: None,
+            remaining_steps: vec![RecoveryStep {
                 index: None,
                 command: "php artisan up".into(),
             }],
@@ -1173,31 +1240,7 @@ impl<C: Connector> Sessions<C> {
             return Err(busy());
         }
         let id = self.next_handle(&mut state);
-        let review = RecoveryReview {
-            handle: id.clone(),
-            env: escape_field(&key.env),
-            production: receipt.target.production,
-            operation: "attach",
-            ssh_alias: escape_field(&receipt.target.ssh_alias),
-            path: escape_field(&receipt.target.path),
-            run_id: Some(escape_field(&receipt.run_id)),
-            target_sha: Some(escape_field(&receipt.target_sha)),
-            phase: phase_words(&receipt.phase),
-            remaining_steps: receipt
-                .steps
-                .iter()
-                .filter(|step| {
-                    !matches!(
-                        step.status,
-                        ReceiptStepStatus::Ok | ReceiptStepStatus::Skipped
-                    )
-                })
-                .map(|step| RemainingStep {
-                    index: Some(step.index),
-                    command: escape_field(&step.command),
-                })
-                .collect(),
-        };
+        let review = RecoveryReview::attach(id.clone(), &key.env, &receipt);
         state.slots.insert(
             key,
             Slot {
@@ -1277,9 +1320,11 @@ impl<C: Connector> Sessions<C> {
                 }
                 state.slots.get_mut(&key).ok_or_else(invalid_handle)?.phase =
                     Phase::Starting(info.clone());
-                state
-                    .feeds
-                    .insert(handle.into(), RunFeed::new(info.clone()));
+                let feed = match &saved {
+                    Some(saved) => RunFeed::attached(info.clone(), saved),
+                    None => RunFeed::new(info.clone()),
+                };
+                state.feeds.insert(handle.into(), feed);
                 self.settle(&mut state);
             }
             let remote = self
@@ -2189,6 +2234,58 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         );
     }
     views.insert("unfinishedRecoveries", causes.into());
+
+    // Detached during step 2: maintenance on, steps 0 and 1 done.
+    let mut open = crate::fixture::run(1, "production");
+    open["target"] = serde_json::json!({
+        "env": "production", "production": true, "ssh_alias": info.ssh_alias,
+        "path": info.path, "branch": "main", "steps": info.steps, "maintenance": true
+    });
+    open["run_id"] = info.run_id.clone().into();
+    open["target_sha"] = "b".repeat(40).into();
+    open["status"] = "InProgress".into();
+    open["phase"] = serde_json::json!({"Step": 2});
+    open["outcome"] = serde_json::Value::Null;
+    open["finished_at_ms"] = serde_json::Value::Null;
+    open["app_left_down"] = true.into();
+    open["unfinished_cause"] = "detached".into();
+    open["maintenance_down_done"] = true.into();
+    open["maintenance_down_status"] = "Ok".into();
+    open["maintenance_down_exit_code"] = 0.into();
+    open["maintenance_down_started_at_ms"] = 1_000.into();
+    open["maintenance_down_finished_at_ms"] = 1_800.into();
+    let sent = |index: u64, ms| {
+        serde_json::json!({"index": index, "command": "", "status": "Ok", "exit_code": 0,
+            "output": [], "started_at_ms": 2_000 + 100_000 * index, "finished_at_ms": 2_000 + 100_000 * index + ms})
+    };
+    open["steps"] = serde_json::json!([
+        sent(0, 1_200),
+        sent(1, 164_000),
+        {"index": 2, "command": "", "status": "Running", "exit_code": null, "output": [], "started_at_ms": 400_000},
+        {"index": 3, "command": "", "status": "Pending", "exit_code": null, "output": []}
+    ]);
+    open["steps"][0]["command"] = format!("git merge --ff-only {}", "b".repeat(40)).into();
+    for (n, command) in info.steps.iter().enumerate() {
+        open["steps"][n + 1]["command"] = command.clone().into();
+    }
+    let open: receipt::Receipt = serde_json::from_value(open).unwrap();
+    views.insert(
+        "attachReview",
+        to_value(RecoveryReview::attach(
+            "attach-1".into(),
+            "production",
+            &open,
+        ))
+        .unwrap(),
+    );
+    let attached_info = RunInfo::sample("attach-1", "attach");
+    let attached = RunFeed::attached(attached_info.clone(), &open);
+    attached.record(DeployEvent::StepStarted {
+        index: 2,
+        name: info.steps[1].clone(),
+    });
+    views.insert("attachedRunInfo", to_value(&attached_info).unwrap());
+    views.insert("attached", batch(&attached));
     views.insert(
         "liveRuns",
         to_value(LiveRuns {

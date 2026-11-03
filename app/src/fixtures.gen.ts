@@ -12,6 +12,7 @@ import type {
   PrepareProgress,
   QuitRun,
   ReceiptResult,
+  RecoveryReview,
   RecoveryView,
   RunBatch,
   RunInfo,
@@ -2701,7 +2702,123 @@ export const gapRunInfo: RunInfo = {
   "watchMs": 120000
 };
 
+export const attachedRunInfo: RunInfo = {
+  "checkout": "/Users/you/code/shop",
+  "connectionGap": null,
+  "env": "production",
+  "handle": "attach-1",
+  "maintenance": true,
+  "operation": "attach",
+  "path": "/var/www/shop",
+  "production": true,
+  "project": "shop",
+  "runId": "1791795000000-0000beef",
+  "runPlan": "Deploy",
+  "sshAlias": "shop-prod",
+  "stage": "starting",
+  "startedAtMs": 1791795000000,
+  "steps": [
+    "composer install --no-dev",
+    "php artisan migrate --force",
+    "php artisan optimize"
+  ],
+  "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "watchMs": 120000
+};
+
+export const attachReview: RecoveryReview = {
+  "env": "production",
+  "handle": "attach-1",
+  "operation": "attach",
+  "path": "/var/www/shop",
+  "phase": null,
+  "production": true,
+  "remainingSteps": [
+    {
+      "command": "php artisan optimize",
+      "index": 3
+    },
+    {
+      "command": "php artisan up",
+      "index": null
+    }
+  ],
+  "runId": "1791795000000-0000beef",
+  "sshAlias": "shop-prod",
+  "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "watched": {
+    "command": "php artisan migrate --force",
+    "index": 2
+  }
+};
+
 export const runBatches: Record<string, RunBatch> = {
+  "attached": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "attach-1",
+    "output": [],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "connectionGap": null,
+      "droppedWarnings": 0,
+      "headline": null,
+      "maintenanceDown": {
+        "exitCode": 0,
+        "name": null,
+        "reattachedAtMs": null,
+        "status": "Ok",
+        "timing": {
+          "duration": "800 ms",
+          "durationMs": 800,
+          "kind": "took"
+        }
+      },
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {
+        "0": {
+          "exitCode": 0,
+          "name": null,
+          "reattachedAtMs": null,
+          "status": "Ok",
+          "timing": {
+            "duration": "1s",
+            "durationMs": 1200,
+            "kind": "took"
+          }
+        },
+        "1": {
+          "exitCode": 0,
+          "name": "composer install --no-dev",
+          "reattachedAtMs": null,
+          "status": "Ok",
+          "timing": {
+            "duration": "2m 44s",
+            "durationMs": 164000,
+            "kind": "took"
+          }
+        },
+        "2": {
+          "exitCode": null,
+          "name": "php artisan migrate --force",
+          "reattachedAtMs": null,
+          "status": "Running",
+          "timing": null
+        }
+      },
+      "terminal": null,
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchReattachedAtMs": null,
+      "watchWindowMs": null
+    },
+    "subscription": "sub-1",
+    "through": 1
+  },
   "failed": {
     "after": 0,
     "droppedOutput": 0,
