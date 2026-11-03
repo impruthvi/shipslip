@@ -43,14 +43,18 @@ export interface OutcomeView {
 export interface FlagView {
   text: string;
   newErrors: boolean;
-  /** New errors, a failed smoke check, or the app left in maintenance mode. */
+  /** A check or outcome that needs attention, not necessarily a failure. */
   bad: boolean;
   kind: FlagKind;
 }
 
 export type FlagKind =
   | "newErrors"
-  | "logNotFullyObserved"
+  | "logWatchInterrupted"
+  | "logUnreadable"
+  | "noLogFileYet"
+  | "logWatchStoppedEarly"
+  | "logWatchSkippedInMaintenance"
   | "logNotRecorded"
   | "smokeFailed"
   | "smokeNotRecorded"
@@ -166,6 +170,7 @@ export interface GroupView {
 
 export interface WatchView {
   status: string;
+  kind: FlagKind | null;
   duration: string;
   linesRead: number;
   logPath: string;

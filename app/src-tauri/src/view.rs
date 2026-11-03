@@ -165,7 +165,7 @@ pub struct FlagView {
     /// Shown with a "NEW" chip.
     pub new_errors: bool,
     /// Something may be wrong now: new errors, a failed smoke check, or the
-    /// app left in maintenance mode. Other flags say what was not recorded.
+    /// app left in maintenance mode, or a log watch that could not observe.
     pub bad: bool,
     pub kind: FlagKind,
 }
@@ -174,7 +174,11 @@ pub struct FlagView {
 #[serde(rename_all = "camelCase")]
 pub enum FlagKind {
     NewErrors,
-    LogNotFullyObserved,
+    LogWatchInterrupted,
+    LogUnreadable,
+    NoLogFileYet,
+    LogWatchStoppedEarly,
+    LogWatchSkippedInMaintenance,
     LogNotRecorded,
     SmokeFailed,
     SmokeNotRecorded,
@@ -398,31 +402,33 @@ pub fn flags(badge: &Badge) -> Vec<FlagView> {
             text: cell_text(flag),
             new_errors: matches!(flag, Flag::NewErrors { .. }),
             bad: flag.is_bad(),
-            kind: match flag {
-                Flag::NewErrors { .. } => FlagKind::NewErrors,
-                Flag::LogNotFullyObserved => FlagKind::LogNotFullyObserved,
-                Flag::LogNotRecorded => FlagKind::LogNotRecorded,
-                Flag::SmokeFailed { .. } => FlagKind::SmokeFailed,
-                Flag::SmokeNotRecorded => FlagKind::SmokeNotRecorded,
-                Flag::AppLeftDown => FlagKind::AppLeftDown,
-            },
+            kind: flag.into(),
         })
         .collect()
+}
+
+impl From<Flag> for FlagKind {
+    fn from(flag: Flag) -> Self {
+        match flag {
+            Flag::NewErrors { .. } => Self::NewErrors,
+            Flag::LogWatchInterrupted => Self::LogWatchInterrupted,
+            Flag::LogUnreadable => Self::LogUnreadable,
+            Flag::NoLogFileYet => Self::NoLogFileYet,
+            Flag::LogWatchStoppedEarly => Self::LogWatchStoppedEarly,
+            Flag::LogWatchSkippedInMaintenance => Self::LogWatchSkippedInMaintenance,
+            Flag::LogNotRecorded => Self::LogNotRecorded,
+            Flag::SmokeFailed { .. } => Self::SmokeFailed,
+            Flag::SmokeNotRecorded => Self::SmokeNotRecorded,
+            Flag::AppLeftDown => Self::AppLeftDown,
+        }
+    }
 }
 
 /// The flag in words for a cell, without the leading symbol.
 fn cell_text(flag: Flag) -> String {
     match flag {
-        Flag::NewErrors { groups: 1 } => "1 new error group after this run".into(),
-        Flag::NewErrors { groups } => format!("{groups} new error groups after this run"),
-        Flag::LogNotFullyObserved => "log not fully observed".into(),
-        Flag::LogNotRecorded => "log not recorded".into(),
-        Flag::SmokeFailed {
-            status: Some(status),
-        } => format!("smoke {status}"),
-        Flag::SmokeFailed { status: None } => "smoke failed".into(),
-        Flag::SmokeNotRecorded => "smoke not recorded".into(),
-        Flag::AppLeftDown => "app may be in maintenance mode".into(),
+        Flag::NewErrors { .. } => format!("{} after this run", flag.description()),
+        _ => flag.description(),
     }
 }
 
@@ -1087,7 +1093,7 @@ mod span_tests {
         let words: Vec<String> = [
             Flag::NewErrors { groups: 1 },
             Flag::NewErrors { groups: 4 },
-            Flag::LogNotFullyObserved,
+            Flag::LogWatchInterrupted,
             Flag::LogNotRecorded,
             Flag::SmokeFailed { status: Some(500) },
             Flag::SmokeFailed { status: None },
@@ -1102,7 +1108,7 @@ mod span_tests {
             [
                 "1 new error group after this run",
                 "4 new error groups after this run",
-                "log not fully observed",
+                "log watch interrupted · entries may be missing",
                 "log not recorded",
                 "smoke 500",
                 "smoke failed",

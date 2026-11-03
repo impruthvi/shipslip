@@ -4697,7 +4697,9 @@ mod tests {
         for details in [false, true] {
             let markdown = crate::receipt::markdown(&receipt, details);
             assert!(
-                markdown.contains("## Log watch\n\nSkipped: app left in maintenance mode."),
+                markdown.contains(
+                    "## Log watch\n\nStatus: log watch skipped · app left in maintenance."
+                ),
                 "{markdown}"
             );
             assert!(

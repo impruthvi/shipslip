@@ -1113,6 +1113,32 @@ fn a_renamed_project_reads_both_directories() {
 }
 
 #[test]
+fn only_interrupted_and_unreadable_log_watches_need_attention() {
+    for (status, reason, attention) in [
+        ("Partial", Value::Null, true),
+        ("Unavailable", Value::Null, true),
+        ("NoLogSeen", Value::Null, false),
+        ("Cancelled", Value::Null, false),
+        ("NotRun", json!("AppLeftInMaintenance"), false),
+        ("Complete", Value::Null, false),
+    ] {
+        let fixture = Fixture::new();
+        let mut receipt = run(1, "staging");
+        receipt["watch"] = serde_json::to_value(crate::WatchResult::not_run()).unwrap();
+        receipt["watch"]["status"] = json!(status);
+        receipt["checks_skip_reason"] = reason;
+        fixture.save(&receipt);
+        let overview = fixture.overview();
+        let staging = cell(&overview, "/work/app", "staging");
+        assert_eq!(
+            staging.needs_attention(),
+            attention,
+            "{status}: {staging:?}"
+        );
+    }
+}
+
+#[test]
 fn needs_attention_for_each_kind_of_cell() {
     let attempt = |unfinished, outcome, flags| AttemptSummary {
         run_id: "00000001-0".into(),
@@ -1142,7 +1168,7 @@ fn needs_attention_for_each_kind_of_cell() {
         env_cell("a", CodeState::NeverDeployed),
         env_cell("a", CodeState::NoCodeChangeInLast { records: 2 }),
         with_last(attempt(false, succeeded, vec![])),
-        with_last(attempt(false, succeeded, vec![Flag::LogNotFullyObserved])),
+        with_last(attempt(false, succeeded, vec![Flag::NoLogFileYet])),
         with_last(attempt(false, succeeded, vec![Flag::SmokeNotRecorded])),
     ];
     for cell in &quiet {

@@ -504,6 +504,62 @@ fn markdown_shows_the_deployer_email_only_with_details() {
 }
 
 #[test]
+fn badge_distinguishes_each_log_watch_result() {
+    for (status, reason, expected) in [
+        (WatchStatus::Partial, None, Some("log_watch_interrupted")),
+        (WatchStatus::Unavailable, None, Some("log_unreadable")),
+        (WatchStatus::NoLogSeen, None, Some("no_log_file_yet")),
+        (
+            WatchStatus::Cancelled,
+            None,
+            Some("log_watch_stopped_early"),
+        ),
+        (
+            WatchStatus::NotRun,
+            Some(crate::observation::CheckSkipReason::AppLeftInMaintenance),
+            Some("log_watch_skipped_in_maintenance"),
+        ),
+        (WatchStatus::Complete, None, None),
+        (WatchStatus::NotRun, None, None),
+    ] {
+        let mut receipt = parse(receipt_json("aaaa0001-0", 1000, "staging"));
+        receipt.watch.as_mut().unwrap().status = status;
+        receipt.checks_skip_reason = reason;
+        let flags = serde_json::to_value(receipt.badge().flags).unwrap();
+        let expected = expected.map_or_else(|| json!([]), |kind| json!([{ "kind": kind }]));
+        assert_eq!(flags, expected, "{status:?}, {reason:?}");
+    }
+}
+
+#[test]
+fn markdown_uses_distinct_log_watch_wording() {
+    for (status, reason, expected) in [
+        (
+            WatchStatus::Partial,
+            None,
+            "log watch interrupted · entries may be missing",
+        ),
+        (WatchStatus::Unavailable, None, "log could not be read"),
+        (WatchStatus::NoLogSeen, None, "no log file yet"),
+        (WatchStatus::Cancelled, None, "log watch stopped early"),
+        (
+            WatchStatus::NotRun,
+            Some(crate::observation::CheckSkipReason::AppLeftInMaintenance),
+            "log watch skipped · app left in maintenance",
+        ),
+    ] {
+        let mut receipt = parse(receipt_json("aaaa0001-0", 1000, "staging"));
+        receipt.watch.as_mut().unwrap().status = status;
+        receipt.checks_skip_reason = reason;
+        for details in [false, true] {
+            let text = markdown(&receipt, details);
+            let watch = text.split("## Log watch\n\n").nth(1).unwrap();
+            assert!(watch.starts_with(&format!("Status: {expected}")), "{text}");
+        }
+    }
+}
+
+#[test]
 fn badge_flags_every_incomplete_check() {
     let base = || parse(receipt_json("aaaa0001-0", 1000, "staging"));
     let watch = |status: WatchStatus| {
@@ -516,14 +572,6 @@ fn badge_flags_every_incomplete_check() {
         base().badge().outcome.kind,
         crate::records::OutcomeKind::Succeeded
     );
-    for status in [
-        WatchStatus::Partial,
-        WatchStatus::Unavailable,
-        WatchStatus::NoLogSeen,
-        WatchStatus::Cancelled,
-    ] {
-        assert_eq!(watch(status), [Flag::LogNotFullyObserved], "{status:?}");
-    }
     assert_eq!(watch(WatchStatus::NotRun), []);
 
     let mut receipt = base();

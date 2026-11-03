@@ -1,5 +1,4 @@
 use shipslip::records::{Flag, Outcome, OutcomeKind, Smoke, StepState};
-use shipslip::WatchStatus;
 
 fn outcome_label(kind: OutcomeKind) -> Option<String> {
     Some(match kind {
@@ -28,18 +27,13 @@ pub(crate) fn headline(outcome: Outcome) -> String {
 }
 
 pub(crate) fn flag_text(flag: Flag) -> String {
-    match flag {
-        Flag::NewErrors { groups: 1 } => "⚠ 1 new error group".into(),
-        Flag::NewErrors { groups } => format!("⚠ {groups} new error groups"),
-        Flag::LogNotFullyObserved => "ⓘ log not fully observed".into(),
-        Flag::LogNotRecorded => "ⓘ log not recorded".into(),
-        Flag::SmokeFailed {
-            status: Some(status),
-        } => format!("⚠ smoke {status}"),
-        Flag::SmokeFailed { status: None } => "⚠ smoke failed".into(),
-        Flag::SmokeNotRecorded => "ⓘ smoke not recorded".into(),
-        Flag::AppLeftDown => "⛔ app may be in maintenance mode".into(),
-    }
+    let symbol = match flag {
+        Flag::NewErrors { .. } | Flag::SmokeFailed { .. } => "⚠ ",
+        Flag::AppLeftDown => "⛔ ",
+        Flag::NoLogFileYet | Flag::LogWatchStoppedEarly | Flag::LogWatchSkippedInMaintenance => "",
+        _ => "ⓘ ",
+    };
+    format!("{symbol}{}", flag.description())
 }
 
 pub(crate) fn step_label(state: StepState) -> &'static str {
@@ -72,16 +66,5 @@ pub(crate) fn smoke_text(smoke: &Smoke) -> String {
             status: None,
             reason,
         } => format!("failed: {}", reason.field()),
-    }
-}
-
-pub(crate) fn describe_watch(status: WatchStatus) -> &'static str {
-    match status {
-        WatchStatus::Complete => "complete",
-        WatchStatus::Partial => "partial",
-        WatchStatus::Unavailable => "unavailable",
-        WatchStatus::Cancelled => "cancelled",
-        WatchStatus::NotRun => "not run",
-        WatchStatus::NoLogSeen => "no log file seen",
     }
 }

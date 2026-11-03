@@ -45,6 +45,22 @@ pub enum WatchStatus {
     NoLogSeen,
 }
 
+impl WatchStatus {
+    pub fn description(self, skip_reason: Option<CheckSkipReason>) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Partial => "log watch interrupted · entries may be missing",
+            Self::Unavailable => "log could not be read",
+            Self::Cancelled => "log watch stopped early",
+            Self::NotRun if skip_reason == Some(CheckSkipReason::AppLeftInMaintenance) => {
+                "log watch skipped · app left in maintenance"
+            }
+            Self::NotRun => "not run",
+            Self::NoLogSeen => "no log file yet",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorVariant {
     pub signature: String,

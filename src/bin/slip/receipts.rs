@@ -18,8 +18,8 @@ use super::invalid_input;
 
 #[path = "receipt_words.rs"]
 mod words;
-use words::{describe_watch, smoke_text, step_label};
 pub(super) use words::{flag_text, headline};
+use words::{smoke_text, step_label};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Args {
@@ -401,7 +401,7 @@ fn render_show(receipt: &ReceiptRecord) -> String {
         let _ = writeln!(
             out,
             "\nLog watch: {}, {}, {} lines read from {}",
-            describe_watch(watch.status),
+            watch.status.description(receipt.checks_skip_reason),
             format_duration(u128::from(watch.duration_ms)),
             watch.observed_lines,
             escape_field(watch.log_path.as_ref().unwrap_or(&target.log_path).raw())

@@ -1287,6 +1287,24 @@ fn finished_steps_carry_the_times_on_their_events_and_running_steps_none() {
 }
 
 #[test]
+fn skipped_log_watch_replays_the_maintenance_reason() {
+    let feed = display_feed();
+    feed.record(DeployEvent::ChecksSkipped {
+        reason: shipslip::observation::CheckSkipReason::AppLeftInMaintenance,
+    });
+    feed.record(DeployEvent::WatchFinished(shipslip::WatchResult::not_run()));
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert_eq!(
+        view["state"]["watch"]["status"],
+        "log watch skipped · app left in maintenance"
+    );
+    assert_eq!(
+        view["state"]["watch"]["kind"],
+        "logWatchSkippedInMaintenance"
+    );
+}
+
+#[test]
 fn replay_keeps_log_watch_smoke_and_unknown_result_details_safely() {
     let feed = display_feed();
     feed.record(DeployEvent::Warning {

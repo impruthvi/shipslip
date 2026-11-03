@@ -3,12 +3,15 @@
 
 use serde::Serialize;
 use shipslip::logs::escape_field;
+use shipslip::observation::CheckSkipReason;
 use shipslip::receipt::{format_duration, strip_color};
-use shipslip::records::{ReceiptQueryError, ReceiptRecord, StepKind, StepRow, StepState, Watch};
+use shipslip::records::{
+    Flag, ReceiptQueryError, ReceiptRecord, StepKind, StepRow, StepState, Watch,
+};
 use shipslip::{StepTimes, WatchResult, WatchStatus};
 
-use crate::receipt_words::{describe_watch, smoke_text, step_label};
-use crate::view::{flags, guidance, outcome, FlagView, Guidance, OutcomeView};
+use crate::receipt_words::{smoke_text, step_label};
+use crate::view::{flags, guidance, outcome, FlagKind, FlagView, Guidance, OutcomeView};
 
 /// Error groups listed before "and N more groups".
 const TOP_GROUPS: usize = 5;
@@ -127,6 +130,7 @@ pub enum StepStatusView {
 pub struct WatchView {
     /// e.g. "complete".
     pub status: String,
+    pub kind: Option<FlagKind>,
     pub duration: String,
     pub lines_read: u64,
     pub log_path: String,
@@ -204,10 +208,9 @@ fn receipt_view(receipt: &ReceiptRecord) -> ReceiptView {
         }),
         commits: receipt.commits.iter().map(|c| c.field()).collect(),
         steps,
-        watch: receipt
-            .watch
-            .as_ref()
-            .map(|watch| record_watch_view(watch, target.log_path.raw())),
+        watch: receipt.watch.as_ref().map(|watch| {
+            record_watch_view(watch, target.log_path.raw(), receipt.checks_skip_reason)
+        }),
         smoke: receipt.smoke.as_ref().map(smoke_text),
         notes: receipt.notes.iter().map(|note| note.field()).collect(),
         next_steps: guidance(&receipt.next_steps, receipt.repo_root.raw()),
@@ -248,16 +251,25 @@ fn step(row: &StepRow) -> StepView {
     }
 }
 
-pub(crate) fn watch_view(watch: &WatchResult, default_log: &str) -> WatchView {
-    record_watch_view(&Watch::from(watch), default_log)
+pub(crate) fn watch_view(
+    watch: &WatchResult,
+    default_log: &str,
+    skip_reason: Option<CheckSkipReason>,
+) -> WatchView {
+    record_watch_view(&Watch::from(watch), default_log, skip_reason)
 }
 
-fn record_watch_view(watch: &Watch, default_log: &str) -> WatchView {
+fn record_watch_view(
+    watch: &Watch,
+    default_log: &str,
+    skip_reason: Option<CheckSkipReason>,
+) -> WatchView {
     let mut groups: Vec<&shipslip::records::ErrorGroup> = watch.new_errors.iter().collect();
     groups.sort_by_key(|group| std::cmp::Reverse(group.count));
     let hidden = groups.len().saturating_sub(TOP_GROUPS) as u64;
     WatchView {
-        status: describe_watch(watch.status).into(),
+        status: watch.status.description(skip_reason).into(),
+        kind: Flag::from_watch(watch.status, skip_reason).map(Into::into),
         duration: format_duration(u128::from(watch.duration_ms)),
         lines_read: watch.observed_lines,
         log_path: escape_field(

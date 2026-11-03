@@ -622,6 +622,7 @@ export const receipts: Record<string, ReceiptResult> = {
       ],
       "watch": {
         "status": "complete",
+        "kind": null,
         "duration": "2m 0s",
         "linesRead": 412,
         "logPath": "storage/logs/laravel.log",
@@ -712,6 +713,7 @@ export const receipts: Record<string, ReceiptResult> = {
       ],
       "watch": {
         "status": "complete",
+        "kind": null,
         "duration": "2m 0s",
         "linesRead": 412,
         "logPath": "storage/logs/laravel.log",
@@ -820,6 +822,7 @@ export const receipts: Record<string, ReceiptResult> = {
       ],
       "watch": {
         "status": "complete",
+        "kind": null,
         "duration": "2m 0s",
         "linesRead": 412,
         "logPath": "storage/logs/laravel.log",
@@ -945,6 +948,7 @@ export const receipts: Record<string, ReceiptResult> = {
       ],
       "watch": {
         "status": "complete",
+        "kind": null,
         "duration": "2m 0s",
         "linesRead": 412,
         "logPath": "storage/logs/laravel.log",
@@ -1062,6 +1066,7 @@ export const receipts: Record<string, ReceiptResult> = {
       ],
       "watch": {
         "status": "complete",
+        "kind": null,
         "duration": "2m 0s",
         "linesRead": 412,
         "logPath": "storage/logs/laravel.log",
@@ -1157,6 +1162,7 @@ export const receipts: Record<string, ReceiptResult> = {
       ],
       "watch": {
         "status": "complete",
+        "kind": null,
         "duration": "2m 0s",
         "linesRead": 412,
         "logPath": "storage/logs/laravel.log",
@@ -1273,6 +1279,7 @@ export const receipts: Record<string, ReceiptResult> = {
       ],
       "watch": {
         "status": "complete",
+        "kind": null,
         "duration": "2m 0s",
         "linesRead": 412,
         "logPath": "storage/logs/laravel.log",
@@ -1358,6 +1365,7 @@ export const receipts: Record<string, ReceiptResult> = {
       ],
       "watch": {
         "status": "complete",
+        "kind": null,
         "duration": "2m 0s",
         "linesRead": 412,
         "logPath": "storage/logs/laravel.log",
@@ -1436,6 +1444,7 @@ export const receipts: Record<string, ReceiptResult> = {
       ],
       "watch": {
         "status": "complete",
+        "kind": null,
         "duration": "2m 0s",
         "linesRead": 412,
         "logPath": "storage/logs/laravel.log",
@@ -1554,6 +1563,205 @@ export const coalesced: LoadResult = {
   "kind": "coalesced"
 };
 
+export const watchResults: LoadResult = {
+  "kind": "loaded",
+  "generation": 1,
+  "map": {
+    "screen": "map",
+    "envs": [
+      "staging"
+    ],
+    "rows": [
+      {
+        "label": "watchInterrupted",
+        "repoRoot": "/Users/you/code/watchInterrupted",
+        "pathMissing": false,
+        "cells": [
+          {
+            "kind": "present",
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791795035000,
+            "age": "just now",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [
+              {
+                "text": "log watch interrupted · entries may be missing",
+                "newErrors": false,
+                "bad": true,
+                "kind": "logWatchInterrupted"
+              }
+            ],
+            "target": "staging1:/var/www/watchInterrupted",
+            "targetMoved": null,
+            "needsAttention": true,
+            "receipt": 0,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      },
+      {
+        "label": "watchNoFile",
+        "repoRoot": "/Users/you/code/watchNoFile",
+        "pathMissing": false,
+        "cells": [
+          {
+            "kind": "present",
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791795035000,
+            "age": "just now",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [
+              {
+                "text": "no log file yet",
+                "newErrors": false,
+                "bad": false,
+                "kind": "noLogFileYet"
+              }
+            ],
+            "target": "staging1:/var/www/watchNoFile",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 1,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      },
+      {
+        "label": "watchSkipped",
+        "repoRoot": "/Users/you/code/watchSkipped",
+        "pathMissing": false,
+        "cells": [
+          {
+            "kind": "present",
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791795035000,
+            "age": "just now",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [
+              {
+                "text": "log watch skipped · app left in maintenance",
+                "newErrors": false,
+                "bad": false,
+                "kind": "logWatchSkippedInMaintenance"
+              }
+            ],
+            "target": "staging1:/var/www/watchSkipped",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 2,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      },
+      {
+        "label": "watchStopped",
+        "repoRoot": "/Users/you/code/watchStopped",
+        "pathMissing": false,
+        "cells": [
+          {
+            "kind": "present",
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791795035000,
+            "age": "just now",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [
+              {
+                "text": "log watch stopped early",
+                "newErrors": false,
+                "bad": false,
+                "kind": "logWatchStoppedEarly"
+              }
+            ],
+            "target": "staging1:/var/www/watchStopped",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 3,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      },
+      {
+        "label": "watchUnreadable",
+        "repoRoot": "/Users/you/code/watchUnreadable",
+        "pathMissing": false,
+        "cells": [
+          {
+            "kind": "present",
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791795035000,
+            "age": "just now",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [
+              {
+                "text": "log could not be read",
+                "newErrors": false,
+                "bad": true,
+                "kind": "logUnreadable"
+              }
+            ],
+            "target": "staging1:/var/www/watchUnreadable",
+            "targetMoved": null,
+            "needsAttention": true,
+            "receipt": 4,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      }
+    ],
+    "problems": []
+  }
+};
+
 export const slips: Record<string, SlipView> = {
   "copyWithheld": {
     "branch": "main",
@@ -1643,6 +1851,7 @@ export const slips: Record<string, SlipView> = {
       ],
       "duration": "2m 0s",
       "groups": [],
+      "kind": null,
       "linesRead": 412,
       "logPath": "storage/logs/laravel.log",
       "moreGroups": 0,
@@ -1738,10 +1947,413 @@ export const slips: Record<string, SlipView> = {
       ],
       "duration": "2m 0s",
       "groups": [],
+      "kind": null,
       "linesRead": 412,
       "logPath": "storage/logs/laravel.log",
       "moreGroups": 0,
       "status": "complete",
+      "warnings": []
+    }
+  },
+  "watchInterrupted": {
+    "branch": "main",
+    "commits": [],
+    "duration": "1m 35s",
+    "env": "staging",
+    "finishedAtMs": 1791795035000,
+    "flags": [
+      {
+        "bad": true,
+        "kind": "logWatchInterrupted",
+        "newErrors": false,
+        "text": "log watch interrupted · entries may be missing"
+      }
+    ],
+    "fromSha": "1111111111111111111111111111111111111111",
+    "kind": "receipt",
+    "nextSteps": {
+      "copyWithheld": false,
+      "lines": []
+    },
+    "notes": [],
+    "outcome": {
+      "kind": "succeeded",
+      "text": "Succeeded",
+      "tone": "good"
+    },
+    "plan": "deploy",
+    "production": false,
+    "project": "watchInterrupted",
+    "repoRoot": "/Users/you/code/watchInterrupted",
+    "runId": "000000c9-0",
+    "serverHead": null,
+    "smoke": "passed, HTTP 200 in 380 ms",
+    "startedAtMs": 1791794940000,
+    "startedBy": null,
+    "steps": [
+      {
+        "command": "git merge --ff-only",
+        "exitCode": 0,
+        "index": "0",
+        "label": "✓ ok",
+        "output": [],
+        "status": "ok",
+        "timing": {
+          "duration": "1s",
+          "durationMs": 1200,
+          "kind": "took"
+        }
+      },
+      {
+        "command": "php artisan migrate --force",
+        "exitCode": 0,
+        "index": "1",
+        "label": "✓ ok",
+        "output": [],
+        "status": "ok",
+        "timing": {
+          "duration": "48s",
+          "durationMs": 48000,
+          "kind": "took"
+        }
+      }
+    ],
+    "summary": "Deploy run succeeded.",
+    "target": "staging1:/var/www/watchInterrupted",
+    "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "watch": {
+      "baseline": [
+        0,
+        0
+      ],
+      "duration": "2m 0s",
+      "groups": [],
+      "kind": "logWatchInterrupted",
+      "linesRead": 0,
+      "logPath": "storage/logs/laravel.log",
+      "moreGroups": 0,
+      "status": "log watch interrupted · entries may be missing",
+      "warnings": []
+    }
+  },
+  "watchNoFile": {
+    "branch": "main",
+    "commits": [],
+    "duration": "1m 35s",
+    "env": "staging",
+    "finishedAtMs": 1791795035000,
+    "flags": [
+      {
+        "bad": false,
+        "kind": "noLogFileYet",
+        "newErrors": false,
+        "text": "no log file yet"
+      }
+    ],
+    "fromSha": "1111111111111111111111111111111111111111",
+    "kind": "receipt",
+    "nextSteps": {
+      "copyWithheld": false,
+      "lines": []
+    },
+    "notes": [],
+    "outcome": {
+      "kind": "succeeded",
+      "text": "Succeeded",
+      "tone": "good"
+    },
+    "plan": "deploy",
+    "production": false,
+    "project": "watchNoFile",
+    "repoRoot": "/Users/you/code/watchNoFile",
+    "runId": "000000cb-0",
+    "serverHead": null,
+    "smoke": "passed, HTTP 200 in 380 ms",
+    "startedAtMs": 1791794940000,
+    "startedBy": null,
+    "steps": [
+      {
+        "command": "git merge --ff-only",
+        "exitCode": 0,
+        "index": "0",
+        "label": "✓ ok",
+        "output": [],
+        "status": "ok",
+        "timing": {
+          "duration": "1s",
+          "durationMs": 1200,
+          "kind": "took"
+        }
+      },
+      {
+        "command": "php artisan migrate --force",
+        "exitCode": 0,
+        "index": "1",
+        "label": "✓ ok",
+        "output": [],
+        "status": "ok",
+        "timing": {
+          "duration": "48s",
+          "durationMs": 48000,
+          "kind": "took"
+        }
+      }
+    ],
+    "summary": "Deploy run succeeded.",
+    "target": "staging1:/var/www/watchNoFile",
+    "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "watch": {
+      "baseline": [
+        0,
+        0
+      ],
+      "duration": "2m 0s",
+      "groups": [],
+      "kind": "noLogFileYet",
+      "linesRead": 0,
+      "logPath": "storage/logs/laravel.log",
+      "moreGroups": 0,
+      "status": "no log file yet",
+      "warnings": []
+    }
+  },
+  "watchSkipped": {
+    "branch": "main",
+    "commits": [],
+    "duration": "1m 35s",
+    "env": "staging",
+    "finishedAtMs": 1791795035000,
+    "flags": [
+      {
+        "bad": false,
+        "kind": "logWatchSkippedInMaintenance",
+        "newErrors": false,
+        "text": "log watch skipped · app left in maintenance"
+      }
+    ],
+    "fromSha": "1111111111111111111111111111111111111111",
+    "kind": "receipt",
+    "nextSteps": {
+      "copyWithheld": false,
+      "lines": []
+    },
+    "notes": [],
+    "outcome": {
+      "kind": "succeeded",
+      "text": "Succeeded",
+      "tone": "good"
+    },
+    "plan": "deploy",
+    "production": false,
+    "project": "watchSkipped",
+    "repoRoot": "/Users/you/code/watchSkipped",
+    "runId": "000000cd-0",
+    "serverHead": null,
+    "smoke": "passed, HTTP 200 in 380 ms",
+    "startedAtMs": 1791794940000,
+    "startedBy": null,
+    "steps": [
+      {
+        "command": "git merge --ff-only",
+        "exitCode": 0,
+        "index": "0",
+        "label": "✓ ok",
+        "output": [],
+        "status": "ok",
+        "timing": {
+          "duration": "1s",
+          "durationMs": 1200,
+          "kind": "took"
+        }
+      },
+      {
+        "command": "php artisan migrate --force",
+        "exitCode": 0,
+        "index": "1",
+        "label": "✓ ok",
+        "output": [],
+        "status": "ok",
+        "timing": {
+          "duration": "48s",
+          "durationMs": 48000,
+          "kind": "took"
+        }
+      }
+    ],
+    "summary": "Deploy run succeeded.",
+    "target": "staging1:/var/www/watchSkipped",
+    "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "watch": {
+      "baseline": null,
+      "duration": "0 ms",
+      "groups": [],
+      "kind": "logWatchSkippedInMaintenance",
+      "linesRead": 0,
+      "logPath": "storage/logs/laravel.log",
+      "moreGroups": 0,
+      "status": "log watch skipped · app left in maintenance",
+      "warnings": []
+    }
+  },
+  "watchStopped": {
+    "branch": "main",
+    "commits": [],
+    "duration": "1m 35s",
+    "env": "staging",
+    "finishedAtMs": 1791795035000,
+    "flags": [
+      {
+        "bad": false,
+        "kind": "logWatchStoppedEarly",
+        "newErrors": false,
+        "text": "log watch stopped early"
+      }
+    ],
+    "fromSha": "1111111111111111111111111111111111111111",
+    "kind": "receipt",
+    "nextSteps": {
+      "copyWithheld": false,
+      "lines": []
+    },
+    "notes": [],
+    "outcome": {
+      "kind": "succeeded",
+      "text": "Succeeded",
+      "tone": "good"
+    },
+    "plan": "deploy",
+    "production": false,
+    "project": "watchStopped",
+    "repoRoot": "/Users/you/code/watchStopped",
+    "runId": "000000cc-0",
+    "serverHead": null,
+    "smoke": "passed, HTTP 200 in 380 ms",
+    "startedAtMs": 1791794940000,
+    "startedBy": null,
+    "steps": [
+      {
+        "command": "git merge --ff-only",
+        "exitCode": 0,
+        "index": "0",
+        "label": "✓ ok",
+        "output": [],
+        "status": "ok",
+        "timing": {
+          "duration": "1s",
+          "durationMs": 1200,
+          "kind": "took"
+        }
+      },
+      {
+        "command": "php artisan migrate --force",
+        "exitCode": 0,
+        "index": "1",
+        "label": "✓ ok",
+        "output": [],
+        "status": "ok",
+        "timing": {
+          "duration": "48s",
+          "durationMs": 48000,
+          "kind": "took"
+        }
+      }
+    ],
+    "summary": "Deploy run succeeded.",
+    "target": "staging1:/var/www/watchStopped",
+    "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "watch": {
+      "baseline": [
+        0,
+        0
+      ],
+      "duration": "2m 0s",
+      "groups": [],
+      "kind": "logWatchStoppedEarly",
+      "linesRead": 0,
+      "logPath": "storage/logs/laravel.log",
+      "moreGroups": 0,
+      "status": "log watch stopped early",
+      "warnings": []
+    }
+  },
+  "watchUnreadable": {
+    "branch": "main",
+    "commits": [],
+    "duration": "1m 35s",
+    "env": "staging",
+    "finishedAtMs": 1791795035000,
+    "flags": [
+      {
+        "bad": true,
+        "kind": "logUnreadable",
+        "newErrors": false,
+        "text": "log could not be read"
+      }
+    ],
+    "fromSha": "1111111111111111111111111111111111111111",
+    "kind": "receipt",
+    "nextSteps": {
+      "copyWithheld": false,
+      "lines": []
+    },
+    "notes": [],
+    "outcome": {
+      "kind": "succeeded",
+      "text": "Succeeded",
+      "tone": "good"
+    },
+    "plan": "deploy",
+    "production": false,
+    "project": "watchUnreadable",
+    "repoRoot": "/Users/you/code/watchUnreadable",
+    "runId": "000000ca-0",
+    "serverHead": null,
+    "smoke": "passed, HTTP 200 in 380 ms",
+    "startedAtMs": 1791794940000,
+    "startedBy": null,
+    "steps": [
+      {
+        "command": "git merge --ff-only",
+        "exitCode": 0,
+        "index": "0",
+        "label": "✓ ok",
+        "output": [],
+        "status": "ok",
+        "timing": {
+          "duration": "1s",
+          "durationMs": 1200,
+          "kind": "took"
+        }
+      },
+      {
+        "command": "php artisan migrate --force",
+        "exitCode": 0,
+        "index": "1",
+        "label": "✓ ok",
+        "output": [],
+        "status": "ok",
+        "timing": {
+          "duration": "48s",
+          "durationMs": 48000,
+          "kind": "took"
+        }
+      }
+    ],
+    "summary": "Deploy run succeeded.",
+    "target": "staging1:/var/www/watchUnreadable",
+    "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "watch": {
+      "baseline": [
+        0,
+        0
+      ],
+      "duration": "2m 0s",
+      "groups": [],
+      "kind": "logUnreadable",
+      "linesRead": 0,
+      "logPath": "storage/logs/laravel.log",
+      "moreGroups": 0,
+      "status": "log could not be read",
       "warnings": []
     }
   }
@@ -2032,6 +2644,7 @@ export const runBatches: Record<string, RunBatch> = {
         "baseline": null,
         "duration": "0 ms",
         "groups": [],
+        "kind": null,
         "linesRead": 0,
         "logPath": "not observed",
         "moreGroups": 0,

@@ -13,7 +13,7 @@ use crate::logs::{escape, escape_field};
 use crate::records::{ReceiptRecord, Smoke, StepKind};
 
 mod words;
-use words::{describe_watch, flag_text, headline, step_label};
+use words::{flag_text, headline, step_label};
 
 pub fn markdown(receipt: &Receipt, details: bool) -> String {
     render(
@@ -143,13 +143,17 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
 
     if let Some(watch) = &receipt.watch {
         out.push_str("\n## Log watch\n\n");
-        if let Some(reason) = receipt.checks_skip_reason {
-            let _ = writeln!(out, "Skipped: {}.", reason.description());
+        if watch.status == crate::WatchStatus::NotRun {
+            let _ = writeln!(
+                out,
+                "Status: {}.",
+                watch.status.description(receipt.checks_skip_reason)
+            );
         } else {
             let _ = writeln!(
                 out,
                 "Status: {}, {}, {} lines read from {}.",
-                describe_watch(watch.status),
+                watch.status.description(receipt.checks_skip_reason),
                 format_duration(u128::from(watch.duration_ms)),
                 watch.observed_lines,
                 code(watch.log_path.as_ref().unwrap_or(&target.log_path).raw())
