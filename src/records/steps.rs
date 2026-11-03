@@ -16,6 +16,10 @@ pub struct StepRow {
     pub started_at_ms: Option<u128>,
     /// When this Mac saw the step end; `None` when it did not.
     pub finished_at_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_seen_at_ms: Option<u128>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub connection_gaps: Vec<ConnectionGap>,
     /// Only when both ends were seen.
     pub duration_ms: Option<u128>,
     /// The saved output, colour codes and all.
@@ -25,6 +29,7 @@ pub struct StepRow {
 impl StepRow {
     pub fn times(&self) -> StepTimes {
         StepTimes {
+            result_seen_at_ms: self.result_seen_at_ms,
             started_at_ms: self.started_at_ms,
             finished_at_ms: self.finished_at_ms,
         }
@@ -37,6 +42,7 @@ impl StepRow {
         exit_code: Option<i32>,
         times: StepTimes,
         output: &[String],
+        gaps: &[crate::receipt::ConnectionGap],
     ) -> Self {
         Self {
             kind,
@@ -45,6 +51,15 @@ impl StepRow {
             exit_code,
             started_at_ms: times.started_at_ms,
             finished_at_ms: times.finished_at_ms,
+            result_seen_at_ms: times.result_seen_at_ms,
+            connection_gaps: gaps
+                .iter()
+                .map(|gap| ConnectionGap {
+                    lost_at_ms: gap.lost_at_ms,
+                    reattached_at_ms: gap.reattached_at_ms,
+                    detail: gap.detail.clone().into(),
+                })
+                .collect(),
             duration_ms: times.duration_ms(),
             output: output.iter().map(|line| line.as_str().into()).collect(),
         }
@@ -56,9 +71,25 @@ impl StepRow {
         status: &StepStatus,
         exit_code: Option<i32>,
         times: StepTimes,
+        gaps: &[crate::receipt::ConnectionGap],
     ) -> Self {
-        Self::new(kind, command, status.clone().into(), exit_code, times, &[])
+        Self::new(
+            kind,
+            command,
+            status.clone().into(),
+            exit_code,
+            times,
+            &[],
+            gaps,
+        )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ConnectionGap {
+    pub lost_at_ms: u128,
+    pub reattached_at_ms: Option<u128>,
+    pub detail: Untrusted,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -110,6 +141,7 @@ impl Receipt {
                 status,
                 self.maintenance_down_exit_code,
                 self.maintenance_down_times(),
+                &self.maintenance_down_connection_gaps,
             ));
         }
         rows.extend(self.steps.iter().map(|step| {
@@ -120,6 +152,7 @@ impl Receipt {
                 step.exit_code,
                 step.times(),
                 &step.output,
+                &step.connection_gaps,
             )
         }));
         if self.kind == ReceiptKind::Deploy {
@@ -130,6 +163,7 @@ impl Receipt {
                     status,
                     self.maintenance_up_exit_code,
                     self.maintenance_up_times(),
+                    &self.maintenance_up_connection_gaps,
                 ));
             }
         }

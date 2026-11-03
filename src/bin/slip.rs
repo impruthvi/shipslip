@@ -610,6 +610,12 @@ async fn follow_events(
         };
         stage = next_stage(stage, &event);
         match event {
+            DeployEvent::ConnectionLost { target, at_ms, .. } => {
+                println!("{}", connection_line(target, at_ms, false))
+            }
+            DeployEvent::Reattached { target, at_ms } => {
+                println!("{}", connection_line(target, at_ms, true))
+            }
             DeployEvent::StepStarted { index, name } => {
                 println!("\nStep {index}: {}", server_field(&name))
             }
@@ -1681,7 +1687,24 @@ async fn up_command(
 async fn follow_up(mut events: RunEvents, environment: &str) -> Result<ExitCode, Box<dyn Error>> {
     while let Some(event) = events.recv().await {
         match event {
+            DeployEvent::ConnectionLost { target, at_ms, .. } => {
+                println!("{}", connection_line(target, at_ms, false))
+            }
+            DeployEvent::Reattached { target, at_ms } => {
+                println!("{}", connection_line(target, at_ms, true))
+            }
             DeployEvent::MaintenanceOutput { line, .. } => println!("  {}", server_line(&line)),
+            DeployEvent::MaintenanceFinished {
+                phase,
+                status,
+                exit_code,
+                times,
+            } => {
+                println!(
+                    "{}",
+                    maintenance_result_line(phase, &status, exit_code, times)
+                );
+            }
             DeployEvent::Finished(DeployOutcome::Succeeded) => {
                 println!("Maintenance mode disabled for `{environment}`.");
                 return Ok(ExitCode::SUCCESS);
@@ -1800,6 +1823,31 @@ async fn cancel_prepared(
     Ok(())
 }
 
+fn connection_line(target: shipslip::ConnectionTarget, at_ms: u128, reattached: bool) -> String {
+    format!(
+        "{} {target} at {}.{}",
+        if reattached {
+            "Re-attached to"
+        } else {
+            "Connection lost while watching"
+        },
+        shipslip::receipt::format_utc(at_ms),
+        if reattached {
+            ""
+        } else {
+            " Re-attaching does not run the step again."
+        }
+    )
+}
+
+fn result_timing_suffix(times: StepTimes) -> String {
+    if times.result_seen_at_ms.is_some() {
+        shipslip::receipt::timing_suffix(times, shipslip::receipt::format_utc)
+    } else {
+        duration_suffix(times)
+    }
+}
+
 fn step_result_line(
     index: usize,
     status: &StepStatus,
@@ -1812,7 +1860,7 @@ fn step_result_line(
         exit_code
             .map(|code| format!(" (exit {code})"))
             .unwrap_or_default(),
-        duration_suffix(times)
+        result_timing_suffix(times)
     )
 }
 
@@ -1829,7 +1877,7 @@ fn maintenance_result_line(
         exit_code
             .map(|code| format!(" (exit {code})"))
             .unwrap_or_default(),
-        duration_suffix(times)
+        result_timing_suffix(times)
     )
 }
 
@@ -2164,8 +2212,23 @@ mod tests {
     }
 
     #[test]
+    fn connection_lines_use_plain_sentences_and_this_macs_timestamps() {
+        let target = shipslip::ConnectionTarget::Step { index: 2 };
+        assert_eq!(connection_line(target, 1000, false),
+            "Connection lost while watching step 2 at 1970-01-01 00:00:01Z. Re-attaching does not run the step again.");
+        assert_eq!(
+            connection_line(shipslip::ConnectionTarget::LogWatch, 5000, true),
+            "Re-attached to the log watch at 1970-01-01 00:00:05Z."
+        );
+        assert_eq!(step_result_line(2, &StepStatus::Ok, Some(0), StepTimes {
+            started_at_ms: Some(1000), finished_at_ms: None, result_seen_at_ms: Some(5000),
+        }), "Step 2: succeeded (exit 0), started 1970-01-01 00:00:01Z, end not known, result seen 1970-01-01 00:00:05Z");
+    }
+
+    #[test]
     fn finished_step_line_shows_the_recorded_duration() {
         let timed = StepTimes {
+            result_seen_at_ms: None,
             started_at_ms: Some(1_000),
             finished_at_ms: Some(165_000),
         };
@@ -2190,6 +2253,7 @@ mod tests {
     #[test]
     fn finished_maintenance_line_shows_the_recorded_duration() {
         let timed = StepTimes {
+            result_seen_at_ms: None,
             started_at_ms: Some(1_000),
             finished_at_ms: Some(3_400),
         };

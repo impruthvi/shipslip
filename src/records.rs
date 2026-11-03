@@ -29,7 +29,7 @@ pub use status::{
     status, AttemptSummary, CellRef, CodeState, EnvCell, Evidence, Mark, NewerElsewhere,
     NotKnownReason, Problem, ProblemKind, RepoRow, StaleHint, Status,
 };
-pub use steps::{StepKind, StepRow, StepState};
+pub use steps::{ConnectionGap, StepKind, StepRow, StepState};
 
 /// The JSON schema number. Within one number fields are only added.
 pub const SCHEMA: u32 = 1;

@@ -204,6 +204,13 @@ adds a `reason` from `log.error.reason`. A `status` or `receipts` failure
 before the command reads any record (a bad flag, a missing config) uses
 `cli.early_error.kind`. Every other error field is server text.
 
+Receipt step rows may include `result_seen_at_ms` and `connection_gaps`.
+If a step finished during a connection gap, `finished_at_ms` and `duration_ms`
+are null; `result_seen_at_ms` says when this Mac read the result, not when the
+step ended. A gap has `lost_at_ms`, nullable `reattached_at_ms`, and untrusted
+transport `detail`. The timestamps all use this Mac's clock. Older receipts
+without these fields keep their existing meaning.
+
 `run_plan` is either a string or `{"FromStep": N}`. Next-step parts use
 externally tagged objects (`{"text": ...}` or `{"command": [...]}`). These
 discriminators are fixed; the text and command arguments remain server text.

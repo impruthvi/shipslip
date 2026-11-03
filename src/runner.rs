@@ -8,8 +8,9 @@
 
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
+use crate::receipt::now_ms;
 use crate::script::shell_quote;
 use crate::transport::{Transport, TransportError, LINE_QUEUE, SCRIPT_LINE_LIMIT, STEP_LINE_LIMIT};
 
@@ -45,6 +46,47 @@ enum Probe {
     Running,
     Gone,
     NotStarted,
+}
+
+pub(crate) enum ConnectionChange {
+    Lost { at_ms: u128, detail: String },
+    Reattached { at_ms: u128 },
+}
+
+pub(crate) enum Observed {
+    Line(String),
+    Drained(oneshot::Sender<()>),
+}
+
+pub(crate) struct Connection<'a> {
+    reattaches: usize,
+    lost: bool,
+    pub result_seen_at_ms: Option<u128>,
+    notify: &'a (dyn Fn(ConnectionChange) -> Result<(), String> + Sync),
+}
+
+impl<'a> Connection<'a> {
+    pub fn new(notify: &'a (dyn Fn(ConnectionChange) -> Result<(), String> + Sync)) -> Self {
+        Self {
+            reattaches: 0,
+            lost: false,
+            result_seen_at_ms: None,
+            notify,
+        }
+    }
+
+    fn reattached(&mut self, probe: &Probe) -> Result<(), StepResult> {
+        if self.lost {
+            let at_ms = now_ms();
+            if matches!(probe, Probe::Exited(_)) {
+                self.result_seen_at_ms.get_or_insert(at_ms);
+            }
+            (self.notify)(ConnectionChange::Reattached { at_ms })
+                .map_err(StepResult::Interrupted)?;
+            self.lost = false;
+        }
+        Ok(())
+    }
 }
 
 fn run_dir(run_id: &str) -> String {
@@ -151,7 +193,7 @@ pub(crate) async fn launch_step<T: Transport>(
     run_id: &str,
     key: &str,
     script: &str,
-    reattaches: &mut usize,
+    connection: &mut Connection<'_>,
 ) -> Result<(), StepResult> {
     let (launch, launch_output) = run_collect(transport, &launch_script(run_id, key, script)).await;
     if let Err(e @ TransportError::Connect(_)) = &launch {
@@ -161,7 +203,7 @@ pub(crate) async fn launch_step<T: Transport>(
         // Unclear whether the step started: ask the server. Never launch again.
         let mut last = launch.clone();
         loop {
-            if let Err(reason) = reconnect_if_lost(transport, &last, reattaches).await {
+            if let Err(reason) = reconnect_if_lost(transport, &last, connection, None).await {
                 return Err(StepResult::Interrupted(reason));
             }
             let (result, lines) = run_collect(transport, &probe_script(run_id, key)).await;
@@ -169,8 +211,10 @@ pub(crate) async fn launch_step<T: Transport>(
                 last = result;
                 continue;
             }
-            match parse_probe(&lines) {
-                Some(Probe::NotStarted) => {
+            let probe = parse_probe(&lines).ok_or_else(|| unexpected(&lines))?;
+            connection.reattached(&probe)?;
+            match probe {
+                Probe::NotStarted => {
                     return Err(StepResult::NotStarted(match &launch {
                         Err(e) => e.to_string(),
                         Ok(code) => {
@@ -178,8 +222,7 @@ pub(crate) async fn launch_step<T: Transport>(
                         }
                     }))
                 }
-                Some(_) => break,
-                None => return Err(unexpected(&lines)),
+                _ => break,
             }
         }
     }
@@ -191,51 +234,72 @@ pub(crate) async fn attach_step<T: Transport>(
     transport: &T,
     run_id: &str,
     key: &str,
-    output: &mpsc::Sender<String>,
+    output: &mpsc::Sender<Observed>,
+    connection: &mut Connection<'_>,
 ) -> StepResult {
-    let mut reattaches = 0;
     loop {
         let (result, lines) = run_collect(transport, &probe_script(run_id, key)).await;
-        if let Err(reason) = reconnect_if_lost(transport, &result, &mut reattaches).await {
+        if let Err(reason) = reconnect_if_lost(transport, &result, connection, Some(output)).await {
             return StepResult::Interrupted(reason);
         }
         if result.is_err() {
             continue;
         }
-        match parse_probe(&lines) {
-            Some(Probe::NotStarted) => {
+        let Some(probe) = parse_probe(&lines) else {
+            return unexpected(&lines);
+        };
+        if let Err(result) = connection.reattached(&probe) {
+            return result;
+        }
+        match probe {
+            Probe::NotStarted => {
                 return StepResult::NotStarted(
                     "the step was not launched before Shipslip exited".into(),
                 )
             }
-            Some(Probe::Gone) => return StepResult::Gone,
-            Some(Probe::Running | Probe::Exited(_)) => break,
-            None => return unexpected(&lines),
+            Probe::Gone => return StepResult::Gone,
+            Probe::Running | Probe::Exited(_) => break,
         }
     }
-    follow_existing(transport, run_id, key, output, &mut reattaches).await
+    follow_existing(transport, run_id, key, output, connection).await
 }
 
 pub(crate) async fn follow_existing<T: Transport>(
     transport: &T,
     run_id: &str,
     key: &str,
-    output: &mpsc::Sender<String>,
-    reattaches: &mut usize,
+    output: &mpsc::Sender<Observed>,
+    connection: &mut Connection<'_>,
 ) -> StepResult {
-    // After a reconnect, observe again before probing so output written
-    // while disconnected is still shown.
     let mut seen = 0;
     loop {
+        if connection.lost {
+            let (result, lines) = run_collect(transport, &probe_script(run_id, key)).await;
+            if let Err(reason) =
+                reconnect_if_lost(transport, &result, connection, Some(output)).await
+            {
+                return StepResult::Interrupted(reason);
+            }
+            if result.is_err() {
+                continue;
+            }
+            let Some(probe) = parse_probe(&lines) else {
+                return unexpected(&lines);
+            };
+            if let Err(result) = connection.reattached(&probe) {
+                return result;
+            }
+        }
         let observed = observe(transport, run_id, key, &mut seen, output).await;
-        if let Err(reason) = reconnect_if_lost(transport, &observed, reattaches).await {
+        if let Err(reason) = reconnect_if_lost(transport, &observed, connection, Some(output)).await
+        {
             return StepResult::Interrupted(reason);
         }
         if observed.is_err() {
             continue;
         }
         let (result, lines) = run_collect(transport, &probe_script(run_id, key)).await;
-        if let Err(reason) = reconnect_if_lost(transport, &result, reattaches).await {
+        if let Err(reason) = reconnect_if_lost(transport, &result, connection, Some(output)).await {
             return StepResult::Interrupted(reason);
         }
         if result.is_err() {
@@ -246,8 +310,8 @@ pub(crate) async fn follow_existing<T: Transport>(
             Some(Probe::Gone) => return StepResult::Gone,
             // The observer returns only once the step's process has ended.
             Some(Probe::Running | Probe::NotStarted) => {
-                *reattaches += 1;
-                if *reattaches > MAX_REATTACHES {
+                connection.reattaches += 1;
+                if connection.reattaches > MAX_REATTACHES {
                     return StepResult::Interrupted("could not follow the step's output".into());
                 }
             }
@@ -296,7 +360,7 @@ async fn observe<T: Transport>(
     run_id: &str,
     key: &str,
     seen: &mut usize,
-    output: &mpsc::Sender<String>,
+    output: &mpsc::Sender<Observed>,
 ) -> Result<i32, TransportError> {
     let script = observe_script(run_id, key, *seen);
     let (tx, mut rx) = mpsc::channel(LINE_QUEUE);
@@ -308,7 +372,7 @@ async fn observe<T: Transport>(
                 continue;
             }
             *seen += 1;
-            let _ = output.send(line).await;
+            let _ = output.send(Observed::Line(line)).await;
         }
     };
     let (result, ()) = tokio::join!(transport.run(&script, tx, STEP_LINE_LIMIT), forward);
@@ -320,13 +384,27 @@ async fn observe<T: Transport>(
 async fn reconnect_if_lost<T: Transport>(
     transport: &T,
     result: &Result<i32, TransportError>,
-    reattaches: &mut usize,
+    connection: &mut Connection<'_>,
+    output: Option<&mpsc::Sender<Observed>>,
 ) -> Result<(), String> {
     let Err(err) = result else {
         return Ok(());
     };
-    *reattaches += 1;
-    if *reattaches > MAX_REATTACHES {
+    if !connection.lost {
+        let at_ms = now_ms();
+        if let Some(output) = output {
+            let (acknowledge, drained) = oneshot::channel();
+            let _ = output.send(Observed::Drained(acknowledge)).await;
+            let _ = drained.await;
+        }
+        (connection.notify)(ConnectionChange::Lost {
+            at_ms,
+            detail: err.to_string(),
+        })?;
+        connection.lost = true;
+    }
+    connection.reattaches += 1;
+    if connection.reattaches > MAX_REATTACHES {
         return Err(err.to_string());
     }
     let mut last = err.to_string();

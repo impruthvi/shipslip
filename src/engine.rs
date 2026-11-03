@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, watch, Semaphore};
 
 use crate::config::TrustedTarget;
 use crate::event::{
-    down_may_have_started, DeployEvent, DeployOutcome, MaintenancePhase, StepStatus, StepTimes,
-    StopReason,
+    down_may_have_started, ConnectionTarget, DeployEvent, DeployOutcome, MaintenancePhase,
+    StepStatus, StepTimes, StopReason,
 };
 use crate::lock::{self, Acquire, Break, LockInfo, LockOwner};
 use crate::observation::{
@@ -690,7 +690,7 @@ async fn run_up<T: Transport>(
             return;
         }
         End::Interrupted { index, reason } => {
-            let _ = journal.message(reason.clone());
+            let reason = journal.interrupted(&reason).unwrap_or(reason);
             journal.release_claim();
             drop(journal);
             let _ = events.send(DeployEvent::Interrupted { index, reason });
@@ -1394,9 +1394,10 @@ async fn run_steps<T: Transport>(
             DeployEvent::Detached { index }
         }
         End::Interrupted { index, reason } => {
-            if let Some(journal) = &journal {
-                let _ = journal.message(reason.clone());
-            }
+            let reason = journal
+                .as_ref()
+                .and_then(|journal| journal.interrupted(&reason).ok())
+                .unwrap_or(reason);
             DeployEvent::Interrupted { index, reason }
         }
         End::RunError(_) => unreachable!("local errors end before post-deploy checks"),
@@ -1893,6 +1894,7 @@ async fn run_steps_locked<T: Transport>(
         let _ = events.send(DeployEvent::StepStarted { index, name });
         let key = format!("step-{index}");
         let output = |line| DeployEvent::Output { index, line };
+        let mut result_seen_at_ms = None;
         let result = match follow(
             transport,
             preview,
@@ -1908,6 +1910,7 @@ async fn run_steps_locked<T: Transport>(
                 FollowMode::Launch
             },
             journal,
+            &mut result_seen_at_ms,
         )
         .await
         {
@@ -1982,7 +1985,7 @@ async fn run_steps_locked<T: Transport>(
             }
             StepResult::Interrupted(reason) => return End::Interrupted { index, reason },
         };
-        let times = seen_times(&status, !active_step, started_at_ms);
+        let times = seen_times(&status, !active_step, started_at_ms, result_seen_at_ms);
         if let Some(journal) = journal {
             if let Some(DeployEvent::ServerState { head, tree_dirty }) = &server_state {
                 if let Err(error) = journal.server_state(head.clone(), *tree_dirty) {
@@ -2123,8 +2126,39 @@ async fn follow<T: Transport>(
     to_event: impl Fn(String) -> DeployEvent,
     mode: FollowMode,
     journal: Option<&ReceiptJournal>,
+    result_seen_at_ms: &mut Option<u128>,
 ) -> Followed {
-    let mut reattaches = 0;
+    let target = match key {
+        "maintenance-down" => ConnectionTarget::Maintenance {
+            phase: MaintenancePhase::Down,
+        },
+        "maintenance-up" => ConnectionTarget::Maintenance {
+            phase: MaintenancePhase::Up,
+        },
+        _ => ConnectionTarget::Step {
+            index: key.strip_prefix("step-").unwrap().parse().unwrap(),
+        },
+    };
+    let notify = |change| {
+        let event = match change {
+            runner::ConnectionChange::Lost { at_ms, detail } => DeployEvent::ConnectionLost {
+                target,
+                at_ms,
+                detail,
+            },
+            runner::ConnectionChange::Reattached { at_ms } => {
+                DeployEvent::Reattached { target, at_ms }
+            }
+        };
+        if let Some(journal) = journal {
+            journal
+                .connection_event(&event)
+                .map_err(|error| format!("could not save connection gap: {error}"))?;
+        }
+        let _ = events.send(event);
+        Ok(())
+    };
+    let mut connection = runner::Connection::new(&notify);
     if mode == FollowMode::Launch {
         if detach.as_ref().is_some_and(|detach| *detach.borrow()) {
             return Followed::NotLaunched;
@@ -2133,7 +2167,7 @@ async fn follow<T: Transport>(
         // started, so it always runs to completion before a detach applies.
         let script = wrap_step(&preview.target.path, body);
         if let Err(result) =
-            runner::launch_step(transport, &preview.run_id, key, &script, &mut reattaches).await
+            runner::launch_step(transport, &preview.run_id, key, &script, &mut connection).await
         {
             return Followed::Done(result);
         }
@@ -2143,14 +2177,23 @@ async fn follow<T: Transport>(
         let tx = line_tx;
         match mode {
             FollowMode::Launch => {
-                runner::follow_existing(transport, &preview.run_id, key, &tx, &mut reattaches).await
+                runner::follow_existing(transport, &preview.run_id, key, &tx, &mut connection).await
             }
-            FollowMode::Attach => runner::attach_step(transport, &preview.run_id, key, &tx).await,
+            FollowMode::Attach => {
+                runner::attach_step(transport, &preview.run_id, key, &tx, &mut connection).await
+            }
         }
     };
     // All output is delivered before the caller reports the result.
     let forward = async {
-        while let Some(line) = line_rx.recv().await {
+        while let Some(observed) = line_rx.recv().await {
+            let line = match observed {
+                runner::Observed::Line(line) => line,
+                runner::Observed::Drained(acknowledge) => {
+                    let _ = acknowledge.send(());
+                    continue;
+                }
+            };
             if let Some(journal) = journal {
                 journal.output_line(key, &line);
             }
@@ -2161,7 +2204,7 @@ async fn follow<T: Transport>(
             let _ = events.send(to_event(line));
         }
     };
-    if let Some(detach) = detach {
+    let followed = if let Some(detach) = detach {
         tokio::select! {
             biased;
             _ = wait_for_detach(detach) => Followed::Detached,
@@ -2170,7 +2213,9 @@ async fn follow<T: Transport>(
     } else {
         let (result, ()) = tokio::join!(step, forward);
         Followed::Done(result)
-    }
+    };
+    *result_seen_at_ms = connection.result_seen_at_ms;
+    followed
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2192,6 +2237,7 @@ async fn maintenance<T: Transport>(
     };
     let _ = events.send(DeployEvent::MaintenanceStarted { phase });
     let output = |line| DeployEvent::MaintenanceOutput { phase, line };
+    let mut result_seen_at_ms = None;
     let followed = follow(
         transport,
         preview,
@@ -2203,6 +2249,7 @@ async fn maintenance<T: Transport>(
         output,
         mode,
         journal,
+        &mut result_seen_at_ms,
     )
     .await;
     let (status, exit_code) = match &followed {
@@ -2210,7 +2257,12 @@ async fn maintenance<T: Transport>(
         Followed::Detached => (StepStatus::Unknown, None),
         Followed::NotLaunched => (StepStatus::NotStarted, None),
     };
-    let times = seen_times(&status, mode == FollowMode::Launch, started_at_ms);
+    let times = seen_times(
+        &status,
+        mode == FollowMode::Launch,
+        started_at_ms,
+        result_seen_at_ms,
+    );
     let _ = events.send(DeployEvent::MaintenanceFinished {
         phase,
         status,
@@ -2222,17 +2274,26 @@ async fn maintenance<T: Transport>(
 
 /// What this Mac saw of a step or maintenance phase: an end only for an ok
 /// or failed result this run launched and saw, nothing if it never started.
-fn seen_times(status: &StepStatus, launched: bool, started_at_ms: Option<u128>) -> StepTimes {
+fn seen_times(
+    status: &StepStatus,
+    launched: bool,
+    started_at_ms: Option<u128>,
+    result_seen_at_ms: Option<u128>,
+) -> StepTimes {
     match status {
         StepStatus::NotStarted => StepTimes::default(),
-        StepStatus::Ok | StepStatus::Failed if launched => StepTimes {
-            started_at_ms,
-            finished_at_ms: Some(now_ms()),
-        },
+        StepStatus::Ok | StepStatus::Failed if launched && result_seen_at_ms.is_none() => {
+            StepTimes {
+                started_at_ms,
+                finished_at_ms: Some(now_ms()),
+                result_seen_at_ms: None,
+            }
+        }
         // Unknown, or a result first seen by a later attach.
         _ => StepTimes {
             started_at_ms,
             finished_at_ms: None,
+            result_seen_at_ms,
         },
     }
 }
@@ -2534,6 +2595,7 @@ mod tests {
         launch: Launch,
         /// The next observe drops the connection after this many lines.
         drop_after: Mutex<Option<usize>>,
+        running_at_reattach: AtomicBool,
         vanishes: bool,
         gate: Option<Arc<Notify>>,
         /// Holds the launch itself (before the step exists) until notified.
@@ -2831,6 +2893,13 @@ mod tests {
             match self.launched.lock().unwrap().get(&key) {
                 None => "not-started".into(),
                 Some(&rule) if self.rules[rule].vanishes => "gone".into(),
+                Some(&rule)
+                    if self.rules[rule]
+                        .running_at_reattach
+                        .swap(false, Ordering::SeqCst) =>
+                {
+                    "running".into()
+                }
                 Some(&rule) => format!("exited {}", self.rules[rule].code),
             }
         }
@@ -3804,6 +3873,16 @@ mod tests {
         assert!(receipt.mutation_started);
         assert_eq!(receipt.maintenance_up_status, Some(StepStatus::Unknown));
         assert!(receipt.app_left_down);
+        assert_eq!(receipt.last_message.as_deref(), Some("The connection was lost. Shipslip could not re-attach. The step's result is not known."));
+        for gaps in [
+            &receipt.maintenance_up_connection_gaps,
+            &receipt.steps[0].connection_gaps,
+        ] {
+            assert_eq!(gaps.len(), 1);
+            assert_eq!(gaps[0].reattached_at_ms, None);
+            assert!(gaps[0].detail.contains("reset"));
+            assert!(gaps[0].detail.contains("refused"));
+        }
     }
 
     #[tokio::test]
@@ -4100,6 +4179,26 @@ mod tests {
         let events = deploy(&fake, &["php artisan migrate --force"]).await;
 
         assert_eq!(output(&events, 1), ["a", "b", "c"]);
+        let before_drop = events
+            .iter()
+            .position(|event| matches!(event, DeployEvent::Output { line, .. } if line == "a"))
+            .unwrap();
+        let lost = events
+            .iter()
+            .position(|event| matches!(event, DeployEvent::ConnectionLost { .. }))
+            .unwrap();
+        let attached = events
+            .iter()
+            .position(|event| matches!(event, DeployEvent::Reattached { .. }))
+            .unwrap();
+        let after_drop = events
+            .iter()
+            .position(|event| matches!(event, DeployEvent::Output { line, .. } if line == "b"))
+            .unwrap();
+        assert!(
+            before_drop < lost && lost < attached && attached < after_drop,
+            "{events:?}"
+        );
         assert!(events.contains(&DeployEvent::StepFinished {
             index: 1,
             status: StepStatus::Failed,
@@ -4171,6 +4270,7 @@ mod tests {
             |line| DeployEvent::Output { index: 1, line },
             FollowMode::Launch,
             None,
+            &mut None,
         )
         .await;
         assert!(matches!(followed, Followed::NotLaunched));
@@ -6178,7 +6278,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn step_reattached_in_the_same_run_is_timed_when_its_result_is_seen() {
+    async fn step_finished_during_gap_records_seen_time_without_guessing_its_end() {
         let fake = Arc::new(preflight().on("git merge --ff-only", &[], 0).drops(
             "migrate",
             &["a", "b", "c"],
@@ -6194,6 +6294,38 @@ mod tests {
         assert_eq!(fake.reconnects.load(Ordering::SeqCst), 1);
         assert_eq!(fake.launched("migrate"), 1);
         assert_eq!(receipt.steps[1].status, ReceiptStepStatus::Failed);
+        let connection_events: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    DeployEvent::ConnectionLost { .. } | DeployEvent::Reattached { .. }
+                )
+            })
+            .collect();
+        let target = ConnectionTarget::Step { index: 1 };
+        let [DeployEvent::ConnectionLost {
+            target: lost_target,
+            at_ms: lost,
+            detail,
+        }, DeployEvent::Reattached {
+            target: attached_target,
+            at_ms: attached,
+        }] = connection_events.as_slice()
+        else {
+            panic!("missing connection events: {connection_events:?}");
+        };
+        assert_eq!(*lost_target, target);
+        assert_eq!(*attached_target, target);
+        assert!(lost <= attached);
+        assert!(detail.contains("reset"));
+        let gap = &receipt.steps[1].connection_gaps[0];
+        assert_eq!(gap.lost_at_ms, *lost);
+        assert_eq!(gap.reattached_at_ms, Some(*attached));
+        assert!(receipt
+            .warnings
+            .iter()
+            .all(|warning| !warning.contains("reset")));
         assert!(events.iter().any(|event| matches!(
             event,
             DeployEvent::StepFinished {
@@ -6203,7 +6335,112 @@ mod tests {
                 ..
             }
         )));
+        assert_eq!(receipt.steps[1].finished_at_ms, None);
+        let saved = serde_json::to_value(&receipt).unwrap();
+        assert!(saved["steps"][1]["result_seen_at_ms"].is_number());
+        assert_eq!(
+            saved["steps"][1]["connection_gaps"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn step_still_running_at_reattach_gets_a_normal_end() {
+        let fake =
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .drops("migrate", &["a", "b"], 0, 1);
+        fake.rules
+            .last()
+            .unwrap()
+            .running_at_reattach
+            .store(true, Ordering::SeqCst);
+        let fake = Arc::new(fake);
+        let (receipt, events) = timed_run(
+            fake.clone(),
+            &["php artisan migrate --force"],
+            RunPlan::Deploy,
+        )
+        .await;
+        assert_eq!(fake.launched("migrate"), 1);
+        assert_eq!(receipt.steps[1].connection_gaps.len(), 1);
+        assert_eq!(receipt.steps[1].result_seen_at_ms, None);
         assert_step_times(&receipt, &events, &[0, 1]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn maintenance_records_its_gaps_and_a_result_seen_during_the_gap() {
+        let fake = Arc::new(
+            preflight()
+                .drops("php artisan down", &["down"], 0, 0)
+                .on("git merge --ff-only", &[], 0)
+                .drops("php artisan up", &["up"], 0, 0),
+        );
+        let preview = prepare(&trusted(maintenance_target(false, &[])), &*fake)
+            .await
+            .unwrap();
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, _handle) =
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
+        let events = collect_timed(rx).await;
+        let receipt = crate::receipt::read(journal.path()).unwrap();
+        assert_eq!(receipt.outcome, Some(DeployOutcome::Succeeded));
+        for (phase, gaps, times) in [
+            (
+                MaintenancePhase::Down,
+                &receipt.maintenance_down_connection_gaps,
+                receipt.maintenance_down_times(),
+            ),
+            (
+                MaintenancePhase::Up,
+                &receipt.maintenance_up_connection_gaps,
+                receipt.maintenance_up_times(),
+            ),
+        ] {
+            assert_eq!(gaps.len(), 1);
+            assert_eq!(times.finished_at_ms, None);
+            assert_eq!(times.result_seen_at_ms, gaps[0].reattached_at_ms);
+            assert!(times.result_seen_at_ms.is_some());
+            assert_eq!(maintenance_finished_times(&events, phase), times);
+            assert!(events.iter().any(|event| matches!(event,
+                DeployEvent::ConnectionLost { target: ConnectionTarget::Maintenance { phase: observed }, .. } if *observed == phase)));
+        }
+        assert_eq!(fake.launched("php artisan down"), 1);
+        assert_eq!(fake.launched("php artisan up"), 1);
+        assert_eq!(receipt.version, 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn journal_failure_while_recording_a_gap_does_not_run_the_step_again() {
+        let dir = TempReceipts::new();
+        let root = dir.0.clone();
+        let mut fake =
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .drops("migrate", &["before"], 0, 1);
+        fake.last().on_run = Some(Box::new(move || {
+            std::fs::remove_dir_all(&root).unwrap();
+            std::fs::write(&root, "not a directory").unwrap();
+        }));
+        let fake = Arc::new(fake);
+        let preview = prepared(&fake, false, &["php artisan migrate --force"]).await;
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, _handle) = execute_recorded(preview, confirmation, fake.clone(), journal).unwrap();
+        let events = collect_timed(rx).await;
+        assert!(
+            matches!(events.last(), Some(DeployEvent::RunError { reason }) if reason.contains("could not save")),
+            "{events:?}"
+        );
+        assert_eq!(fake.launched("migrate"), 1);
+        assert_eq!(fake.reconnects.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(start_paused = true)]
@@ -6227,6 +6464,23 @@ mod tests {
             .started_at_ms
             .is_some_and(|start| start >= receipt.started_at_ms));
         assert_eq!(times.finished_at_ms, None);
+        assert_eq!(receipt.steps[1].connection_gaps.len(), 1);
+        assert_eq!(receipt.steps[1].connection_gaps[0].reattached_at_ms, None);
+        assert!(receipt.steps[1].connection_gaps[0].detail.contains("reset"));
+        assert!(receipt.steps[1].connection_gaps[0]
+            .detail
+            .contains("refused"));
+        assert_eq!(receipt.last_message.as_deref(), Some("The connection was lost. Shipslip could not re-attach. The step's result is not known."));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, DeployEvent::ConnectionLost { .. }))
+                .count(),
+            1
+        );
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, DeployEvent::Reattached { .. })));
     }
 
     #[tokio::test]
@@ -6366,6 +6620,7 @@ mod tests {
         let sent_at = journal.snapshot().maintenance_down_started_at_ms;
         assert!(sent_at.is_some());
         let detached = StepTimes {
+            result_seen_at_ms: None,
             started_at_ms: sent_at,
             finished_at_ms: None,
         };
@@ -6502,6 +6757,7 @@ mod tests {
             Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
         );
         let observed = StepTimes {
+            result_seen_at_ms: None,
             started_at_ms: sent_at,
             finished_at_ms: None,
         };
