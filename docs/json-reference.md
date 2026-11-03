@@ -77,6 +77,17 @@ The local receipt stores the same optional field without changing its version.
 Older receipts omit it; an absent reason does not imply a quiet log or a passed
 smoke check. An unconfigured smoke check stays `not_configured`.
 
+## Unfinished runs
+
+Receipt list rows may include the optional `unfinished_cause` field: why this
+Mac stopped watching a run that is still open, as recorded at the time.
+`detached` means the user detached and the running step kept running on the
+server; `app_closed` means the app quit without detaching; `connection_lost`
+means the connection dropped and Shipslip could not re-attach. The local
+receipt stores the same optional field without changing its version. An
+absent cause (older receipts, a crash, power loss) says nothing about why the
+run did not finish.
+
 Log watch flags distinguish `log_watch_interrupted` and `log_unreadable`
 (attention) from `no_log_file_yet`, `log_watch_stopped_early`, and
 `log_watch_skipped_in_maintenance` (quiet information). These replace the
@@ -182,6 +193,7 @@ including `anchor.plan`, `server_marker_outcome`, and `check.reason`.
   "receipt.step.kind": ["maintenance_down", "step", "maintenance_up"],
   "receipt.step.status": ["pending", "running", "ok", "failed", "unknown", "not_started", "skipped"],
   "receipt.checks_skip_reason": ["AppLeftInMaintenance"],
+  "receipt.unfinished_cause": ["detached", "app_closed", "connection_lost"],
   "receipt.watch.status": ["Complete", "Partial", "Unavailable", "Cancelled", "NotRun", "NoLogSeen"],
   "receipt.watch.phase": ["During", "After"],
   "receipt.smoke.kind": ["not_configured", "skipped", "passed", "failed"],

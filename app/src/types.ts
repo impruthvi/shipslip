@@ -135,6 +135,8 @@ export type Span =
 export interface Guidance {
   lines: Span[][];
   copyWithheld: boolean;
+  /** The line naming `slip attach`, left out where the app offers Attach. */
+  attachLine: number | null;
 }
 
 export type StepStatus = "ok" | "failed" | "unknown" | "notRun" | "running" | "skipped";

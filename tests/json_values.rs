@@ -3,7 +3,7 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 use shipslip::logs::*;
 use shipslip::observation::CheckSkipReason;
-use shipslip::receipt::{ReceiptKind, ReceiptStepStatus};
+use shipslip::receipt::{ReceiptKind, ReceiptStepStatus, UnfinishedCause};
 use shipslip::records::*;
 use shipslip::{LogPhase, RunPlan, WatchStatus};
 use std::collections::BTreeSet;
@@ -453,6 +453,15 @@ fn serialized_fixed_values_match_the_json_reference() {
         None,
     );
     reference.check(
+        "receipt.unfinished_cause",
+        every!(UnfinishedCause {
+            Detached,
+            AppClosed,
+            ConnectionLost
+        }),
+        None,
+    );
+    reference.check(
         "receipt.checks_skip_reason",
         every!(CheckSkipReason {
             AppLeftInMaintenance
@@ -593,6 +602,7 @@ fn serialized_fixed_values_match_the_json_reference() {
         },
         flags: vec![],
         app_left_down: false,
+        unfinished_cause: None,
         recipe_steps: 0,
         steps: vec![],
     };

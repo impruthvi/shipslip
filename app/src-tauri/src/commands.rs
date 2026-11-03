@@ -586,7 +586,10 @@ pub fn exit(handle: &tauri::AppHandle) {
 }
 
 #[tauri::command]
-pub fn quit_now(handle: tauri::AppHandle) {
+pub fn quit_now(app: tauri::State<'_, Arc<App>>, handle: tauri::AppHandle) {
+    if let Some(sessions) = &app.sessions {
+        sessions.close_hard();
+    }
     exit(&handle);
 }
 

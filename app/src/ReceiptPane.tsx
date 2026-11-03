@@ -36,6 +36,8 @@ interface Props {
   head?: ReactNode;
   /** The deploy button and recovery choices, above the slip. */
   entry?: ReactNode;
+  /** The run the panel offers its own Attach for. */
+  attachRunId?: string | null;
 }
 
 /** A new receipt starts with its own slip state (expanded errors, Copy). */
@@ -56,6 +58,7 @@ export function ReceiptPane({
   print = false,
   head,
   entry,
+  attachRunId = null,
 }: Props) {
   const drag = useRef<{ x: number; width: number } | null>(null);
   const pane = useRef<HTMLElement>(null);
@@ -133,6 +136,7 @@ export function ReceiptPane({
             env={shown.meta.env}
             context={withoutLinks(context(shown.meta.cell, shown.meta.role), shown.meta.cell)}
             onView={onView}
+            attachOffered={shown.opened.kind === "receipt" && shown.opened.runId === attachRunId}
           />
         </div>
       )}

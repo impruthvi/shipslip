@@ -2,7 +2,7 @@
 //! can follow it, recommended first. Built only from the saved receipt.
 
 use serde::Serialize;
-use shipslip::receipt::ReceiptKind;
+use shipslip::receipt::{ReceiptKind, UnfinishedCause};
 use shipslip::records::{OutcomeKind, ReceiptSummary, StepKind, StepState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -72,13 +72,8 @@ pub fn recovery(receipt: &ReceiptSummary) -> Option<RecoveryView> {
             actions,
         })
     };
-    let lost = |step: Option<usize>| match step {
-        Some(step) => {
-            format!(
-                "Lost the connection during step {step}. It may still be running on the server."
-            )
-        }
-        None => "The run did not finish. It may still be running on the server.".into(),
+    let lost = |step: usize| {
+        format!("Lost the connection during step {step}. It may still be running on the server.")
     };
 
     if receipt.outcome.unfinished {
@@ -90,7 +85,16 @@ pub fn recovery(receipt: &ReceiptSummary) -> Option<RecoveryView> {
             }
             _ => None,
         });
-        return view(lost(step), None, vec![action(RecoveryOp::Attach)]);
+        let during = match (receipt.kind, step) {
+            (ReceiptKind::Up, _) => During::BringingUp,
+            (_, Some(step)) => During::Step(step),
+            (_, None) => During::NotKnown,
+        };
+        return view(
+            unfinished(receipt.unfinished_cause, during),
+            None,
+            vec![action(RecoveryOp::Attach)],
+        );
     }
 
     let mut actions = Vec::new();
@@ -132,7 +136,7 @@ pub fn recovery(receipt: &ReceiptSummary) -> Option<RecoveryView> {
             actions.push(action(RecoveryOp::FromStep { step: step + 1 }));
             (format!("Stopped after step {step}. {rest}"), None)
         }
-        (_, OutcomeKind::Unknown { step }) => (lost(Some(step)), Some(CHECK_FIRST)),
+        (_, OutcomeKind::Unknown { step }) => (lost(step), Some(CHECK_FIRST)),
         (_, OutcomeKind::StoppedInMaintenance) => (
             "No deploy steps ran, so the code on the server did not change.".into(),
             None,
@@ -144,6 +148,47 @@ pub fn recovery(receipt: &ReceiptSummary) -> Option<RecoveryView> {
         return None;
     }
     view(sentence, advice, actions)
+}
+
+/// Why an open run was left, from what was recorded. Without a record (a
+/// crash, power loss) it says only that the run did not finish.
+enum During {
+    Step(usize),
+    BringingUp,
+    NotKnown,
+}
+
+fn unfinished(cause: Option<UnfinishedCause>, at: During) -> String {
+    let (during, what) = match at {
+        During::Step(step) => (format!(" during step {step}"), "The step".to_string()),
+        During::BringingUp => (
+            " while bringing the app out of maintenance".into(),
+            "php artisan up".into(),
+        ),
+        During::NotKnown => (String::new(), "The run".into()),
+    };
+    match cause {
+        Some(UnfinishedCause::Detached) => {
+            format!("Detached on quit{during}. {what} kept running on the server.")
+        }
+        Some(UnfinishedCause::AppClosed) => {
+            format!("The app closed{during}. {what} may still be running on the server.")
+        }
+        Some(UnfinishedCause::ConnectionLost) => {
+            format!("Lost the connection{during}. {what} may still be running on the server.")
+        }
+        None => match at {
+            During::Step(step) => {
+                format!("The run did not finish. Step {step} may still be running on the server.")
+            }
+            During::BringingUp => {
+                "The run did not finish. php artisan up may still be running on the server.".into()
+            }
+            During::NotKnown => {
+                "The run did not finish. It may still be running on the server.".into()
+            }
+        },
+    }
 }
 
 #[cfg(test)]
@@ -230,7 +275,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             open.sentence,
-            "Lost the connection during step 3. It may still be running on the server."
+            "The run did not finish. Step 3 may still be running on the server."
         );
         assert_eq!(ops(&open), [RecoveryOp::Attach]);
 
@@ -239,9 +284,68 @@ mod tests {
             |_| {},
         ))
         .unwrap();
-        assert_eq!(finished.sentence, open.sentence);
+        assert_eq!(
+            finished.sentence,
+            "Lost the connection during step 3. It may still be running on the server."
+        );
         assert_eq!(finished.advice.as_deref(), Some(CHECK_FIRST));
         assert!(finished.actions.is_empty());
+    }
+
+    #[test]
+    fn an_open_run_says_the_recorded_cause_and_never_guesses_one() {
+        let open = |cause: Value, running: Option<usize>| {
+            recovery(&receipt(Value::Null, |v| {
+                v["status"] = json!("InProgress");
+                v["unfinished_cause"] = cause;
+                if let Some(step) = running {
+                    v["steps"][step]["status"] = json!("Running");
+                }
+            }))
+            .unwrap()
+        };
+        for (cause, expected) in [
+            (
+                json!("detached"),
+                "Detached on quit during step 2. The step kept running on the server.",
+            ),
+            (
+                json!("app_closed"),
+                "The app closed during step 2. The step may still be running on the server.",
+            ),
+            (
+                json!("connection_lost"),
+                "Lost the connection during step 2. The step may still be running on the server.",
+            ),
+            (
+                Value::Null,
+                "The run did not finish. Step 2 may still be running on the server.",
+            ),
+        ] {
+            let view = open(cause.clone(), Some(2));
+            assert_eq!(view.sentence, expected, "{cause}");
+            assert_eq!(ops(&view), [RecoveryOp::Attach]);
+        }
+        assert_eq!(
+            open(json!("app_closed"), None).sentence,
+            "The app closed. The run may still be running on the server."
+        );
+        assert_eq!(
+            open(Value::Null, None).sentence,
+            "The run did not finish. It may still be running on the server."
+        );
+    }
+
+    #[test]
+    fn an_open_bring_up_names_php_artisan_up_rather_than_a_step() {
+        let mut open = up(Value::Null);
+        open.outcome.unfinished = true;
+        open.unfinished_cause = Some(UnfinishedCause::AppClosed);
+        assert_eq!(
+            recovery(&open).unwrap().sentence,
+            "The app closed while bringing the app out of maintenance. \
+             php artisan up may still be running on the server."
+        );
     }
 
     #[test]

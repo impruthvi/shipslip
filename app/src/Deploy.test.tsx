@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 import * as fixtures from "./fixtures.gen";
@@ -9,6 +9,7 @@ import type {
   LiveRuns,
   LoadResult,
   PrepareProgress,
+  ReceiptResult,
   RecoveryReview,
   RunBatch,
   RunInfo,
@@ -16,11 +17,12 @@ import type {
 } from "./types";
 
 const loadMap = vi.fn<() => Promise<LoadResult>>();
+const loadReceipt = vi.fn<(generation: number, id: number) => Promise<ReceiptResult>>();
 vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
     compare: vi.fn(),
-    loadReceipt: async () => ({ kind: "notFound" }),
+    loadReceipt: (generation: number, id: number) => loadReceipt(generation, id),
     copyText: vi.fn(),
     onFocus: async () => () => {},
     receiptSeen: async () => {},
@@ -94,6 +96,7 @@ function ready(over: Partial<Extract<DeployEntry, { kind: "ready" }>> = {}): Dep
 beforeEach(() => {
   localStorage.clear();
   loadMap.mockReset().mockResolvedValue(fixtures.map);
+  loadReceipt.mockReset().mockResolvedValue({ kind: "notFound" });
   entry.mockReset().mockResolvedValue(ready());
   prepare.mockReset();
   confirm.mockReset();
@@ -908,6 +911,43 @@ test("attach shows the recorded run and what is left; a missing run is refused",
   fireEvent.click(screen.getByRole("button", { name: "Attach…" }));
   await settle();
   expect(screen.getByRole("heading", { level: 2, name: "Nothing to continue" })).toBeInTheDocument();
+});
+
+test("an unfinished run says the recorded cause, and only the panel's Attach", async () => {
+  const sentences = {
+    detached: "Detached on quit during step 1. The step kept running on the server.",
+    appClosed: "The app closed during step 1. The step may still be running on the server.",
+    connectionLost: "Lost the connection during step 1. The step may still be running on the server.",
+    notRecorded: "The run did not finish. Step 1 may still be running on the server.",
+  };
+  expect(Object.keys(fixtures.unfinishedRecoveries).sort()).toEqual(Object.keys(sentences).sort());
+  for (const [cause, sentence] of Object.entries(sentences)) {
+    entry.mockResolvedValue(ready({ recovery: fixtures.unfinishedRecoveries[cause] }));
+    await renderApp();
+    const pane = within(screen.getByRole("complementary", { name: "Receipt" }));
+    expect(pane.getByText(sentence)).toBeInTheDocument();
+    expect(pane.getByRole("button", { name: "Attach…" })).toBeInTheDocument();
+    expect(pane.queryByText(/slip attach/)).toBeNull();
+    cleanup();
+  }
+});
+
+test("the unfinished run's slip drops its slip attach hint only where the panel offers Attach", async () => {
+  const recovery = fixtures.unfinishedRecoveries.appClosed!;
+  const unfinished = fixtures.slips.unfinished;
+  if (unfinished.kind !== "receipt") throw new Error("fixture");
+  const slip = { ...unfinished, runId: recovery.runId };
+  loadReceipt.mockImplementation(async (generation, id) => ({ kind: "opened", generation, id, slip }));
+  entry.mockResolvedValue(ready({ recovery }));
+  await renderApp();
+  const pane = within(screen.getByRole("complementary", { name: "Receipt" }));
+  expect(pane.getByText("Unfinished")).toBeInTheDocument();
+  expect(pane.queryByRole("button", { name: /^Copy slip attach/ })).toBeNull();
+  cleanup();
+
+  entry.mockResolvedValue(ready({ recovery: { ...recovery, runId: "another-run" } }));
+  await renderApp();
+  expect(screen.getByRole("button", { name: /^Copy slip attach/ })).toBeInTheDocument();
 });
 
 test("an unknown result says to check the server and offers no action", async () => {
