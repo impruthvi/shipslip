@@ -2174,7 +2174,7 @@ fn a_lock_taken_while_the_preview_was_open_ends_before_anything_ran() {
 }
 
 #[test]
-fn lock_held_refusals_say_live_or_stale_and_offer_break_lock() {
+fn recent_lock_refusals_show_the_holder_short_commit_and_heartbeat_without_break_lock() {
     let key = Key {
         checkout: "/work/app".into(),
         env: "production".into(),
@@ -2182,24 +2182,99 @@ fn lock_held_refusals_say_live_or_stale_and_offer_break_lock() {
     let held = |age_secs| {
         prepare_error(
             PrepareError::LockHeld(shipslip::LockInfo {
-                owner: None,
+                owner: Some(shipslip::LockOwner {
+                    run_id: "another-run".into(),
+                    user: "alex".into(),
+                    machine: "MacBook".into(),
+                    pid: 42,
+                    started_at: 0,
+                    target_sha: "1234567890abcdef".into(),
+                }),
                 age_secs,
             }),
             &key,
             "web1",
         )
     };
-    let live = held(30);
-    assert_eq!(live.blocked_kind, Some(BlockedKind::LockHeld));
-    assert!(live.message.contains("(live)"), "{}", live.message);
-    let Some(Span::Command { copy_text, .. }) = &live.next_step else {
-        panic!("lock held must offer break-lock: {:?}", live.next_step);
-    };
-    assert!(
-        copy_text.ends_with("slip break-lock production"),
-        "{copy_text}"
+    for (seconds, age) in [
+        (0, "0 seconds"),
+        (1, "1 second"),
+        (30, "30 seconds"),
+        (59, "59 seconds"),
+        (60, "1 minute"),
+        (shipslip::STALE_AFTER.as_secs() - 1, "1 minute"),
+    ] {
+        let error = held(seconds);
+        assert_eq!(error.blocked_kind, Some(BlockedKind::LockHeld));
+        assert_eq!(
+            error.message,
+            format!("alex@MacBook · target 1234567. Last heartbeat {age} ago.")
+        );
+        assert!(error.next_step.is_none());
+    }
+}
+
+#[test]
+fn a_recent_lock_with_unreadable_holder_details_still_only_offers_waiting() {
+    let error = prepare_error(
+        PrepareError::LockHeld(shipslip::LockInfo {
+            owner: None,
+            age_secs: 30,
+        }),
+        &Key {
+            checkout: "/work/app".into(),
+            env: "production".into(),
+        },
+        "web1",
     );
-    assert!(held(600).message.contains("(stale)"));
+    assert_eq!(error.blocked_kind, Some(BlockedKind::LockHeld));
+    assert_eq!(
+        error.message,
+        "The lock holder's details could not be read. Last heartbeat 30 seconds ago."
+    );
+    assert!(error.next_step.is_none());
+}
+
+#[test]
+fn stale_lock_refusals_start_at_the_library_threshold_and_offer_review_before_breaking() {
+    let key = Key {
+        checkout: "/work/app".into(),
+        env: "production".into(),
+    };
+    for (seconds, age) in [
+        (shipslip::STALE_AFTER.as_secs(), "2 minutes"),
+        (600, "10 minutes"),
+        (3600, "60 minutes"),
+    ] {
+        let error = prepare_error(
+            PrepareError::LockHeld(shipslip::LockInfo {
+                owner: None,
+                age_secs: seconds,
+            }),
+            &key,
+            "web1",
+        );
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["blockedKind"],
+            "staleLock"
+        );
+        assert_eq!(
+            error.message,
+            format!("The lock holder's details could not be read. The holder stopped sending a heartbeat {age} ago. Review the holder and check the old run on the server before breaking the lock.")
+        );
+        let Some(Span::Command { copy_text, .. }) = &error.next_step else {
+            panic!("a stale lock must offer break-lock: {:?}", error.next_step);
+        };
+        assert_eq!(copy_text, "cd '/work/app' && slip break-lock production");
+    }
+}
+
+#[test]
+fn other_preflight_refusals_keep_their_next_steps() {
+    let key = Key {
+        checkout: "/work/app".into(),
+        env: "production".into(),
+    };
 
     let fetch = prepare_error(
         PrepareError::Blocked(shipslip::BlockReason::FetchFailed("denied".into())),

@@ -68,6 +68,7 @@ pub enum ErrorCode {
 #[serde(rename_all = "camelCase")]
 pub enum BlockedKind {
     LockHeld,
+    StaleLock,
     FetchFailed,
     UpToDate,
 }
@@ -1764,9 +1765,36 @@ fn prepare_error(error: PrepareError, key: &Key, alias: &str) -> CommandError {
     match error {
         PrepareError::Transport(e) => connection(e, alias),
         PrepareError::LockHeld(info) => {
-            let mut result = CommandError::new(ErrorCode::Blocked, format!("Deploy lock {info} ({}). Check the old run on the server; use slip break-lock {env} only after reviewing the holder.", if info.is_stale() { "stale" } else { "live" }));
-            result.blocked_kind = Some(BlockedKind::LockHeld);
-            result.next_step = break_lock_command(&key.checkout.to_string_lossy(), env);
+            let (amount, unit) = if info.age_secs >= 60 {
+                (info.age_secs / 60, "minute")
+            } else {
+                (info.age_secs, "second")
+            };
+            let age = format!("{amount} {unit}{}", if amount == 1 { "" } else { "s" });
+            let holder = match &info.owner {
+                Some(owner) => format!(
+                    "{}@{} · target {}",
+                    owner.user,
+                    owner.machine,
+                    owner.target_sha.chars().take(7).collect::<String>()
+                ),
+                None => "The lock holder's details could not be read".into(),
+            };
+            let stale = info.is_stale();
+            let message = if stale {
+                format!("{holder}. The holder stopped sending a heartbeat {age} ago. Review the holder and check the old run on the server before breaking the lock.")
+            } else {
+                format!("{holder}. Last heartbeat {age} ago.")
+            };
+            let mut result = CommandError::new(ErrorCode::Blocked, message);
+            result.blocked_kind = Some(if stale {
+                BlockedKind::StaleLock
+            } else {
+                BlockedKind::LockHeld
+            });
+            if stale {
+                result.next_step = break_lock_command(&key.checkout.to_string_lossy(), env);
+            }
             result
         }
         PrepareError::Blocked(shipslip::BlockReason::FetchFailed(output)) => {
@@ -2144,18 +2172,27 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         checkout: "/Users/you/code/shop".into(),
         env: "production".into(),
     };
-    views.insert(
-        "lockHeld",
-        to_value(prepare_error(
-            PrepareError::LockHeld(shipslip::LockInfo {
-                owner: None,
-                age_secs: 30,
-            }),
-            &checkout,
-            "shop-prod",
-        ))
-        .unwrap(),
-    );
+    for (name, age_secs) in [("lockHeld", 30), ("staleLock", 600)] {
+        views.insert(
+            name,
+            to_value(prepare_error(
+                PrepareError::LockHeld(shipslip::LockInfo {
+                    owner: Some(shipslip::LockOwner {
+                        run_id: "another-run".into(),
+                        user: "alex".into(),
+                        machine: "MacBook".into(),
+                        pid: 42,
+                        started_at: 0,
+                        target_sha: "1234567890abcdef".into(),
+                    }),
+                    age_secs,
+                }),
+                &checkout,
+                "shop-prod",
+            ))
+            .unwrap(),
+        );
+    }
 
     views.insert("review", to_value(&review).unwrap());
     views.insert("runInfo", to_value(&info).unwrap());

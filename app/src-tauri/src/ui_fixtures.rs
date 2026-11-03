@@ -503,6 +503,7 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
     );
     item(&mut out, "refusal", "CommandError", deploy("refusal"));
     item(&mut out, "lockHeld", "CommandError", deploy("lockHeld"));
+    item(&mut out, "staleLock", "CommandError", deploy("staleLock"));
     item(&mut out, "trustReview", "TrustReview", deploy("trust"));
     item(
         &mut out,

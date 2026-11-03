@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
+import { api } from "./api";
 import * as fixtures from "./fixtures.gen";
 import type {
   CommandError,
@@ -681,8 +682,14 @@ test.each([
   },
   {
     error: fixtures.lockHeld,
-    title: "Another run holds the server lock",
+    title: "Another run deploying",
     body: fixtures.lockHeld.message,
+    command: null,
+  },
+  {
+    error: fixtures.staleLock,
+    title: "Stale lock",
+    body: fixtures.staleLock.message,
     command: "slip break-lock production",
   },
   {
@@ -707,14 +714,59 @@ test.each([
   if (error.connectionKind === "hostKeyChanged") expect(main.queryByText("ssh shop-prod")).toBeNull();
 });
 
-test("a held lock can be checked again", async () => {
+test.each([fixtures.lockHeld, fixtures.staleLock])(
+  "a $blockedKind can be checked again",
+  async (error) => {
+    const { pending } = await openWorkspace();
+    await act(async () => pending.reject(error));
+    prepare.mockReturnValue(new Promise(() => {}));
+    fireEvent.click(screen.getByRole("button", { name: "Check again" }));
+    expect(prepare).toHaveBeenCalledTimes(2);
+    expect(prepare).toHaveBeenLastCalledWith(1, expect.any(Number), expect.any(String), "Deploy", expect.any(Function));
+    expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+  },
+);
+
+test.each([fixtures.lockHeld, fixtures.staleLock])(
+  "a $blockedKind shows the holder and short commit without claiming live state",
+  async (error) => {
+    const { pending } = await openWorkspace();
+    await act(async () => pending.reject(error));
+    const main = screen.getByRole("main");
+    expect(main).toHaveTextContent("alex@MacBook");
+    expect(main).toHaveTextContent("1234567");
+    expect(main).not.toHaveTextContent("1234567890abcdef");
+    expect(main).not.toHaveTextContent(/\blive\b/i);
+    expect(main).not.toHaveTextContent("Details");
+  },
+);
+
+test("a recent heartbeat offers only Check again, not a terminal command", async () => {
   const { pending } = await openWorkspace();
   await act(async () => pending.reject(fixtures.lockHeld));
-  prepare.mockReturnValue(new Promise(() => {}));
-  fireEvent.click(screen.getByRole("button", { name: "Check again" }));
-  expect(prepare).toHaveBeenCalledTimes(2);
-  expect(prepare).toHaveBeenLastCalledWith(1, expect.any(Number), expect.any(String), "Deploy", expect.any(Function));
-  expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
+  const main = within(screen.getByRole("main"));
+  expect(main.getByText(/Last heartbeat 30 seconds ago/)).toBeInTheDocument();
+  expect(main.getByRole("button", { name: "Check again" })).toBeInTheDocument();
+  expect(main.queryByText(/break-lock|terminal/i)).not.toBeInTheDocument();
+  expect(main.queryByRole("button", { name: /^Copy/ })).not.toBeInTheDocument();
+});
+
+test("a stale lock offers review guidance and a terminal version note below the copied command", async () => {
+  const { pending } = await openWorkspace();
+  await act(async () => pending.reject(fixtures.staleLock));
+  const main = within(screen.getByRole("main"));
+  expect(main.getByText(/stopped sending a heartbeat 10 minutes ago/)).toBeInTheDocument();
+  expect(main.getByText(/Review the holder and check the old run on the server/)).toBeInTheDocument();
+  const command = main.getByText("slip break-lock production");
+  const note = main.getByText(
+    /This runs the slip installed in your terminal\. Requires slip 0\.12\.0 or newer\./,
+  );
+  expect(command.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const copy = main.getByRole("button", { name: "Copy slip break-lock production" });
+  vi.mocked(api.copyText).mockResolvedValueOnce(undefined);
+  await act(async () => fireEvent.click(copy));
+  expect(api.copyText).toHaveBeenCalledWith("cd '/Users/you/code/shop' && slip break-lock production");
+  expect(main.getByRole("button", { name: "Copied" })).toBeInTheDocument();
 });
 
 test("an env already up to date offers a rerun from its refusal", async () => {

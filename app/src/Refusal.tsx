@@ -28,7 +28,9 @@ export function refusalWording(error: CommandError): Wording {
   }
   switch (error.blockedKind) {
     case "lockHeld":
-      return { title: "Another run holds the server lock" };
+      return { title: "Another run deploying" };
+    case "staleLock":
+      return { title: "Stale lock" };
     case "fetchFailed":
       return { title: "The server couldn't fetch the code" };
     case "upToDate":
@@ -78,7 +80,14 @@ export function Refusal({
       <p className="muted">{where}</p>
       <p className="workspace-message">{withCode(body ?? error.message)}</p>
       {step?.kind === "command" && (
-        <CommandBox prefix={step.prefix} command={step.command} copyText={step.copyText} />
+        <>
+          <CommandBox prefix={step.prefix} command={step.command} copyText={step.copyText} />
+          {error.blockedKind === "staleLock" && (
+            <p className="workspace-message muted">
+              This runs the slip installed in your terminal. Requires slip 0.12.0 or newer.
+            </p>
+          )}
+        </>
       )}
       {step?.kind === "text" && <p className="workspace-message">{step.text}</p>}
       {action && (
