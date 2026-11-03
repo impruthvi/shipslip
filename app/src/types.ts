@@ -308,9 +308,18 @@ export interface RecoveryReview {
   path: string;
   runId: string | null;
   targetSha: string | null;
-  phase: string;
-  /** `index` is the receipt's step number; `null` for `php artisan up` on its own. */
-  remainingSteps: { index: number | null; command: string }[];
+  /** What an Up does, in words; `null` for attach. */
+  phase: string | null;
+  /** Attach only: the command that was running. Watched until it ends, never run again. */
+  watched: RecoveryStep | null;
+  /** What runs next, in order. After a watched step, only if it succeeds. */
+  remainingSteps: RecoveryStep[];
+}
+
+/** `index` is the receipt's step number; `null` for `php artisan down` / `php artisan up`. */
+export interface RecoveryStep {
+  index: number | null;
+  command: string;
 }
 
 /** A preview the window's reload closed. Nothing ran on the server. */

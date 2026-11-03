@@ -465,7 +465,7 @@ fn up_review_requires_confirmation_and_expires_on_reload_without_ssh() {
         assert_eq!(review.operation, "up");
         assert_eq!(
             review.remaining_steps,
-            [RemainingStep {
+            [RecoveryStep {
                 index: None,
                 command: "php artisan up".into()
             }]
@@ -516,10 +516,9 @@ fn attach_reviews_saved_steps_and_refuses_a_changed_receipt_before_ssh() {
             .unwrap();
         assert_eq!(review.operation, "attach");
         assert_eq!(review.target_sha.as_deref(), Some(crate::fixture::NEW));
-        assert_eq!(review.remaining_steps.len(), 2);
-        // Receipt step numbers (0 is the fast-forward), and the phase in words.
-        assert_eq!(review.remaining_steps[0].index, Some(0));
-        assert_eq!(review.phase, "Preview");
+        // Nothing was sent, so attaching closes the run without running a step.
+        assert_eq!(review.watched, None);
+        assert_eq!(review.remaining_steps, []);
         assert_eq!(
             sessions
                 .confirm(&review.handle, None)
@@ -538,6 +537,237 @@ fn attach_reviews_saved_steps_and_refuses_a_changed_receipt_before_ssh() {
             ErrorCode::Changed
         );
         assert_eq!(sessions.connector.0.load(Ordering::SeqCst), 0);
+    });
+}
+
+/// A checkout whose production environment has maintenance and three recipe steps,
+/// with an unfinished deploy journaled by `record`. Nothing holds the lock.
+async fn unfinished_deploy(
+    fx: &Fixture,
+    sessions: &Arc<Sessions<Refuse>>,
+    record: impl FnOnce(&ReceiptJournal),
+) -> PathBuf {
+    let root = checkout(fx, "one");
+    let config = root.join(".shipslip.toml");
+    let text = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        text.replace("production = true", "production = true\nmaintenance = true")
+            .replace(
+                r#"steps = ["true"]"#,
+                r#"steps = ["composer install", "php artisan migrate --force", "php artisan optimize"]"#,
+            ),
+    )
+    .unwrap();
+    approve(sessions, &root).await;
+    let trusted = LoadedConfig::load(&root, None)
+        .unwrap()
+        .trusted_target("production", &fx.trust())
+        .unwrap();
+    let remote = Remote::default();
+    let preview = shipslip::prepare(&trusted, &remote).await.unwrap();
+    let journal =
+        ReceiptJournal::create(&fx.receipts(), trusted.project(), &root, &preview).unwrap();
+    shipslip::cancel(preview, &remote).await.unwrap();
+    journal.confirm().unwrap();
+    record(&journal);
+    root
+}
+
+/// Maintenance on and step 0 done, then step 1 sent and still running.
+fn running_step_1(journal: &ReceiptJournal) {
+    use shipslip::{MaintenancePhase, StepStatus};
+    journal
+        .begin_maintenance(MaintenancePhase::Down, 500)
+        .unwrap();
+    journal
+        .finish_maintenance(
+            MaintenancePhase::Down,
+            StepStatus::Ok,
+            Some(0),
+            StepTimes {
+                started_at_ms: Some(500),
+                finished_at_ms: Some(900),
+                result_seen_at_ms: None,
+            },
+        )
+        .unwrap();
+    journal.begin_step(0, 1_000).unwrap();
+    journal
+        .finish_step(
+            0,
+            StepStatus::Ok,
+            Some(0),
+            StepTimes {
+                started_at_ms: Some(1_000),
+                finished_at_ms: Some(2_200),
+                result_seen_at_ms: None,
+            },
+        )
+        .unwrap();
+    journal.begin_step(1, 3_000).unwrap();
+}
+
+fn step(index: Option<usize>, command: &str) -> RecoveryStep {
+    RecoveryStep {
+        index,
+        command: command.into(),
+    }
+}
+
+#[test]
+fn attach_review_lists_the_watched_step_apart_from_the_steps_that_will_run() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        let root = unfinished_deploy(&fx, &sessions, running_step_1).await;
+        let review = sessions
+            .review_attach(root, "production".into())
+            .await
+            .unwrap();
+        // Step 1 is observed until it ends, never sent again.
+        assert_eq!(review.watched, Some(step(Some(1), "composer install")));
+        assert_eq!(
+            review.remaining_steps,
+            [
+                step(Some(2), "php artisan migrate --force"),
+                step(Some(3), "php artisan optimize"),
+                step(None, "php artisan up"),
+            ]
+        );
+    });
+}
+
+#[test]
+fn attach_review_runs_nothing_after_a_recorded_failure() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        let root = unfinished_deploy(&fx, &sessions, |journal| {
+            running_step_1(journal);
+            journal
+                .finish_step(
+                    1,
+                    shipslip::StepStatus::Failed,
+                    Some(1),
+                    StepTimes::default(),
+                )
+                .unwrap();
+        })
+        .await;
+        let review = sessions
+            .review_attach(root, "production".into())
+            .await
+            .unwrap();
+        assert_eq!(review.watched, None);
+        assert_eq!(review.remaining_steps, []);
+    });
+}
+
+#[test]
+fn attach_review_follows_how_the_journal_left_the_run() {
+    use shipslip::{DeployOutcome, MaintenancePhase, StepStatus, StopReason};
+    let watched_and_left = |record: fn(&ReceiptJournal)| {
+        tauri::async_runtime::block_on(async {
+            let fx = Fixture::new();
+            let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+            let root = unfinished_deploy(&fx, &sessions, record).await;
+            let review = sessions
+                .review_attach(root, "production".into())
+                .await
+                .unwrap();
+            let left: Vec<_> = review.remaining_steps.iter().map(|s| s.index).collect();
+            (review.watched, left)
+        })
+    };
+    // Maintenance on was running: it is watched, then every step and maintenance off run.
+    assert_eq!(
+        watched_and_left(|journal| {
+            journal
+                .begin_maintenance(MaintenancePhase::Down, 500)
+                .unwrap();
+        }),
+        (
+            Some(step(None, "php artisan down")),
+            vec![Some(0), Some(1), Some(2), Some(3), None]
+        )
+    );
+    // Stopped between steps: nothing is watched and nothing more runs.
+    assert_eq!(
+        watched_and_left(|journal| {
+            running_step_1(journal);
+            journal
+                .finish_step(1, StepStatus::Ok, Some(0), StepTimes::default())
+                .unwrap();
+            journal
+                .record_outcome(DeployOutcome::StoppedAfterStep {
+                    step: 1,
+                    reason: StopReason::Requested,
+                })
+                .unwrap();
+        }),
+        (None, vec![])
+    );
+    // A step whose result is not known ends the run as unknown.
+    assert_eq!(
+        watched_and_left(|journal| {
+            running_step_1(journal);
+            journal
+                .finish_step(1, StepStatus::Unknown, None, StepTimes::default())
+                .unwrap();
+        }),
+        (None, vec![])
+    );
+    // A failed maintenance on ends the run before any step.
+    assert_eq!(
+        watched_and_left(|journal| {
+            journal
+                .begin_maintenance(MaintenancePhase::Down, 500)
+                .unwrap();
+            journal
+                .finish_maintenance(
+                    MaintenancePhase::Down,
+                    StepStatus::Failed,
+                    Some(1),
+                    StepTimes::default(),
+                )
+                .unwrap();
+        }),
+        (None, vec![])
+    );
+}
+
+#[test]
+fn attached_run_starts_from_the_steps_the_journal_recorded() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        let root = unfinished_deploy(&fx, &sessions, running_step_1).await;
+        let review = sessions
+            .review_attach(root, "production".into())
+            .await
+            .unwrap();
+        // The refused connection leaves the run's view replayable.
+        let error = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Connection);
+        let (channel, packets) = capture_channel();
+        sessions.subscribe_run(&review.handle, channel).unwrap();
+        let replay = packets
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let state = &replay["state"];
+        assert_eq!(state["maintenanceDown"]["status"], "Ok");
+        assert_eq!(state["maintenanceDown"]["timing"]["durationMs"], 400);
+        assert_eq!(state["steps"]["0"]["status"], "Ok");
+        assert_eq!(state["steps"]["0"]["exitCode"], 0);
+        assert_eq!(state["steps"]["0"]["timing"]["durationMs"], 1_200);
+        assert_eq!(state["steps"]["1"]["status"], "Running");
+        assert_eq!(state["steps"]["1"]["name"], "composer install");
+        assert!(state["steps"].get("2").is_none());
+        assert!(state["maintenanceUp"].is_null());
     });
 }
 
@@ -784,6 +1014,8 @@ fn confirmed_attach_observes_recorded_up_without_launching_it_again() {
             .review_attach(root.clone(), "production".into())
             .await
             .unwrap();
+        assert_eq!(review.watched, Some(step(None, "php artisan up")));
+        assert_eq!(review.remaining_steps, []);
         let path = receipt::find_open(&fx.receipts(), "example", "production", &root)
             .unwrap()
             .unwrap();

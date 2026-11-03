@@ -867,6 +867,7 @@ const upReview: RecoveryReview = {
   runId: null,
   targetSha: null,
   phase: "Bring this app out of maintenance mode",
+  watched: null,
   remainingSteps: [{ index: null, command: "php artisan up" }],
 };
 
@@ -927,31 +928,32 @@ test("back from a recovery confirm frees its reservation", async () => {
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
 });
 
-test("attach shows the recorded run and what is left; a missing run is refused", async () => {
+test("attach review: the running step is watched, apart from the steps that will run", async () => {
   entry.mockResolvedValue(ready({ recovery: fixtures.recoveries[1] }));
   expect(fixtures.recoveries[1]?.sentence).toBe(
     "The run did not finish. It may still be running on the server.",
   );
-  reviewAttach.mockResolvedValue({
-    ...upReview,
-    handle: "attach-1",
-    operation: "attach",
-    runId: "1791795000000-0000beef",
-    targetSha: "b".repeat(40),
-    phase: "Steps",
-    remainingSteps: [
-      { index: 2, command: "php artisan migrate --force" },
-      { index: 3, command: "php artisan optimize" },
-    ],
-  });
+  reviewAttach.mockResolvedValue(fixtures.attachReview);
   await renderApp();
   fireEvent.click(screen.getByRole("button", { name: "Attach…" }));
   await settle();
-  expect(screen.getByText("Run 1791795000000-0000beef · target bbbbbbb")).toBeInTheDocument();
-  expect(screen.getByText("Last phase: Steps")).toBeInTheDocument();
   expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Attach to .+ → .+$/);
-  const left = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("listitem");
-  expect(left.map((s) => s.textContent)).toEqual(["2php artisan migrate --force", "3php artisan optimize"]);
+  expect(screen.getByText("Run 1791795000000-0000beef · target bbbbbbb")).toBeInTheDocument();
+  expect(screen.queryByText(/phase/i)).not.toBeInTheDocument();
+
+  const watched = within(screen.getByRole("region", { name: "Watched" }));
+  expect(
+    watched.getByText("Step 2 was running. Shipslip will watch it until it finishes and will not run it again."),
+  ).toBeInTheDocument();
+  // Its own marker, not a step number.
+  expect(watched.getAllByRole("listitem").map((s) => s.textContent)).toEqual(["watchphp artisan migrate --force"]);
+
+  const next = within(screen.getByRole("region", { name: "Steps to run" }));
+  expect(next.getByText("If step 2 succeeds, these run next:")).toBeInTheDocument();
+  expect(next.getAllByRole("listitem").map((s) => s.textContent)).toEqual([
+    "3php artisan optimize",
+    "offphp artisan up",
+  ]);
   expect(screen.getByRole("button", { name: "Attach and continue" })).toBeDisabled();
   fireEvent.click(screen.getByRole("button", { name: "Back" }));
   await settle();
@@ -963,6 +965,46 @@ test("attach shows the recorded run and what is left; a missing run is refused",
   fireEvent.click(screen.getByRole("button", { name: "Attach…" }));
   await settle();
   expect(screen.getByRole("heading", { level: 2, name: "Nothing to continue" })).toBeInTheDocument();
+});
+
+test("attach review with nothing left to run says so", async () => {
+  entry.mockResolvedValue(ready({ recovery: fixtures.recoveries[1] }));
+  reviewAttach.mockResolvedValue({ ...fixtures.attachReview, watched: null, remainingSteps: [] });
+  await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Attach…" }));
+  await settle();
+  expect(screen.queryByRole("region", { name: "Watched" })).not.toBeInTheDocument();
+  const next = within(screen.getByRole("region", { name: "Steps to run" }));
+  expect(next.getByText("No steps left to run")).toBeInTheDocument();
+});
+
+test("an attached run starts with what its journal recorded and reads like a normal run", async () => {
+  entry.mockResolvedValue(ready({ recovery: fixtures.recoveries[1] }));
+  reviewAttach.mockResolvedValue(fixtures.attachReview);
+  await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Attach…" }));
+  await settle();
+  fireEvent.change(screen.getByLabelText("Type production to continue"), {
+    target: { value: "production" },
+  });
+  confirm.mockResolvedValue(fixtures.attachedRunInfo);
+  fireEvent.click(screen.getByRole("button", { name: "Attach and continue" }));
+  await settle();
+  expect(confirm).toHaveBeenCalledWith("attach-1", "production");
+  await act(async () => send(fixtures.runBatches.attached));
+  const steps = within(screen.getByRole("region", { name: "Steps" }));
+  expect(steps.getAllByRole("button").map((b) => b.textContent)).toEqual([
+    "onphp artisan down800 ms",
+    "0git fast-forward to bbbbbbb1s",
+    "1composer install --no-dev2m 44s",
+    "2php artisan migrate --force",
+    "3php artisan optimize",
+    "offphp artisan up",
+  ]);
+  expect(steps.getAllByRole("img", { name: "done" })).toHaveLength(3);
+  expect(steps.getByRole("img", { name: "running now" })).toBeInTheDocument();
+  expect(steps.getAllByRole("img", { name: "not started" })).toHaveLength(2);
+  expect(screen.getByText(/^Step 2 of 3 · app in maintenance mode · /)).toBeInTheDocument();
 });
 
 test("an unfinished run says the recorded cause, and only the panel's Attach", async () => {

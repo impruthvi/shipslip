@@ -8,9 +8,10 @@ use serde::Serialize;
 use shipslip::interrupt::{next_stage, Stage};
 use shipslip::logs::escape_field;
 use shipslip::observation::CheckSkipReason;
-use shipslip::receipt::ReceiptStepStatus;
+use shipslip::receipt::{Receipt, ReceiptKind, ReceiptPhase, ReceiptStepStatus};
 use shipslip::{
     ConnectionTarget, DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, SmokeResult,
+    StepTimes,
 };
 
 use super::{CommandError, ErrorCode, RunInfo};
@@ -84,6 +85,20 @@ pub struct Progress {
     /// From the finished event; `None` while running.
     pub timing: Option<StepTiming>,
     pub reattached_at_ms: Option<u64>,
+}
+
+/// A step as the journal saved it. A running step has no timing yet, as
+/// when its start event arrives.
+fn recorded(status: ReceiptStepStatus, exit_code: Option<i32>, times: StepTimes) -> Progress {
+    Progress {
+        name: None,
+        timing: (status != ReceiptStepStatus::Running)
+            .then(|| step_timing(times))
+            .flatten(),
+        status,
+        exit_code,
+        reattached_at_ms: None,
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -339,6 +354,51 @@ impl RunFeed {
             }),
             info,
         })
+    }
+
+    /// An attached run starts from its journal, so the steps that already
+    /// ran show their recorded status and times, as the receipt does.
+    pub fn attached(info: RunInfo, saved: &Receipt) -> Arc<Self> {
+        let feed = Self::new(info);
+        if saved.kind == ReceiptKind::Deploy {
+            let state = &mut feed
+                .inner
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .state;
+            for step in &saved.steps {
+                if !matches!(
+                    step.status,
+                    ReceiptStepStatus::Pending | ReceiptStepStatus::Skipped
+                ) {
+                    // Step 0 keeps the run screen's own label.
+                    let name = (step.index > 0).then(|| escape_field(&step.command));
+                    let progress = recorded(step.status, step.exit_code, step.times());
+                    state
+                        .steps
+                        .insert(step.index, Progress { name, ..progress });
+                }
+            }
+            let maintenance =
+                |status: &Option<shipslip::StepStatus>, code, times, phase| match status {
+                    Some(status) => Some(recorded(status.clone().into(), code, times)),
+                    None => (saved.phase == phase)
+                        .then(|| recorded(ReceiptStepStatus::Running, None, times)),
+                };
+            state.maintenance_down = maintenance(
+                &saved.maintenance_down_status,
+                saved.maintenance_down_exit_code,
+                saved.maintenance_down_times(),
+                ReceiptPhase::MaintenanceDown,
+            );
+            state.maintenance_up = maintenance(
+                &saved.maintenance_up_status,
+                saved.maintenance_up_exit_code,
+                saved.maintenance_up_times(),
+                ReceiptPhase::MaintenanceUp,
+            );
+        }
+        feed
     }
 
     pub fn record(&self, event: DeployEvent) {
