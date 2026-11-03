@@ -1826,6 +1826,11 @@ button.side-item:hover {
   overflow-wrap: anywhere;
 }
 
+.run-step-note {
+  margin: var(--space-4) 0 var(--space-4) var(--space-24);
+  font-size: var(--text-12);
+}
+
 .run-output-box {
   position: relative;
   margin: 6px 0 var(--space-4) 24px;

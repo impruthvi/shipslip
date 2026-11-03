@@ -24,7 +24,7 @@ use crate::view::{break_lock_command, refusal_command, Span};
 
 mod events;
 use events::RunFeed;
-pub use events::{Ending, QuitRun, RunBatch, RunSnapshot};
+pub use events::{ConnectionGapView, Ending, QuitRun, RunBatch, RunSnapshot};
 
 // Keep terminal delivery available across the completion/reload race, with
 // bounded history. Active runs are never evicted.
@@ -474,6 +474,7 @@ pub struct RunInfo {
     pub run_plan: Option<RunPlan>,
     pub watch_ms: Option<u64>,
     pub started_at_ms: u64,
+    pub connection_gap: Option<ConnectionGapView>,
 }
 
 impl RunInfo {
@@ -505,6 +506,7 @@ impl RunInfo {
             },
             run_plan,
             watch_ms: run_plan.and(watch_ms(target)),
+            connection_gap: None,
             started_at_ms: u64::try_from(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1011,7 +1013,14 @@ impl<C: Connector> Sessions<C> {
             .slots
             .values()
             .filter_map(|slot| match &slot.phase {
-                Phase::Running { info, .. } | Phase::Starting(info) => Some(info.clone()),
+                Phase::Running { info, .. } | Phase::Starting(info) => {
+                    let mut info = info.clone();
+                    info.connection_gap = state
+                        .feeds
+                        .get(&info.handle)
+                        .and_then(|feed| feed.connection_gap());
+                    Some(info)
+                }
                 _ => None,
             })
             .collect();
@@ -1814,6 +1823,7 @@ impl RunInfo {
             run_plan: Some(RunPlan::Deploy),
             watch_ms: Some(120_000),
             started_at_ms: 1_791_795_000_000,
+            connection_gap: None,
         }
     }
 }
@@ -1854,7 +1864,10 @@ mod tests;
 pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, serde_json::Value> {
     use crate::recovery::recovery;
     use serde_json::to_value;
-    use shipslip::{DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, StepStatus, StepTimes};
+    use shipslip::{
+        ConnectionTarget, DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, StepStatus,
+        StepTimes,
+    };
     let info = RunInfo::sample("run-1", "deploy");
     let review = DeployReview {
         handle: "review-1".into(),
@@ -1933,6 +1946,18 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
     step(0, "git fast-forward", Some(StepStatus::Ok));
     step(1, "composer install --no-dev", None);
     views.insert("running", batch(&feed));
+    feed.record(DeployEvent::ConnectionLost {
+        target: ConnectionTarget::Step { index: 1 },
+        at_ms: u128::from(info.started_at_ms) + 30_000,
+        detail: "raw ssh detail".into(),
+    });
+    views.insert("stepGap", batch(&feed));
+    views.insert("gapRunInfo", to_value(feed.snapshot().info).unwrap());
+    feed.record(DeployEvent::Reattached {
+        target: ConnectionTarget::Step { index: 1 },
+        at_ms: u128::from(info.started_at_ms) + 45_000,
+    });
+    views.insert("stepReattached", batch(&feed));
 
     let watching = RunFeed::new(info.clone());
     for event in [
@@ -1958,6 +1983,17 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         watching.record(event);
     }
     views.insert("watching", batch(&watching));
+    watching.record(DeployEvent::ConnectionLost {
+        target: ConnectionTarget::LogWatch,
+        at_ms: u128::from(info.started_at_ms) + 60_000,
+        detail: "raw log ssh detail".into(),
+    });
+    views.insert("watchGap", batch(&watching));
+    watching.record(DeployEvent::Reattached {
+        target: ConnectionTarget::LogWatch,
+        at_ms: u128::from(info.started_at_ms) + 75_000,
+    });
+    views.insert("watchReattached", batch(&watching));
 
     feed.record(DeployEvent::StepFinished {
         index: 1,

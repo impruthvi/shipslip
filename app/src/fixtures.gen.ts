@@ -604,6 +604,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "1s",
             "durationMs": 1200
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -617,6 +619,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "48s",
             "durationMs": 48000
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         }
       ],
@@ -690,6 +694,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "1s",
             "durationMs": 1800
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -699,6 +705,8 @@ export const receipts: Record<string, ReceiptResult> = {
           "label": "– not run",
           "exitCode": null,
           "timing": null,
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -708,6 +716,8 @@ export const receipts: Record<string, ReceiptResult> = {
           "label": "– not run",
           "exitCode": null,
           "timing": null,
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         }
       ],
@@ -804,6 +814,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "1s",
             "durationMs": 1200
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -817,6 +829,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "48s",
             "durationMs": 48000
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         }
       ],
@@ -930,6 +944,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "1s",
             "durationMs": 1200
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -943,6 +959,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "48s",
             "durationMs": 48000
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         }
       ],
@@ -1048,6 +1066,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "1s",
             "durationMs": 1200
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -1061,6 +1081,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "48s",
             "durationMs": 48000
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         }
       ],
@@ -1139,6 +1161,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "1s",
             "durationMs": 1200
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -1152,6 +1176,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "48s",
             "durationMs": 48000
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": [
             "   INFO  Running migrations.",
             "  2026_10_09_add_discount_code ......................... FAIL",
@@ -1265,6 +1291,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "1s",
             "durationMs": 1200
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -1274,6 +1302,8 @@ export const receipts: Record<string, ReceiptResult> = {
           "label": "– not run",
           "exitCode": null,
           "timing": null,
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         }
       ],
@@ -1347,6 +1377,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "1s",
             "durationMs": 1200
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -1360,6 +1392,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "48s",
             "durationMs": 48000
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         }
       ],
@@ -1426,6 +1460,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "1s",
             "durationMs": 1200
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -1439,6 +1475,8 @@ export const receipts: Record<string, ReceiptResult> = {
             "duration": "48s",
             "durationMs": 48000
           },
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         }
       ],
@@ -1501,6 +1539,8 @@ export const receipts: Record<string, ReceiptResult> = {
           "label": "– not run",
           "exitCode": null,
           "timing": null,
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         },
         {
@@ -1510,6 +1550,8 @@ export const receipts: Record<string, ReceiptResult> = {
           "label": "– not run",
           "exitCode": null,
           "timing": null,
+          "resultSeenAtMs": null,
+          "connectionGaps": [],
           "output": []
         }
       ],
@@ -1763,6 +1805,151 @@ export const watchResults: LoadResult = {
 };
 
 export const slips: Record<string, SlipView> = {
+  "connectionGaps": {
+    "branch": "main",
+    "commits": [],
+    "duration": null,
+    "env": "staging",
+    "finishedAtMs": null,
+    "flags": [
+      {
+        "bad": true,
+        "kind": "appLeftDown",
+        "newErrors": false,
+        "text": "app may be in maintenance mode"
+      }
+    ],
+    "fromSha": "1111111111111111111111111111111111111111",
+    "kind": "receipt",
+    "nextSteps": {
+      "copyWithheld": false,
+      "lines": [
+        [
+          {
+            "kind": "text",
+            "text": "The run did not finish. If no deploy is running, resume it from /Users/you/code/shop with "
+          },
+          {
+            "command": "slip attach staging",
+            "copyText": "cd '/Users/you/code/shop' && slip attach staging",
+            "kind": "command",
+            "prefix": "cd '/Users/you/code/shop' && "
+          },
+          {
+            "kind": "text",
+            "text": "."
+          }
+        ],
+        [
+          {
+            "kind": "text",
+            "text": "The app may still be in maintenance mode. After checking the server, "
+          },
+          {
+            "command": "slip up staging",
+            "copyText": "cd '/Users/you/code/shop' && slip up staging",
+            "kind": "command",
+            "prefix": "cd '/Users/you/code/shop' && "
+          },
+          {
+            "kind": "text",
+            "text": " turns it off."
+          }
+        ]
+      ]
+    },
+    "notes": [],
+    "outcome": {
+      "kind": "unfinished",
+      "text": "Unfinished",
+      "tone": "bad"
+    },
+    "plan": "deploy",
+    "production": false,
+    "project": "shop",
+    "repoRoot": "/Users/you/code/shop",
+    "runId": "00000066-0",
+    "serverHead": null,
+    "smoke": "passed, HTTP 200 in 380 ms",
+    "startedAtMs": 1791794880000,
+    "startedBy": null,
+    "steps": [
+      {
+        "command": "git merge --ff-only",
+        "connectionGaps": [],
+        "exitCode": 0,
+        "index": "0",
+        "label": "✓ ok",
+        "output": [],
+        "resultSeenAtMs": null,
+        "status": "ok",
+        "timing": {
+          "duration": "1s",
+          "durationMs": 1200,
+          "kind": "took"
+        }
+      },
+      {
+        "command": "php artisan migrate --force",
+        "connectionGaps": [
+          {
+            "lostAtMs": 1791794900000,
+            "reattachedAtMs": 1791794910000
+          },
+          {
+            "lostAtMs": 1791794920000,
+            "reattachedAtMs": 1791794940000
+          }
+        ],
+        "exitCode": 0,
+        "index": "1",
+        "label": "✓ ok",
+        "output": [],
+        "resultSeenAtMs": 1791794940000,
+        "status": "ok",
+        "timing": {
+          "kind": "endNotKnown",
+          "startedAtMs": 1791794881700
+        }
+      },
+      {
+        "command": "Maintenance off: php artisan up",
+        "connectionGaps": [
+          {
+            "lostAtMs": 1791794960000,
+            "reattachedAtMs": null
+          }
+        ],
+        "exitCode": null,
+        "index": "off",
+        "label": "? unknown",
+        "output": [],
+        "resultSeenAtMs": null,
+        "status": "unknown",
+        "timing": {
+          "kind": "endNotKnown",
+          "startedAtMs": 1791794950000
+        }
+      }
+    ],
+    "summary": null,
+    "target": "staging1:/var/www/shop",
+    "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "watch": {
+      "baseline": [
+        14,
+        37
+      ],
+      "duration": "2m 0s",
+      "groups": [],
+      "kind": null,
+      "linesRead": 412,
+      "logPath": "storage/logs/laravel.log",
+      "moreGroups": 0,
+      "status": "complete",
+      "warnings": []
+    }
+  },
   "copyWithheld": {
     "branch": "main",
     "commits": [],
@@ -1808,7 +1995,7 @@ export const slips: Record<string, SlipView> = {
     "production": false,
     "project": "shop",
     "repoRoot": "/Users/you/code/shop",
-    "runId": "00000066-0",
+    "runId": "00000067-0",
     "serverHead": null,
     "smoke": "passed, HTTP 200 in 380 ms",
     "startedAtMs": 1791794400000,
@@ -1816,10 +2003,12 @@ export const slips: Record<string, SlipView> = {
     "steps": [
       {
         "command": "git merge --ff-only",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "1s",
@@ -1829,10 +2018,12 @@ export const slips: Record<string, SlipView> = {
       },
       {
         "command": "php artisan migrate --force",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "48s",
@@ -1913,10 +2104,12 @@ export const slips: Record<string, SlipView> = {
     "steps": [
       {
         "command": "git merge --ff-only",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "1s",
@@ -1926,10 +2119,12 @@ export const slips: Record<string, SlipView> = {
       },
       {
         "command": "php artisan migrate --force",
+        "connectionGaps": [],
         "exitCode": null,
         "index": "1",
         "label": "? running when saved",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "running",
         "timing": {
           "kind": "endNotKnown",
@@ -1993,10 +2188,12 @@ export const slips: Record<string, SlipView> = {
     "steps": [
       {
         "command": "git merge --ff-only",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "1s",
@@ -2006,10 +2203,12 @@ export const slips: Record<string, SlipView> = {
       },
       {
         "command": "php artisan migrate --force",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "48s",
@@ -2074,10 +2273,12 @@ export const slips: Record<string, SlipView> = {
     "steps": [
       {
         "command": "git merge --ff-only",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "1s",
@@ -2087,10 +2288,12 @@ export const slips: Record<string, SlipView> = {
       },
       {
         "command": "php artisan migrate --force",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "48s",
@@ -2155,10 +2358,12 @@ export const slips: Record<string, SlipView> = {
     "steps": [
       {
         "command": "git merge --ff-only",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "1s",
@@ -2168,10 +2373,12 @@ export const slips: Record<string, SlipView> = {
       },
       {
         "command": "php artisan migrate --force",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "48s",
@@ -2233,10 +2440,12 @@ export const slips: Record<string, SlipView> = {
     "steps": [
       {
         "command": "git merge --ff-only",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "1s",
@@ -2246,10 +2455,12 @@ export const slips: Record<string, SlipView> = {
       },
       {
         "command": "php artisan migrate --force",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "48s",
@@ -2314,10 +2525,12 @@ export const slips: Record<string, SlipView> = {
     "steps": [
       {
         "command": "git merge --ff-only",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "1s",
@@ -2327,10 +2540,12 @@ export const slips: Record<string, SlipView> = {
       },
       {
         "command": "php artisan migrate --force",
+        "connectionGaps": [],
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
         "output": [],
+        "resultSeenAtMs": null,
         "status": "ok",
         "timing": {
           "duration": "48s",
@@ -2416,6 +2631,7 @@ export const deployReview: DeployReview = {
 
 export const runInfo: RunInfo = {
   "checkout": "/Users/you/code/shop",
+  "connectionGap": null,
   "env": "production",
   "handle": "run-1",
   "maintenance": true,
@@ -2427,6 +2643,36 @@ export const runInfo: RunInfo = {
   "runPlan": "Deploy",
   "sshAlias": "shop-prod",
   "stage": "starting",
+  "startedAtMs": 1791795000000,
+  "steps": [
+    "composer install --no-dev",
+    "php artisan migrate --force",
+    "php artisan optimize"
+  ],
+  "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "watchMs": 120000
+};
+
+export const gapRunInfo: RunInfo = {
+  "checkout": "/Users/you/code/shop",
+  "connectionGap": {
+    "lostAtMs": 1791795030000,
+    "target": {
+      "index": 1,
+      "kind": "step"
+    }
+  },
+  "env": "production",
+  "handle": "run-1",
+  "maintenance": true,
+  "operation": "deploy",
+  "path": "/var/www/shop",
+  "production": true,
+  "project": "shop",
+  "runId": "1791795000000-0000beef",
+  "runPlan": "Deploy",
+  "sshAlias": "shop-prod",
+  "stage": "step 1",
   "startedAtMs": 1791795000000,
   "steps": [
     "composer install --no-dev",
@@ -2463,6 +2709,7 @@ export const runBatches: Record<string, RunBatch> = {
     "replay": true,
     "state": {
       "appLeftDown": true,
+      "connectionGap": null,
       "droppedWarnings": 0,
       "headline": {
         "command": "composer install --no-dev",
@@ -2473,6 +2720,7 @@ export const runBatches: Record<string, RunBatch> = {
       "maintenanceDown": {
         "exitCode": 0,
         "name": null,
+        "reattachedAtMs": null,
         "status": "Ok",
         "timing": null
       },
@@ -2483,6 +2731,7 @@ export const runBatches: Record<string, RunBatch> = {
         "0": {
           "exitCode": 0,
           "name": "git fast-forward",
+          "reattachedAtMs": null,
           "status": "Ok",
           "timing": {
             "duration": "1s",
@@ -2493,6 +2742,7 @@ export const runBatches: Record<string, RunBatch> = {
         "1": {
           "exitCode": 1,
           "name": "composer install --no-dev",
+          "reattachedAtMs": 1791795045000,
           "status": "Failed",
           "timing": null
         }
@@ -2508,10 +2758,11 @@ export const runBatches: Record<string, RunBatch> = {
       "treeDirty": null,
       "warnings": [],
       "watch": null,
+      "watchReattachedAtMs": null,
       "watchWindowMs": null
     },
     "subscription": "sub-1",
-    "through": 10
+    "through": 12
   },
   "failedHeadline": {
     "after": 0,
@@ -2538,6 +2789,7 @@ export const runBatches: Record<string, RunBatch> = {
     "replay": true,
     "state": {
       "appLeftDown": false,
+      "connectionGap": null,
       "droppedWarnings": 0,
       "headline": {
         "command": "composer install --no-dev",
@@ -2548,6 +2800,7 @@ export const runBatches: Record<string, RunBatch> = {
       "maintenanceDown": {
         "exitCode": 0,
         "name": null,
+        "reattachedAtMs": null,
         "status": "Ok",
         "timing": null
       },
@@ -2558,6 +2811,7 @@ export const runBatches: Record<string, RunBatch> = {
         "0": {
           "exitCode": 0,
           "name": "git fast-forward",
+          "reattachedAtMs": null,
           "status": "Ok",
           "timing": {
             "duration": "1s",
@@ -2568,6 +2822,7 @@ export const runBatches: Record<string, RunBatch> = {
         "1": {
           "exitCode": 1,
           "name": "composer install --no-dev",
+          "reattachedAtMs": 1791795045000,
           "status": "Failed",
           "timing": null
         }
@@ -2576,10 +2831,11 @@ export const runBatches: Record<string, RunBatch> = {
       "treeDirty": null,
       "warnings": [],
       "watch": null,
+      "watchReattachedAtMs": null,
       "watchWindowMs": null
     },
     "subscription": "sub-1",
-    "through": 8
+    "through": 10
   },
   "failedWatching": {
     "after": 0,
@@ -2598,6 +2854,7 @@ export const runBatches: Record<string, RunBatch> = {
     "replay": true,
     "state": {
       "appLeftDown": false,
+      "connectionGap": null,
       "droppedWarnings": 0,
       "headline": {
         "command": "composer install --no-dev",
@@ -2613,6 +2870,7 @@ export const runBatches: Record<string, RunBatch> = {
         "1": {
           "exitCode": 9,
           "name": "composer install --no-dev",
+          "reattachedAtMs": null,
           "status": "Failed",
           "timing": null
         }
@@ -2621,6 +2879,7 @@ export const runBatches: Record<string, RunBatch> = {
       "treeDirty": null,
       "warnings": [],
       "watch": null,
+      "watchReattachedAtMs": null,
       "watchWindowMs": 120000
     },
     "subscription": "sub-1",
@@ -2634,6 +2893,7 @@ export const runBatches: Record<string, RunBatch> = {
     "replay": true,
     "state": {
       "appLeftDown": false,
+      "connectionGap": null,
       "droppedWarnings": 0,
       "headline": null,
       "maintenanceDown": null,
@@ -2652,6 +2912,7 @@ export const runBatches: Record<string, RunBatch> = {
       "treeDirty": null,
       "warnings": [],
       "watch": null,
+      "watchReattachedAtMs": null,
       "watchWindowMs": null
     },
     "subscription": "sub-1",
@@ -2682,11 +2943,13 @@ export const runBatches: Record<string, RunBatch> = {
     "replay": true,
     "state": {
       "appLeftDown": false,
+      "connectionGap": null,
       "droppedWarnings": 0,
       "headline": null,
       "maintenanceDown": {
         "exitCode": 0,
         "name": null,
+        "reattachedAtMs": null,
         "status": "Ok",
         "timing": null
       },
@@ -2697,6 +2960,7 @@ export const runBatches: Record<string, RunBatch> = {
         "0": {
           "exitCode": 0,
           "name": "git fast-forward",
+          "reattachedAtMs": null,
           "status": "Ok",
           "timing": {
             "duration": "1s",
@@ -2707,6 +2971,7 @@ export const runBatches: Record<string, RunBatch> = {
         "1": {
           "exitCode": null,
           "name": "composer install --no-dev",
+          "reattachedAtMs": null,
           "status": "Running",
           "timing": null
         }
@@ -2715,10 +2980,153 @@ export const runBatches: Record<string, RunBatch> = {
       "treeDirty": null,
       "warnings": [],
       "watch": null,
+      "watchReattachedAtMs": null,
       "watchWindowMs": null
     },
     "subscription": "sub-1",
     "through": 7
+  },
+  "stepGap": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "run-1",
+    "output": [
+      {
+        "sequence": 4,
+        "source": {
+          "index": 0,
+          "kind": "step"
+        },
+        "text": "git fast-forward: working"
+      },
+      {
+        "sequence": 7,
+        "source": {
+          "index": 1,
+          "kind": "step"
+        },
+        "text": "composer install --no-dev: working"
+      }
+    ],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "connectionGap": {
+        "lostAtMs": 1791795030000,
+        "target": {
+          "index": 1,
+          "kind": "step"
+        }
+      },
+      "droppedWarnings": 0,
+      "headline": null,
+      "maintenanceDown": {
+        "exitCode": 0,
+        "name": null,
+        "reattachedAtMs": null,
+        "status": "Ok",
+        "timing": null
+      },
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {
+        "0": {
+          "exitCode": 0,
+          "name": "git fast-forward",
+          "reattachedAtMs": null,
+          "status": "Ok",
+          "timing": {
+            "duration": "1s",
+            "durationMs": 1200,
+            "kind": "took"
+          }
+        },
+        "1": {
+          "exitCode": null,
+          "name": "composer install --no-dev",
+          "reattachedAtMs": null,
+          "status": "Running",
+          "timing": null
+        }
+      },
+      "terminal": null,
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchReattachedAtMs": null,
+      "watchWindowMs": null
+    },
+    "subscription": "sub-1",
+    "through": 8
+  },
+  "stepReattached": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "run-1",
+    "output": [
+      {
+        "sequence": 4,
+        "source": {
+          "index": 0,
+          "kind": "step"
+        },
+        "text": "git fast-forward: working"
+      },
+      {
+        "sequence": 7,
+        "source": {
+          "index": 1,
+          "kind": "step"
+        },
+        "text": "composer install --no-dev: working"
+      }
+    ],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "connectionGap": null,
+      "droppedWarnings": 0,
+      "headline": null,
+      "maintenanceDown": {
+        "exitCode": 0,
+        "name": null,
+        "reattachedAtMs": null,
+        "status": "Ok",
+        "timing": null
+      },
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {
+        "0": {
+          "exitCode": 0,
+          "name": "git fast-forward",
+          "reattachedAtMs": null,
+          "status": "Ok",
+          "timing": {
+            "duration": "1s",
+            "durationMs": 1200,
+            "kind": "took"
+          }
+        },
+        "1": {
+          "exitCode": null,
+          "name": "composer install --no-dev",
+          "reattachedAtMs": 1791795045000,
+          "status": "Running",
+          "timing": null
+        }
+      },
+      "terminal": null,
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchReattachedAtMs": null,
+      "watchWindowMs": null
+    },
+    "subscription": "sub-1",
+    "through": 9
   },
   "stoppedHeadline": {
     "after": 0,
@@ -2728,6 +3136,7 @@ export const runBatches: Record<string, RunBatch> = {
     "replay": true,
     "state": {
       "appLeftDown": false,
+      "connectionGap": null,
       "droppedWarnings": 0,
       "headline": {
         "kind": "stopped",
@@ -2745,6 +3154,7 @@ export const runBatches: Record<string, RunBatch> = {
         "1": {
           "exitCode": 0,
           "name": "composer install --no-dev",
+          "reattachedAtMs": null,
           "status": "Ok",
           "timing": null
         }
@@ -2753,6 +3163,7 @@ export const runBatches: Record<string, RunBatch> = {
       "treeDirty": null,
       "warnings": [],
       "watch": null,
+      "watchReattachedAtMs": null,
       "watchWindowMs": null
     },
     "subscription": "sub-1",
@@ -2766,6 +3177,7 @@ export const runBatches: Record<string, RunBatch> = {
     "replay": true,
     "state": {
       "appLeftDown": false,
+      "connectionGap": null,
       "droppedWarnings": 0,
       "headline": {
         "kind": "stopped",
@@ -2783,6 +3195,7 @@ export const runBatches: Record<string, RunBatch> = {
         "1": {
           "exitCode": 0,
           "name": "composer install --no-dev",
+          "reattachedAtMs": null,
           "status": "Ok",
           "timing": null
         }
@@ -2791,6 +3204,7 @@ export const runBatches: Record<string, RunBatch> = {
       "treeDirty": null,
       "warnings": [],
       "watch": null,
+      "watchReattachedAtMs": null,
       "watchWindowMs": 120000
     },
     "subscription": "sub-1",
@@ -2814,6 +3228,7 @@ export const runBatches: Record<string, RunBatch> = {
     "replay": true,
     "state": {
       "appLeftDown": false,
+      "connectionGap": null,
       "droppedWarnings": 0,
       "headline": {
         "kind": "succeeded"
@@ -2826,6 +3241,7 @@ export const runBatches: Record<string, RunBatch> = {
         "0": {
           "exitCode": 0,
           "name": "git fast-forward",
+          "reattachedAtMs": null,
           "status": "Ok",
           "timing": null
         }
@@ -2851,10 +3267,11 @@ export const runBatches: Record<string, RunBatch> = {
         "status": "not run",
         "warnings": []
       },
+      "watchReattachedAtMs": 1791795075000,
       "watchWindowMs": 120000
     },
     "subscription": "sub-1",
-    "through": 7
+    "through": 9
   },
   "succeededWatching": {
     "after": 0,
@@ -2874,6 +3291,7 @@ export const runBatches: Record<string, RunBatch> = {
     "replay": true,
     "state": {
       "appLeftDown": false,
+      "connectionGap": null,
       "droppedWarnings": 0,
       "headline": {
         "kind": "succeeded"
@@ -2886,6 +3304,7 @@ export const runBatches: Record<string, RunBatch> = {
         "0": {
           "exitCode": 0,
           "name": "git fast-forward",
+          "reattachedAtMs": null,
           "status": "Ok",
           "timing": null
         }
@@ -2894,10 +3313,104 @@ export const runBatches: Record<string, RunBatch> = {
       "treeDirty": null,
       "warnings": [],
       "watch": null,
+      "watchReattachedAtMs": 1791795075000,
+      "watchWindowMs": 120000
+    },
+    "subscription": "sub-1",
+    "through": 7
+  },
+  "watchGap": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "run-1",
+    "output": [
+      {
+        "sequence": 4,
+        "source": {
+          "fileLine": "app/Billing.php:42",
+          "kind": "log",
+          "phase": "After"
+        },
+        "text": "RuntimeException: Payment gateway timed out"
+      }
+    ],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "connectionGap": {
+        "lostAtMs": 1791795060000,
+        "target": {
+          "kind": "logWatch"
+        }
+      },
+      "droppedWarnings": 0,
+      "headline": null,
+      "maintenanceDown": null,
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {
+        "0": {
+          "exitCode": 0,
+          "name": "git fast-forward",
+          "reattachedAtMs": null,
+          "status": "Ok",
+          "timing": null
+        }
+      },
+      "terminal": null,
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchReattachedAtMs": null,
       "watchWindowMs": 120000
     },
     "subscription": "sub-1",
     "through": 5
+  },
+  "watchReattached": {
+    "after": 0,
+    "droppedOutput": 0,
+    "handle": "run-1",
+    "output": [
+      {
+        "sequence": 4,
+        "source": {
+          "fileLine": "app/Billing.php:42",
+          "kind": "log",
+          "phase": "After"
+        },
+        "text": "RuntimeException: Payment gateway timed out"
+      }
+    ],
+    "replay": true,
+    "state": {
+      "appLeftDown": false,
+      "connectionGap": null,
+      "droppedWarnings": 0,
+      "headline": null,
+      "maintenanceDown": null,
+      "maintenanceUp": null,
+      "serverHead": null,
+      "smoke": null,
+      "steps": {
+        "0": {
+          "exitCode": 0,
+          "name": "git fast-forward",
+          "reattachedAtMs": null,
+          "status": "Ok",
+          "timing": null
+        }
+      },
+      "terminal": null,
+      "treeDirty": null,
+      "warnings": [],
+      "watch": null,
+      "watchReattachedAtMs": 1791795075000,
+      "watchWindowMs": 120000
+    },
+    "subscription": "sub-1",
+    "through": 6
   },
   "watching": {
     "after": 0,
@@ -2917,6 +3430,7 @@ export const runBatches: Record<string, RunBatch> = {
     "replay": true,
     "state": {
       "appLeftDown": false,
+      "connectionGap": null,
       "droppedWarnings": 0,
       "headline": null,
       "maintenanceDown": null,
@@ -2927,6 +3441,7 @@ export const runBatches: Record<string, RunBatch> = {
         "0": {
           "exitCode": 0,
           "name": "git fast-forward",
+          "reattachedAtMs": null,
           "status": "Ok",
           "timing": null
         }
@@ -2935,6 +3450,7 @@ export const runBatches: Record<string, RunBatch> = {
       "treeDirty": null,
       "warnings": [],
       "watch": null,
+      "watchReattachedAtMs": null,
       "watchWindowMs": 120000
     },
     "subscription": "sub-1",
@@ -3182,6 +3698,7 @@ export const liveRuns: LiveRuns = {
   "runs": [
     {
       "checkout": "/Users/you/code/shop",
+      "connectionGap": null,
       "env": "production",
       "handle": "run-1",
       "maintenance": true,

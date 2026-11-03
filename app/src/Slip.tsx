@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { CommandBox } from "./CommandBox";
 import { StepIcon } from "./Mark";
 import { StepTime } from "./StepTime";
+import { RecordedTime } from "./RecordedTime";
 import type { Context, PaneView } from "./slipTarget";
 import { isTime, stamp, utcStamp } from "./time";
 import type {
@@ -281,6 +282,17 @@ function Steps({ steps }: { steps: StepView[] }) {
                     <span className="muted">{" · "}</span>
                     <StepTime timing={step.timing} className="muted" />
                   </>
+                )}
+                {step.connectionGaps.map((gap, index) => (
+                  <p className="muted" key={index}>
+                    Connection lost at <RecordedTime at={gap.lostAtMs} />
+                    {gap.reattachedAtMs === null
+                      ? "; not re-attached"
+                      : <>; re-attached at <RecordedTime at={gap.reattachedAtMs} /></>}
+                  </p>
+                ))}
+                {step.resultSeenAtMs !== null && (
+                  <p className="muted">Result seen at <RecordedTime at={step.resultSeenAtMs} /></p>
                 )}
                 {step.output.length > 0 && (
                   <pre className="step-output muted">{step.output.join("\n")}</pre>

@@ -1119,3 +1119,82 @@ test("a run that ends in the background re-reads the map and the entry", async (
     vi.useRealTimers();
   }
 });
+
+
+test("a connection gap replaces step activity with amber evidence and a gap timer, then re-attaches", async () => {
+  const gap = fixtures.runBatches.stepGap;
+  const lostAt = gap.state.connectionGap!.lostAtMs;
+  vi.useFakeTimers();
+  vi.setSystemTime(lostAt + 12_000);
+  try {
+    await startRun();
+    await act(async () => send(gap));
+    const message = screen.getByText(/Connection lost during step 1 at/);
+    expect(message).toHaveClass("tone-attention");
+    expect(message.querySelector("time")).toHaveAttribute("dateTime", new Date(lostAt).toISOString());
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(message).toHaveTextContent("Connection gap · 13s");
+    expect(screen.getByText("Shipslip will reconnect to watch the step and will not run it again.")).toBeInTheDocument();
+    const steps = within(screen.getByRole("region", { name: "Steps" }));
+    expect(steps.queryByRole("img", { name: "running now" })).toBeNull();
+    expect(steps.getByRole("img", { name: "not known" })).toHaveClass("mark-attention");
+    expect(screen.queryByText(/^Step 1 of 3 ·/)).toBeNull();
+    await act(async () => send(fixtures.runBatches.stepReattached));
+    expect(screen.queryByText(/Connection lost during/)).toBeNull();
+    expect(steps.getByRole("img", { name: "running now" })).toBeInTheDocument();
+    expect(steps.getByText(/re-attached at/)).toHaveClass("muted");
+    expect(screen.getByText(/^Step 1 of 3 ·/)).toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a log-watch gap hides the countdown and clears when observation resumes", async () => {
+  await startRun();
+  await act(async () => send(fixtures.runBatches.watchGap));
+  expect(screen.getByText(/Connection lost during the log watch at/)).toHaveClass("tone-attention");
+  expect(screen.getByText("Shipslip will reconnect to watch the log. It will not run any step again.")).toBeInTheDocument();
+  expect(screen.queryByText(/^[\d:]+ left$/)).toBeNull();
+  expect(screen.queryByText(/^Watching the log ·/)).toBeNull();
+  expect(screen.getByRole("region", { name: "Steps" }).querySelector(".mark-spin")).toBeNull();
+  await act(async () => send(fixtures.runBatches.watchReattached));
+  expect(screen.queryByText(/Connection lost during/)).toBeNull();
+  expect(screen.getByText(/^Watching the log ·/)).toBeInTheDocument();
+  const watch = within(screen.getByRole("region", { name: "Log watch" }));
+  expect(watch.getByText(/re-attached at/)).toHaveClass("muted");
+  expect(watch.getByText(/^[\d:]+ left$/)).toBeInTheDocument();
+});
+
+test.each(["Down", "Up"] as const)("a maintenance %s gap replaces that phase's running indicator", async (phase) => {
+  await startRun();
+  const batch = fixtures.runBatches.stepGap;
+  const progress = { ...batch.state.steps["1"], name: null };
+  await act(async () => send({
+    ...batch,
+    state: {
+      ...batch.state,
+      steps: {},
+      maintenanceDown: phase === "Down" ? progress : null,
+      maintenanceUp: phase === "Up" ? progress : null,
+      connectionGap: { ...batch.state.connectionGap!, target: { kind: "maintenance", phase } },
+    },
+  }));
+  expect(screen.getByText(new RegExp(`Connection lost during maintenance ${phase === "Down" ? "on" : "off"} at`)))
+    .toHaveClass("tone-attention");
+  const steps = within(screen.getByRole("region", { name: "Steps" }));
+  expect(steps.getByRole("img", { name: "not known" })).toBeInTheDocument();
+  expect(steps.queryByRole("img", { name: "running now" })).toBeNull();
+});
+
+test("a known outcome stays above a gap during its log watch", async () => {
+  await startRun();
+  await act(async () => send({
+    ...fixtures.runBatches.failedWatching,
+    state: { ...fixtures.runBatches.failedWatching.state, connectionGap: fixtures.runBatches.watchGap.state.connectionGap },
+  }));
+  const headline = screen.getByRole("heading", { name: /^Failed at step 1/ });
+  expect(headline).toHaveClass("tone-bad");
+  const gap = screen.getByText(/Connection lost during the log watch at/);
+  expect(headline.compareDocumentPosition(gap) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.queryByText(/^Watching the log ·/)).toBeNull();
+});

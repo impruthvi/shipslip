@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Announce } from "./Announcer";
 import { deploy } from "./deployApi";
-import { StepIcon } from "./Mark";
+import { Mark, StepIcon } from "./Mark";
+import { ConnectionGap, ReattachedNote } from "./ConnectionGap";
 import { StepTime } from "./StepTime";
 import { applyBatch, headlineLine, progressLine, runRows, watching, type RunLog } from "./run";
 import { countdown, elapsed, spoken } from "./time";
@@ -107,6 +108,8 @@ export function Running({
   const rows = useMemo(() => (state ? runRows(info, state) : []), [info, state]);
   const terminal = state?.terminal ?? null;
   const headline = state?.headline ?? null;
+  const gap = state?.connectionGap ?? null;
+  const gapLostAt = gap?.lostAtMs ?? null;
   const headlineText = headline ? headlineLine(headline) : null;
   const failedStep = headline?.kind === "failed" ? String(headline.step) : null;
 
@@ -117,6 +120,13 @@ export function Running({
   useEffect(() => {
     if (headlineText) props.current.announce(headlineText, true);
   }, [headlineText]);
+
+  useEffect(() => {
+    if (gapLostAt !== null) {
+      setNow(Date.now());
+      props.current.announce("Connection lost. Shipslip will reconnect to watch. It will not run any step again.", true);
+    }
+  }, [gapLostAt]);
 
   // Announcements as each step starts and ends.
   useEffect(() => {
@@ -199,17 +209,27 @@ export function Running({
               <h2 className={`run-progress${headline.kind === "failed" ? " tone-bad" : headline.kind === "stopped" ? " tone-attention" : ""}`}>
                 {headlineText}
               </h2>
-              {watchingNow && watchLeft !== null && (
+              {watchingNow && !gap && watchLeft !== null && (
                 <p className="muted">Watching the log · {countdown(watchLeft)} left</p>
               )}
             </div>
-          ) : (
+          ) : !gap && (
             <p className="run-progress">
               {[progressLine(info, state, rows), elapsed(Math.max(now, info.startedAtMs) - info.startedAtMs)]
                 .filter(Boolean)
                 .join(" · ")}
             </p>
           )
+        )}
+        {gap && !terminal && (
+          <div className="run-outcome">
+            <p className="run-progress"><ConnectionGap gap={gap} now={now} /></p>
+            <p className="muted">
+              {gap.target.kind === "logWatch"
+                ? "Shipslip will reconnect to watch the log. It will not run any step again."
+                : "Shipslip will reconnect to watch the step and will not run it again."}
+            </p>
+          </div>
         )}
         <section className="workspace-section" aria-labelledby="run-steps">
           <h2 id="run-steps" className="caps">
@@ -222,6 +242,7 @@ export function Running({
           <ol className="run-steps">
             {rows.map((row) => {
               const status = row.progress?.status;
+              const inGap = gap && gap.target.kind !== "logWatch" && row.owns(gap.target);
               const lines = log?.output.filter((line) => row.owns(line.source)) ?? [];
               const expanded = lines.length > 0 && (open[row.index] ?? status === "Running");
               return (
@@ -233,7 +254,7 @@ export function Running({
                     onClick={() => setOpen((prev) => ({ ...prev, [row.index]: !expanded }))}
                   >
                     <span className="run-step-mark">
-                      <StepMark status={status} />
+                      {inGap ? <Mark kind="notKnown" size={12} /> : <StepMark status={status} />}
                     </span>
                     <span className="recipe-index mono muted">{row.index}</span>
                     <code>{row.command}</code>
@@ -241,6 +262,9 @@ export function Running({
                       <StepTime timing={row.progress.timing} className="elapsed muted" />
                     )}
                   </button>
+                  {row.progress?.reattachedAtMs != null && (
+                    <p className="run-step-note"><ReattachedNote at={row.progress.reattachedAtMs} /></p>
+                  )}
                   {expanded && <Output label={`Output of step ${row.index}`} lines={lines} />}
                 </li>
               );
@@ -252,7 +276,8 @@ export function Running({
             <h2 id="run-watch" className="caps">
               Log watch
             </h2>
-            {watchingNow && !headline && watchLeft !== null && <p>{countdown(watchLeft)} left</p>}
+            {watchingNow && !headline && !gap && watchLeft !== null && <p>{countdown(watchLeft)} left</p>}
+            {state.watchReattachedAtMs !== null && <p><ReattachedNote at={state.watchReattachedAtMs} /></p>}
             {logLines.length === 0 ? (
               <p className="muted">No new errors so far</p>
             ) : (

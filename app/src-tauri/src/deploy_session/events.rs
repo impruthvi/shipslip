@@ -9,7 +9,9 @@ use shipslip::interrupt::{next_stage, Stage};
 use shipslip::logs::escape_field;
 use shipslip::observation::CheckSkipReason;
 use shipslip::receipt::ReceiptStepStatus;
-use shipslip::{DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, SmokeResult};
+use shipslip::{
+    ConnectionTarget, DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, SmokeResult,
+};
 
 use super::{CommandError, ErrorCode, RunInfo};
 use tauri::async_runtime::{channel, Sender};
@@ -44,6 +46,35 @@ pub enum OutputSource {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ConnectionTargetView {
+    Step { index: usize },
+    Maintenance { phase: MaintenancePhase },
+    LogWatch,
+}
+
+impl From<ConnectionTarget> for ConnectionTargetView {
+    fn from(target: ConnectionTarget) -> Self {
+        match target {
+            ConnectionTarget::Step { index } => Self::Step { index },
+            ConnectionTarget::Maintenance { phase } => Self::Maintenance { phase },
+            ConnectionTarget::LogWatch => Self::LogWatch,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionGapView {
+    pub target: ConnectionTargetView,
+    pub lost_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Progress {
@@ -52,6 +83,7 @@ pub struct Progress {
     pub exit_code: Option<i32>,
     /// From the finished event; `None` while running.
     pub timing: Option<StepTiming>,
+    pub reattached_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,6 +174,8 @@ impl RunHeadline {
 pub struct RunState {
     pub terminal: Option<Terminal>,
     pub headline: Option<RunHeadline>,
+    pub connection_gap: Option<ConnectionGapView>,
+    pub watch_reattached_at_ms: Option<u64>,
     pub steps: BTreeMap<usize, Progress>,
     pub maintenance_up: Option<Progress>,
     pub maintenance_down: Option<Progress>,
@@ -312,6 +346,41 @@ impl RunFeed {
         history.sequence += 1;
         history.interrupt = next_stage(history.interrupt, &event);
         let text = match event {
+            DeployEvent::ConnectionLost { target, at_ms, .. } => {
+                history.state.connection_gap = Some(ConnectionGapView {
+                    target: target.into(),
+                    lost_at_ms: u64::try_from(at_ms).unwrap_or(u64::MAX),
+                });
+                None
+            }
+            DeployEvent::Reattached { target, at_ms } => {
+                if history
+                    .state
+                    .connection_gap
+                    .as_ref()
+                    .is_some_and(|gap| gap.target == target.into())
+                {
+                    history.state.connection_gap = None;
+                    let at = Some(u64::try_from(at_ms).unwrap_or(u64::MAX));
+                    let progress = match target {
+                        ConnectionTarget::Step { index } => history.state.steps.get_mut(&index),
+                        ConnectionTarget::Maintenance {
+                            phase: MaintenancePhase::Down,
+                        } => history.state.maintenance_down.as_mut(),
+                        ConnectionTarget::Maintenance {
+                            phase: MaintenancePhase::Up,
+                        } => history.state.maintenance_up.as_mut(),
+                        ConnectionTarget::LogWatch => {
+                            history.state.watch_reattached_at_ms = at;
+                            None
+                        }
+                    };
+                    if let Some(progress) = progress {
+                        progress.reattached_at_ms = at;
+                    }
+                }
+                None
+            }
             DeployEvent::Output { index, line } => Some((line, OutputSource::Step { index })),
             DeployEvent::MaintenanceOutput { phase, line } => {
                 Some((line, OutputSource::Maintenance { phase }))
@@ -325,6 +394,7 @@ impl RunFeed {
                         status: ReceiptStepStatus::Running,
                         exit_code: None,
                         timing: None,
+                        reattached_at_ms: None,
                     },
                 );
                 None
@@ -340,6 +410,7 @@ impl RunFeed {
                     status: ReceiptStepStatus::Running,
                     exit_code: None,
                     timing: None,
+                    reattached_at_ms: None,
                 });
                 progress.status = status.into();
                 progress.exit_code = exit_code;
@@ -361,6 +432,7 @@ impl RunFeed {
                     status: ReceiptStepStatus::Running,
                     exit_code: None,
                     timing: None,
+                    reattached_at_ms: None,
                 });
                 match phase {
                     MaintenancePhase::Up => history.state.maintenance_up = progress,
@@ -384,6 +456,12 @@ impl RunFeed {
                     status: status.into(),
                     exit_code,
                     timing: step_timing(times),
+                    reattached_at_ms: match phase {
+                        MaintenancePhase::Up => &history.state.maintenance_up,
+                        MaintenancePhase::Down => &history.state.maintenance_down,
+                    }
+                    .as_ref()
+                    .and_then(|progress| progress.reattached_at_ms),
                 });
                 match phase {
                     MaintenancePhase::Up => history.state.maintenance_up = progress,
@@ -630,10 +708,21 @@ impl RunFeed {
         let _ = self.unsubscribe(id);
     }
 
+    pub fn connection_gap(&self) -> Option<ConnectionGapView> {
+        self.inner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .state
+            .connection_gap
+            .clone()
+    }
+
     pub fn snapshot(&self) -> RunSnapshot {
         let history = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
         let mut info = self.info.clone();
         info.stage = history.stage.clone();
+        info.connection_gap
+            .clone_from(&history.state.connection_gap);
         RunSnapshot {
             info,
             sequence: history.sequence,

@@ -35,3 +35,17 @@ test("the running list can return to a run when no review owns navigation", () =
   fireEvent.click(within(runs).getByRole("button"));
   expect(current.onFollow).toHaveBeenCalledWith(fixtures.runInfo);
 });
+
+test("the running row replaces its animation and run timer with the recorded connection gap", () => {
+  const current = props(false);
+  const run = fixtures.gapRunInfo;
+  const { rerender } = render(<Sidebar {...current} runs={[run]} now={run.connectionGap!.lostAtMs + 12_000} />);
+  const runs = screen.getByRole("region", { name: "Deploys running" });
+  expect(within(runs).getByText(/Connection lost during step 1 at/)).toHaveClass("tone-attention");
+  expect(runs).toHaveTextContent("Connection gap · 12s");
+  expect(within(runs).getByRole("img", { hidden: true, name: "not known" })).toBeInTheDocument();
+  expect(runs.querySelector(".mark-spin")).toBeNull();
+  rerender(<Sidebar {...current} runs={[fixtures.runInfo]} />);
+  expect(within(runs).queryByText(/Connection lost/)).toBeNull();
+  expect(runs.querySelector(".mark-spin")).not.toBeNull();
+});
