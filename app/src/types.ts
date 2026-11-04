@@ -314,6 +314,10 @@ export interface RecoveryReview {
   watched: RecoveryStep | null;
   /** What runs next, in order. After a watched step, only if it succeeds. */
   remainingSteps: RecoveryStep[];
+  /** Up only: recipe steps the deciding run never ran. The app comes up without them. */
+  notRun: RecoveryStep[];
+  /** Up only, with `notRun`: where run-from-step would start instead. */
+  fromStep: number | null;
 }
 
 /** `index` is the receipt's step number; `null` for `php artisan down` / `php artisan up`. */

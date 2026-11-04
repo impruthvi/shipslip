@@ -470,6 +470,8 @@ fn up_review_requires_confirmation_and_expires_on_reload_without_ssh() {
                 command: "php artisan up".into()
             }]
         );
+        assert_eq!(review.not_run, []);
+        assert_eq!(review.from_step, None);
         assert_eq!(
             sessions
                 .confirm(&review.handle, None)
@@ -488,6 +490,34 @@ fn up_review_requires_confirmation_and_expires_on_reload_without_ssh() {
                 .code,
             ErrorCode::InvalidHandle
         );
+        assert_eq!(sessions.connector.0.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn up_review_lists_the_steps_a_stopped_run_never_ran_without_ssh() {
+    use crate::fixture::run;
+    use serde_json::json;
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        approve(&sessions, &root).await;
+        let mut stopped = run(1, "production");
+        stopped["project"] = json!("example");
+        stopped["repo_root"] = json!(root);
+        stopped["target"]["maintenance"] = json!(true);
+        stopped["target"]["steps"] = json!(["true", "php artisan optimize"]);
+        stopped["steps"][1]["command"] = json!("true");
+        stopped["steps"].as_array_mut().unwrap().push(json!({"index": 2,
+            "command": "php artisan optimize", "status": "Pending", "exit_code": null, "output": []}));
+        stopped["outcome"] = json!({"StoppedAfterStep": {"step": 1, "reason": "Requested"}});
+        stopped["app_left_down"] = json!(true);
+        fx.save(&stopped);
+
+        let review = sessions.review_up(root, "production".into()).await.unwrap();
+        assert_eq!(review.not_run, [step(Some(2), "php artisan optimize")]);
+        assert_eq!(review.from_step, Some(2));
         assert_eq!(sessions.connector.0.load(Ordering::SeqCst), 0);
     });
 }

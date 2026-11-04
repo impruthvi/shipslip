@@ -53,6 +53,41 @@ pub fn recovery_from(runs: &[ReceiptSummary]) -> Option<RecoveryView> {
     (!view.actions.is_empty() || view.advice.is_some()).then_some(view)
 }
 
+/// What bringing the app up leaves undone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotRun {
+    /// Where the run-from-step the deciding run offers starts.
+    pub from_step: usize,
+    /// Recipe steps (number, command) the deciding run never sent.
+    pub steps: Vec<(usize, String)>,
+}
+
+/// The recipe steps a bring-up would leave out, from the env's runs newest
+/// first. The deciding run is the newest deploy: bring-ups only turn
+/// maintenance off. Only a run that offers run-from-step counts, so a run
+/// that changed nothing, or whose result is not known, lists none.
+pub fn steps_not_run(runs: &[ReceiptSummary]) -> Option<NotRun> {
+    let deploy = runs.iter().find(|run| run.kind != ReceiptKind::Up)?;
+    let from_step = recovery(deploy)?
+        .actions
+        .iter()
+        .find_map(|action| match action.op {
+            RecoveryOp::FromStep { step } => Some(step),
+            _ => None,
+        })?;
+    let steps: Vec<_> = deploy
+        .steps
+        .iter()
+        .filter_map(|row| match (row.kind, row.status) {
+            (StepKind::Step { index }, StepState::Pending | StepState::NotStarted) if index > 0 => {
+                Some((index, row.command.field()))
+            }
+            _ => None,
+        })
+        .collect();
+    (!steps.is_empty()).then_some(NotRun { from_step, steps })
+}
+
 /// `None` when the run left nothing to recover.
 pub fn recovery(receipt: &ReceiptSummary) -> Option<RecoveryView> {
     let env = receipt.env.field();
@@ -435,6 +470,87 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(view.sentence, "The result of php artisan up is unknown.");
+    }
+
+    /// Steps `from..=3` recorded as never sent.
+    fn pending_from(from: usize) -> impl FnOnce(&mut Value) {
+        move |v| {
+            v["app_left_down"] = json!(true);
+            for index in from..=3 {
+                v["steps"][index]["status"] = json!("Pending");
+                v["steps"][index]["exit_code"] = Value::Null;
+            }
+        }
+    }
+
+    #[test]
+    fn a_bring_up_lists_the_steps_the_deciding_run_never_ran() {
+        let stopped = receipt(
+            json!({"StoppedAfterStep": {"step": 1, "reason": "Requested"}}),
+            pending_from(2),
+        );
+        assert_eq!(
+            steps_not_run(std::slice::from_ref(&stopped)),
+            Some(NotRun {
+                from_step: 2,
+                steps: vec![(2, "step 2".into()), (3, "step 3".into())],
+            })
+        );
+        // A bring-up that failed is not the deciding run; the deploy is.
+        let failed_up = up(json!({"FailedAtStep": {"step": 0, "partial_update": false}}));
+        assert_eq!(
+            steps_not_run(&[failed_up, stopped]).map(|n| n.from_step),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn after_a_failed_step_run_from_step_starts_at_the_failed_step() {
+        // Step 2 ran and failed, so it is not listed, but running it again
+        // is the recovery the run offers.
+        let failed = receipt(
+            json!({"FailedAtStep": {"step": 2, "partial_update": false}}),
+            |v| {
+                pending_from(3)(v);
+                v["steps"][2]["status"] = json!("Failed");
+                v["steps"][2]["exit_code"] = json!(1);
+            },
+        );
+        assert_eq!(
+            steps_not_run(&[failed]),
+            Some(NotRun {
+                from_step: 2,
+                steps: vec![(3, "step 3".into())],
+            })
+        );
+    }
+
+    #[test]
+    fn a_bring_up_lists_nothing_when_every_step_ran_or_none_could_matter() {
+        let failed_last = receipt(
+            json!({"FailedAtStep": {"step": 3, "partial_update": false}}),
+            |v| {
+                v["app_left_down"] = json!(true);
+                v["steps"][3]["status"] = json!("Failed");
+            },
+        );
+        assert_eq!(steps_not_run(&[failed_last]), None);
+        let succeeded = receipt(json!("Succeeded"), |v| v["app_left_down"] = json!(true));
+        assert_eq!(steps_not_run(&[succeeded]), None);
+        // Nothing reached the server checkout: the app comes up as it was.
+        let in_maintenance = receipt(
+            json!({"StoppedInMaintenance": "Cancelled"}),
+            pending_from(0),
+        );
+        assert_eq!(steps_not_run(&[in_maintenance]), None);
+        // An open run's pending steps may still be sent.
+        let open = receipt(Value::Null, |v| {
+            pending_from(2)(v);
+            v["status"] = json!("InProgress");
+        });
+        assert_eq!(steps_not_run(&[open]), None);
+        assert_eq!(steps_not_run(&[up(json!("Succeeded"))]), None);
+        assert_eq!(steps_not_run(&[]), None);
     }
 
     #[test]

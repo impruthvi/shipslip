@@ -2728,7 +2728,9 @@ export const attachedRunInfo: RunInfo = {
 
 export const attachReview: RecoveryReview = {
   "env": "production",
+  "fromStep": null,
   "handle": "attach-1",
+  "notRun": [],
   "operation": "attach",
   "path": "/var/www/shop",
   "phase": null,
@@ -2750,6 +2752,57 @@ export const attachReview: RecoveryReview = {
     "command": "php artisan migrate --force",
     "index": 2
   }
+};
+
+export const upReview: RecoveryReview = {
+  "env": "production",
+  "fromStep": 2,
+  "handle": "up-1",
+  "notRun": [
+    {
+      "command": "php artisan migrate --force",
+      "index": 2
+    },
+    {
+      "command": "php artisan optimize",
+      "index": 3
+    }
+  ],
+  "operation": "up",
+  "path": "/var/www/shop",
+  "phase": "Bring this app out of maintenance mode",
+  "production": true,
+  "remainingSteps": [
+    {
+      "command": "php artisan up",
+      "index": null
+    }
+  ],
+  "runId": null,
+  "sshAlias": "shop-prod",
+  "targetSha": null,
+  "watched": null
+};
+
+export const upReviewAllRan: RecoveryReview = {
+  "env": "production",
+  "fromStep": null,
+  "handle": "up-1",
+  "notRun": [],
+  "operation": "up",
+  "path": "/var/www/shop",
+  "phase": "Bring this app out of maintenance mode",
+  "production": true,
+  "remainingSteps": [
+    {
+      "command": "php artisan up",
+      "index": null
+    }
+  ],
+  "runId": null,
+  "sshAlias": "shop-prod",
+  "targetSha": null,
+  "watched": null
 };
 
 export const runBatches: Record<string, RunBatch> = {
