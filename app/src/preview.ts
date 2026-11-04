@@ -22,6 +22,7 @@ const later = <T>(value: T) =>
 
 export const backend: Backend = {
   loadMap: () => later(screens[params.get("screen") ?? ""] ?? fixtures.map),
+  receiptsChanged: async () => false,
   compare: (generation, row, a, b) =>
     later(
       generation === 1

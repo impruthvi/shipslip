@@ -2,6 +2,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "load_map",
+            "receipts_changed",
             "compare",
             "load_receipt",
             "deploy_entry",

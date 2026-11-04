@@ -7,6 +7,7 @@ import { PANE_DEFAULT, useNarrow } from "./pane";
 vi.mock("./api", () => ({
   api: {
     loadMap: async () => fixtures.map,
+    receiptsChanged: async () => false,
     compare: async () => ({ kind: "notFound" }),
     loadReceipt: async (_generation: number, id: number) => fixtures.receipts[String(id)],
     copyText: async () => {},

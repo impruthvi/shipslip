@@ -35,7 +35,7 @@ export function useReleaseMap() {
   const [state, setState] = useState<MapState>({ phase: "loading" });
 
   const refresh = useCallback(() => {
-    api.loadMap().then(
+    return api.loadMap().then(
       (result) => setState((prev) => applyLoad(prev, result, new Date())),
       (error: unknown) =>
         setState((prev) =>
@@ -46,6 +46,27 @@ export function useReleaseMap() {
 
   useEffect(() => {
     refresh();
+    let gone = false;
+    let checking = false;
+    let timer: number | undefined;
+    const visible = () => !gone && !document.hidden;
+    const check = async () => {
+      if (!visible() || checking) return;
+      checking = true;
+      try {
+        if (await api.receiptsChanged() && visible()) await refresh();
+      } catch {
+        if (visible()) await refresh();
+      } finally {
+        checking = false;
+      }
+    };
+    const onVisibility = () => {
+      window.clearInterval(timer);
+      if (visible()) timer = window.setInterval(check, 3000);
+    };
+    onVisibility();
+    document.addEventListener("visibilitychange", onVisibility);
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey && event.key.toLowerCase() === "r") {
         event.preventDefault();
@@ -54,10 +75,11 @@ export function useReleaseMap() {
     };
     window.addEventListener("keydown", onKey);
     let unlisten: (() => void) | undefined;
-    let gone = false;
     api.onFocus(refresh).then((stop) => (gone ? stop() : (unlisten = stop)));
     return () => {
       gone = true;
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
       unlisten?.();
       window.removeEventListener("keydown", onKey);
     };

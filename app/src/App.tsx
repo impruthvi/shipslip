@@ -152,6 +152,7 @@ export default function App() {
     (how: Leave) => {
       const left = workspaceRef.current;
       setWorkspace(null);
+      refresh();
       setFocusEntry(how === "away" ? "runs" : "entry");
       setEntryVersion((v) => v + 1);
       if (how === "approved" && left) {
@@ -162,7 +163,6 @@ export default function App() {
         setPaneView(null);
         setPrintFor(selectedKey);
         setDrawerOpen(true);
-        refresh();
       }
     },
     [refresh, selectedKey],
