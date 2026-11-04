@@ -19,7 +19,7 @@ use shipslip::{
     Confirmation, ExecutionHandle, PrepareError, PreparePhase, Preview, RunEvents, RunPlan,
 };
 
-use crate::recovery::{recovery_from, RecoveryView};
+use crate::recovery::{recovery_from, steps_not_run, NotRun, RecoveryView};
 use crate::view::{break_lock_command, refusal_command, Span};
 
 mod events;
@@ -275,6 +275,11 @@ pub struct RecoveryReview {
     pub watched: Option<RecoveryStep>,
     /// What runs next, in order. After a watched step, only if it succeeds.
     pub remaining_steps: Vec<RecoveryStep>,
+    /// Up only: recipe steps the deciding run never ran. The app comes up
+    /// without them.
+    pub not_run: Vec<RecoveryStep>,
+    /// Up only, with `not_run`: where run-from-step would start instead.
+    pub from_step: Option<usize>,
 }
 
 impl RecoveryReview {
@@ -292,6 +297,47 @@ impl RecoveryReview {
             phase: None,
             watched,
             remaining_steps,
+            not_run: Vec::new(),
+            from_step: None,
+        }
+    }
+
+    fn up(
+        handle: String,
+        env: &str,
+        target: &shipslip::DeployTarget,
+        not_run: Option<NotRun>,
+    ) -> Self {
+        let (from_step, not_run) = match not_run {
+            Some(NotRun { from_step, steps }) => (
+                Some(from_step),
+                steps
+                    .into_iter()
+                    .map(|(index, command)| RecoveryStep {
+                        index: Some(index),
+                        command,
+                    })
+                    .collect(),
+            ),
+            None => (None, Vec::new()),
+        };
+        Self {
+            handle,
+            env: escape_field(env),
+            production: target.production,
+            operation: "up",
+            ssh_alias: escape_field(&target.ssh_alias),
+            path: escape_field(&target.path),
+            run_id: None,
+            target_sha: None,
+            phase: Some("Bring this app out of maintenance mode".into()),
+            watched: None,
+            remaining_steps: vec![RecoveryStep {
+                index: None,
+                command: "php artisan up".into(),
+            }],
+            not_run,
+            from_step,
         }
     }
 }
@@ -1152,6 +1198,17 @@ impl<C: Connector> Sessions<C> {
         let page = self.registry().page;
         let loaded = settings(checkout, env).await?;
         let trusted = self.trusted(&loaded).await?;
+        let root = self.receipts_root.clone();
+        let (trusted, not_run) = blocking(move || {
+            let runs = newest_runs(
+                &root,
+                trusted.project(),
+                &trusted.target().env,
+                trusted.repo_root(),
+            );
+            Ok((trusted, steps_not_run(&runs)))
+        })
+        .await?;
         let mut state = self.registry();
         if state.page != page {
             return Err(cancelled());
@@ -1161,23 +1218,7 @@ impl<C: Connector> Sessions<C> {
             return Err(busy());
         }
         let id = self.next_handle(&mut state);
-        let target = trusted.target();
-        let review = RecoveryReview {
-            handle: id.clone(),
-            env: escape_field(&key.env),
-            production: target.production,
-            operation: "up",
-            ssh_alias: escape_field(&target.ssh_alias),
-            path: escape_field(&target.path),
-            run_id: None,
-            target_sha: None,
-            phase: Some("Bring this app out of maintenance mode".into()),
-            watched: None,
-            remaining_steps: vec![RecoveryStep {
-                index: None,
-                command: "php artisan up".into(),
-            }],
-        };
+        let review = RecoveryReview::up(id.clone(), &key.env, trusted.target(), not_run);
         state.slots.insert(
             key,
             Slot {
@@ -2278,6 +2319,33 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         ))
         .unwrap(),
     );
+    // Stopped after step 1 in maintenance: steps 2 and 3 never ran.
+    let mut stopped = open.clone();
+    stopped.status = ReceiptStatus::Final;
+    stopped.phase = receipt::ReceiptPhase::Finished;
+    stopped.outcome = Some(shipslip::DeployOutcome::StoppedAfterStep {
+        step: 1,
+        reason: shipslip::StopReason::Requested,
+    });
+    stopped.unfinished_cause = None;
+    stopped.steps[2].status = receipt::ReceiptStepStatus::Pending;
+    stopped.steps[2].started_at_ms = None;
+    let up = |receipt: &receipt::Receipt| {
+        RecoveryReview::up(
+            "up-1".into(),
+            "production",
+            &receipt.target,
+            steps_not_run(&[ReceiptSummary::from(receipt)]),
+        )
+    };
+    views.insert("upReview", to_value(up(&stopped)).unwrap());
+    let mut all_ran = stopped.clone();
+    all_ran.outcome = Some(shipslip::DeployOutcome::Succeeded);
+    for step in &mut all_ran.steps[2..] {
+        step.status = receipt::ReceiptStepStatus::Ok;
+    }
+    all_ran.maintenance_up_status = Some(shipslip::StepStatus::Failed);
+    views.insert("upReviewAllRan", to_value(up(&all_ran)).unwrap());
     let attached_info = RunInfo::sample("attach-1", "attach");
     let attached = RunFeed::attached(attached_info.clone(), &open);
     attached.record(DeployEvent::StepStarted {

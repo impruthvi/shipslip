@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { actionConsequence } from "./DeployEntry";
 import type { RecoveryReview } from "./types";
 
 export type RecoveryBusy = "confirming" | "releasing" | null;
@@ -9,16 +10,20 @@ export function RecoveryConfirm({
   busy,
   onBack,
   onConfirm,
+  onFromStep,
 }: {
   review: RecoveryReview;
   busy: RecoveryBusy;
   onBack: () => void;
   onConfirm: (typedEnv: string | null) => void;
+  /** Up only: release this review and prepare run-from-step instead. */
+  onFromStep: (step: number) => void;
 }) {
   const [typed, setTyped] = useState("");
   const ready = !review.production || typed === review.env;
   const attach = review.operation === "attach";
   const watched = review.watched;
+  const fromStep = review.fromStep;
   // A recipe step by number; `php artisan down` or `up` by its command.
   const watchedName = (step: string) =>
     watched?.index == null ? <code>{watched?.command}</code> : `${step} ${watched.index}`;
@@ -74,6 +79,39 @@ export function RecoveryConfirm({
             </>
           )}
         </section>
+        {review.notRun.length > 0 && (
+          <section className="workspace-section" aria-labelledby="recovery-not-run">
+            <h2 id="recovery-not-run" className="caps">
+              Did not run
+            </h2>
+            <p>These steps did not run. The app will come up without them.</p>
+            <ol className="recipe mono">
+              {review.notRun.map((step, i) => (
+                <li key={i}>
+                  <span className="recipe-index muted">{step.index}</span>
+                  <code>{step.command}</code>
+                </li>
+              ))}
+            </ol>
+            {fromStep !== null && (
+              <div className="recovery-action">
+                <button
+                  type="button"
+                  className="button"
+                  disabled={busy !== null}
+                  aria-describedby="recovery-from-step-does"
+                  onClick={() => onFromStep(fromStep)}
+                >
+                  Run from step {fromStep} instead…
+                </button>
+                <p id="recovery-from-step-does" className="muted recovery-does">
+                  {actionConsequence({ kind: "fromStep", step: fromStep, command: "" })}
+                </p>
+              </div>
+            )}
+          </section>
+        )}
+        {!attach && <p className="workspace-section muted">Takes the deploy lock when you confirm.</p>}
       </div>
       <form className="workspace-footer" onSubmit={submit}>
         <button type="button" className="button" disabled={busy !== null} onClick={onBack}>

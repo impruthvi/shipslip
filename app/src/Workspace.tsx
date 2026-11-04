@@ -265,6 +265,12 @@ export function Workspace({
       (error: unknown) => refuse(error),
     );
   };
+  /** From the bring-up review: its reservation goes back, then run from step prepares. */
+  const fromStepInstead = (step: number) => {
+    if (screen.kind !== "recovery") return;
+    setScreen({ ...screen, busy: "releasing" });
+    deploy.cancel(screen.review.handle).then(() => alive.current && prepare({ FromStep: step }), refuse);
+  };
   const editConfig = () => {
     const { generation, row, env } = props.current.target;
     return deploy.openConfig(generation, row, env);
@@ -338,16 +344,27 @@ export function Workspace({
           : null;
   const production = sub?.production ?? (screen.kind === "trust" ? screen.review.production : target.production);
   const where = [target.label, target.env, alias].filter(Boolean).join(" · ");
-  const operation =
-    start.kind === "up" || start.kind === "attach"
-      ? start.kind
-      : start.kind === "follow"
-        ? start.info.operation
-        : "deploy";
+  // A bring-up review can hand over to run from step, which is a deploy.
+  const preparedHere =
+    screen.kind === "preparing" ||
+    screen.kind === "preview" ||
+    screen.kind === "taken" ||
+    (screen.kind === "refused" && screen.retry !== null);
+  const operation = preparedHere
+    ? "deploy"
+    : screen.kind === "running"
+      ? screen.info.operation
+      : start.kind === "up" || start.kind === "attach"
+        ? start.kind
+        : start.kind === "follow"
+          ? start.info.operation
+          : "deploy";
   // The verb follows the plan being run: a rerun is not called a deploy.
   const plan: RunPlan | null =
     screen.kind === "preparing" || screen.kind === "taken"
       ? screen.plan
+      : screen.kind === "refused" && screen.retry !== null
+        ? screen.retry
       : screen.kind === "preview"
         ? screen.review.runPlan
         : screen.kind === "running"
@@ -477,6 +494,7 @@ export function Workspace({
           busy={screen.busy}
           onBack={back}
           onConfirm={confirmRecovery}
+          onFromStep={fromStepInstead}
         />
       )}
       {screen.kind === "running" && (

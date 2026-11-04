@@ -481,6 +481,13 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
         "RecoveryReview",
         deploy("attachReview"),
     );
+    item(&mut out, "upReview", "RecoveryReview", deploy("upReview"));
+    item(
+        &mut out,
+        "upReviewAllRan",
+        "RecoveryReview",
+        deploy("upReviewAllRan"),
+    );
     let batches: BTreeMap<&str, &Value> = [
         "attached",
         "running",

@@ -857,19 +857,7 @@ test("the trust review can open the config in the editor without approving anyth
   expect(screen.getByRole("button", { name: "Approve configuration" })).toBeDisabled();
 });
 
-const upReview: RecoveryReview = {
-  handle: "up-1",
-  env: "production",
-  production: true,
-  operation: "up",
-  sshAlias: "shop-prod",
-  path: "/var/www/shop",
-  runId: null,
-  targetSha: null,
-  phase: "Bring this app out of maintenance mode",
-  watched: null,
-  remainingSteps: [{ index: null, command: "php artisan up" }],
-};
+const upReview = fixtures.upReviewAllRan;
 
 test("a failed run's recovery: one recommended action, each with what it does", async () => {
   entry.mockResolvedValue(ready({ recovery: fixtures.recoveries[0] }));
@@ -914,6 +902,64 @@ test("bring the app up: a confirm shows the one step and needs the name typed", 
   expect(rows.map((r) => r.textContent)).toEqual(["offphp artisan up"]);
   // One step: nothing after it to stop before.
   expect(screen.queryByRole("button", { name: "Stop after this step" })).toBeNull();
+});
+
+test("bring-up review with every step run lists nothing and offers no run from step", async () => {
+  entry.mockResolvedValue(ready({ recovery: fixtures.recoveries[0] }));
+  reviewUp.mockResolvedValue(upReview);
+  await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Bring app out of maintenance…" }));
+  await settle();
+  expect(screen.queryByRole("region", { name: "Did not run" })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Run from step/ })).toBeNull();
+  expect(screen.getByText("Takes the deploy lock when you confirm.")).toBeInTheDocument();
+});
+
+test("bring-up review lists the steps that never ran and offers run from step in place", async () => {
+  entry.mockResolvedValue(ready({ recovery: fixtures.recoveries[0] }));
+  reviewUp.mockResolvedValue(fixtures.upReview);
+  await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Bring app out of maintenance…" }));
+  await settle();
+  const notRun = within(screen.getByRole("region", { name: "Did not run" }));
+  expect(notRun.getByText("These steps did not run. The app will come up without them.")).toBeInTheDocument();
+  expect(notRun.getAllByRole("listitem").map((s) => s.textContent)).toEqual([
+    "2php artisan migrate --force",
+    "3php artisan optimize",
+  ]);
+  // Bringing the app up still runs only php artisan up.
+  const steps = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("listitem");
+  expect(steps.map((s) => s.textContent)).toEqual(["offphp artisan up"]);
+  expect(screen.getByText("Takes the deploy lock when you confirm.")).toBeInTheDocument();
+
+  const from = notRun.getByRole("button", { name: "Run from step 2 instead…" });
+  expect(from).toHaveAccessibleDescription(
+    "Runs step 2 and the steps after it on the commit already checked out. No fast-forward.",
+  );
+  const pending = later<DeployReview>();
+  prepare.mockReturnValue(pending.promise);
+  fireEvent.click(from);
+  await settle();
+  // The bring-up's reservation goes back before run from step prepares.
+  expect(cancel).toHaveBeenCalledWith("up-1");
+  expect(prepare).toHaveBeenCalledWith(1, expect.any(Number), "production", { FromStep: 2 }, expect.any(Function));
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Run from step 2 · .+ → .+$/);
+  await act(async () => pending.resolve({ ...production, runPlan: { FromStep: 2 } }));
+  expect(screen.getByRole("button", { name: "Run from step 2" })).toBeDisabled();
+  expect(confirm).not.toHaveBeenCalled();
+});
+
+test("run from step from the bring-up review says so when its reservation can't be released", async () => {
+  entry.mockResolvedValue(ready({ recovery: fixtures.recoveries[0] }));
+  reviewUp.mockResolvedValue(fixtures.upReview);
+  cancel.mockRejectedValue({ code: "local", message: "Couldn't release the reservation." });
+  await renderApp();
+  fireEvent.click(screen.getByRole("button", { name: "Bring app out of maintenance…" }));
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Run from step 2 instead…" }));
+  await settle();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(screen.getByText("Couldn't release the reservation.")).toBeInTheDocument();
 });
 
 test("back from a recovery confirm frees its reservation", async () => {
