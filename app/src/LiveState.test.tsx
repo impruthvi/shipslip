@@ -18,6 +18,7 @@ import type { Opened } from "./useReceipt";
 vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
+    receiptsChanged: async () => false,
     compare: async () => ({ kind: "notFound" }),
     loadReceipt: async (_generation: number, id: number) => fixtures.receipts[String(id)],
     copyText: async () => {},

@@ -13,6 +13,7 @@ mod finish;
 #[cfg(test)]
 mod fixture;
 mod git_path;
+mod receipt_changes;
 mod receipt_view;
 mod receipt_words;
 mod recovery;
@@ -77,6 +78,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::load_map,
+            commands::receipts_changed,
             commands::compare,
             commands::load_receipt,
             commands::deploy_entry,
@@ -212,6 +214,7 @@ mod tests {
                 "allow-quit-now",
                 "allow-quit-status",
                 "allow-receipt-seen",
+                "allow-receipts-changed",
                 "allow-review-attach",
                 "allow-review-trust",
                 "allow-review-up",

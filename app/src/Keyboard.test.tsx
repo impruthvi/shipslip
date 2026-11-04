@@ -10,6 +10,7 @@ const loadReceipt = vi.fn<(generation: number, id: number) => Promise<ReceiptRes
 vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
+    receiptsChanged: async () => false,
     compare: async () => ({ kind: "notFound" }),
     loadReceipt: (generation: number, id: number) => loadReceipt(generation, id),
     copyText: async () => {},

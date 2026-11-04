@@ -19,12 +19,14 @@ export function Footer({ state, onRetry }: { state: MapState; onRetry: () => voi
       {state.phase === "shown" ? (
         <>
           <span className="muted">Read from local receipts</span>
-          <span className="mono">{clock(state.readAt)} · on window focus</span>
+          <span className="mono">
+            Last read at <time dateTime={state.readAt.toISOString()}>{clock(state.readAt)}</time>
+          </span>
         </>
       ) : (
         <>
           <span className="muted">Not read yet</span>
-          <span className="mono">· on window focus</span>
+          <span className="mono">Local receipts only</span>
         </>
       )}
     </footer>

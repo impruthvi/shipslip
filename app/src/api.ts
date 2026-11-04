@@ -8,6 +8,7 @@ import type { CompareResult, LoadResult, QuitRun, ReceiptResult } from "./types"
 
 export interface Backend {
   loadMap(): Promise<LoadResult>;
+  receiptsChanged(): Promise<boolean>;
   compare(generation: number, row: number, a: number, b: number): Promise<CompareResult>;
   loadReceipt(generation: number, id: number): Promise<ReceiptResult>;
   copyText(text: string): Promise<void>;
@@ -20,6 +21,7 @@ export interface Backend {
 
 const tauri: Backend = {
   loadMap: () => invoke<LoadResult>("load_map"),
+  receiptsChanged: () => invoke<boolean>("receipts_changed"),
   compare: (generation, row, a, b) => invoke<CompareResult>("compare", { generation, row, a, b }),
   loadReceipt: (generation, id) => invoke<ReceiptResult>("load_receipt", { generation, id }),
   copyText: (text) => writeText(text),
@@ -45,6 +47,7 @@ function getBackend(): Promise<Backend> {
 
 export const api: Backend = {
   loadMap: async () => (await getBackend()).loadMap(),
+  receiptsChanged: async () => (await getBackend()).receiptsChanged(),
   compare: async (...args) => (await getBackend()).compare(...args),
   loadReceipt: async (...args) => (await getBackend()).loadReceipt(...args),
   copyText: async (text) => (await getBackend()).copyText(text),

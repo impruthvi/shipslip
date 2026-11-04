@@ -2,7 +2,7 @@
 //! the UI thread. The UI sends only generations, positions and ids.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use shipslip::config::default_trust_path;
@@ -18,11 +18,13 @@ use crate::deploy_session::{
 };
 use crate::finish::{self, Unseen};
 use crate::git_path;
+use crate::receipt_changes::{self, ReceiptStamp};
 use crate::state::SelectionError;
 use crate::state::{with_git, AppState, CompareResult, LoadResult, ReceiptResult};
 
 pub struct App {
     state: AppState,
+    receipt_stamp: Mutex<Option<ReceiptStamp>>,
     /// The receipts root and trust file, or why they could not be found.
     paths: Result<(PathBuf, PathBuf), String>,
     git: Option<Git>,
@@ -50,6 +52,7 @@ impl App {
         Self {
             sessions,
             state: AppState::default(),
+            receipt_stamp: Mutex::new(None),
             paths,
             git,
             unseen: Unseen::default(),
@@ -123,9 +126,27 @@ impl App {
 
     fn load_map(&self) -> LoadResult {
         self.state.load_map(now_ms, || match &self.paths {
-            Ok((root, trust)) => status(root, trust).map(crate::state::with_configured_envs),
+            Ok((root, trust)) => {
+                let stamp = receipt_changes::read(root).ok();
+                let overview = status(root, trust)?;
+                *self
+                    .receipt_stamp
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = stamp;
+                Ok(crate::state::with_configured_envs(overview))
+            }
             Err(reason) => Err(ReceiptError::Invalid(reason.clone()).into()),
         })
+    }
+
+    fn receipts_changed(&self) -> Result<bool, String> {
+        let (root, _) = self.paths.as_ref().map_err(Clone::clone)?;
+        let stamp = receipt_changes::read(root).map_err(|error| error.to_string())?;
+        let previous = self
+            .receipt_stamp
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        Ok(previous.as_ref() != Some(&stamp))
     }
 
     fn compare(&self, generation: u64, row: usize, a: usize, b: usize) -> CompareResult {
@@ -141,6 +162,11 @@ impl App {
 #[tauri::command]
 pub async fn load_map(app: tauri::State<'_, Arc<App>>) -> Result<LoadResult, String> {
     off_thread(&app, App::load_map).await
+}
+
+#[tauri::command]
+pub async fn receipts_changed(app: tauri::State<'_, Arc<App>>) -> Result<bool, String> {
+    off_thread(&app, App::receipts_changed).await?
 }
 
 #[tauri::command]
@@ -190,6 +216,87 @@ mod tests {
 
     fn app(fx: &Fixture, git: Option<Git>) -> App {
         App::new(Ok((fx.receipts(), fx.trust())), git)
+    }
+
+    #[test]
+    fn receipt_changes_are_compared_with_the_last_map_read() {
+        let fx = Fixture::new();
+        let app = app(&fx, None);
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+        assert!(!app.receipts_changed().unwrap());
+
+        fx.save(&run(1, "production"));
+        assert!(app.receipts_changed().unwrap());
+        assert!(app.receipts_changed().unwrap());
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+        assert!(!app.receipts_changed().unwrap());
+    }
+
+    #[test]
+    fn receipt_changes_find_atomic_journal_updates_and_deletions_in_existing_environments() {
+        let fx = Fixture::new();
+        let path = fx.save(&run(1, "production"));
+        let directory = std::fs::File::open(path.parent().unwrap()).unwrap();
+        let old_times =
+            std::fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(10));
+        directory.set_times(old_times).unwrap();
+        let app = app(&fx, None);
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+        assert!(!app.receipts_changed().unwrap());
+
+        let replacement = path.with_extension("tmp");
+        std::fs::copy(&path, &replacement).unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        assert!(app.receipts_changed().unwrap());
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+        assert!(!app.receipts_changed().unwrap());
+
+        directory.set_times(old_times).unwrap();
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+        std::fs::remove_file(path).unwrap();
+        assert!(app.receipts_changed().unwrap());
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+        assert!(!app.receipts_changed().unwrap());
+    }
+
+    #[test]
+    fn receipt_changes_find_new_environments_and_removed_projects() {
+        let fx = Fixture::new();
+        fx.save(&run(1, "production"));
+        let app = app(&fx, None);
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+
+        fx.save(&run(2, "staging"));
+        assert!(app.receipts_changed().unwrap());
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+        assert!(!app.receipts_changed().unwrap());
+
+        std::fs::remove_dir_all(fx.receipts()).unwrap();
+        assert!(app.receipts_changed().unwrap());
+    }
+
+    #[test]
+    fn receipt_check_errors_do_not_replace_the_last_successful_map_read() {
+        let fx = Fixture::new();
+        let app = app(&fx, None);
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+
+        std::fs::remove_dir_all(fx.receipts()).unwrap();
+        std::fs::write(fx.receipts(), "not a directory").unwrap();
+        assert!(app.receipts_changed().is_err());
+        assert!(matches!(
+            app.load_map(),
+            LoadResult::Failed {
+                current: Some(_),
+                ..
+            }
+        ));
+
+        std::fs::remove_file(fx.receipts()).unwrap();
+        fx.save(&run(1, "production"));
+        assert!(app.receipts_changed().unwrap());
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+        assert!(!app.receipts_changed().unwrap());
     }
 
     #[test]
@@ -250,6 +357,7 @@ mod tests {
     #[test]
     fn missing_home_is_a_load_error_not_a_crash() {
         let app = App::new(Err("HOME is not set".into()), None);
+        assert_eq!(app.receipts_changed().unwrap_err(), "HOME is not set");
         match app.load_map() {
             LoadResult::Failed { message, current } => {
                 assert_eq!(message, "invalid receipt: HOME is not set");

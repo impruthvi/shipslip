@@ -22,6 +22,7 @@ const loadReceipt = vi.fn<(generation: number, id: number) => Promise<ReceiptRes
 vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
+    receiptsChanged: async () => false,
     compare: vi.fn(),
     loadReceipt: (generation: number, id: number) => loadReceipt(generation, id),
     copyText: vi.fn(),
@@ -192,6 +193,7 @@ test("preparing names each phase, then cancel releases the lock and returns to t
   await act(async () => pending.resolve(production));
   expect(cancel).toHaveBeenCalledWith("review-1");
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
+  expect(loadMap).toHaveBeenCalledTimes(2);
   expect(screen.getByRole("button", { name: DEPLOY })).toHaveFocus();
 });
 
@@ -607,6 +609,7 @@ test("changed settings open the trust review; approving returns to the pane with
   await settle();
   expect(approveTrust).toHaveBeenCalledWith("trust-1", "production");
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
+  expect(loadMap).toHaveBeenCalledTimes(2);
   expect(screen.getByText(`Configuration approved for ${cell.env}`)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: DEPLOY })).toHaveFocus();
   // Approval alone never prepares a deploy.
@@ -972,6 +975,7 @@ test("back from a recovery confirm frees its reservation", async () => {
   await settle();
   expect(cancel).toHaveBeenCalledWith("up-1");
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
+  expect(loadMap).toHaveBeenCalledTimes(2);
 });
 
 test("attach review: the running step is watched, apart from the steps that will run", async () => {
@@ -1252,9 +1256,11 @@ test("a live run shows on its cell and in the sidebar, which leads back to it", 
   expect(screen.getByText("Connecting to shop-prod…")).toBeInTheDocument();
 
   // Leave running goes back to the map and returns focus to the sidebar link.
+  const reads = loadMap.mock.calls.length;
   fireEvent.click(screen.getByRole("button", { name: "Leave running" }));
   await settle();
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
+  expect(loadMap).toHaveBeenCalledTimes(reads + 1);
   expect(stop).not.toHaveBeenCalled();
   expect(cancel).not.toHaveBeenCalled();
   expect(unfollow).toHaveBeenCalled();

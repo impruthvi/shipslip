@@ -9,6 +9,7 @@ const compare = vi.fn<(g: number, row: number, a: number, b: number) => Promise<
 vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
+    receiptsChanged: async () => false,
     compare: (g: number, row: number, a: number, b: number) => compare(g, row, a, b),
     loadReceipt: async () => ({ kind: "notFound" }),
     copyText: vi.fn(),

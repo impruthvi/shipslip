@@ -24,10 +24,12 @@ beforeEach(() => {
 test("commands get the argument names Rust expects", async () => {
   const { api } = await import("./api");
   await api.loadMap();
+  await api.receiptsChanged();
   await api.compare(3, 1, 0, 2);
   await api.loadReceipt(3, 7);
   expect(invoke.mock.calls).toEqual([
     ["load_map"],
+    ["receipts_changed"],
     ["compare", { generation: 3, row: 1, a: 0, b: 2 }],
     ["load_receipt", { generation: 3, id: 7 }],
   ]);
