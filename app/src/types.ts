@@ -61,6 +61,7 @@ export type FlagKind =
   | "appLeftDown";
 
 export interface EnvCellView {
+  terminalRun: { runId: string; startedAtMs: number } | null;
   mark: Mark;
   sha: string | null;
   shortSha: string | null;

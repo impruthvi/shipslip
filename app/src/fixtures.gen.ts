@@ -37,6 +37,7 @@ export const map: LoadResult = {
         "cells": [
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "recorded",
             "sha": "ffffffffffffffffffffffffffffffffffffffff",
             "shortSha": "fffffff",
@@ -77,6 +78,7 @@ export const map: LoadResult = {
           },
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "observed",
             "sha": "8888888888888888888888888888888888888888",
             "shortSha": "8888888",
@@ -111,6 +113,7 @@ export const map: LoadResult = {
         "cells": [
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "recorded",
             "sha": "dddddddddddddddddddddddddddddddddddddddd",
             "shortSha": "ddddddd",
@@ -136,6 +139,7 @@ export const map: LoadResult = {
           },
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "incomplete",
             "sha": "cccccccccccccccccccccccccccccccccccccccc",
             "shortSha": "ccccccc",
@@ -168,6 +172,7 @@ export const map: LoadResult = {
         "cells": [
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "notKnown",
             "sha": null,
             "shortSha": null,
@@ -194,6 +199,7 @@ export const map: LoadResult = {
           },
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "noCode",
             "sha": null,
             "shortSha": null,
@@ -225,6 +231,7 @@ export const map: LoadResult = {
           },
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "recorded",
             "sha": "9999999999999999999999999999999999999999",
             "shortSha": "9999999",
@@ -257,6 +264,7 @@ export const map: LoadResult = {
         "cells": [
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "recorded",
             "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             "shortSha": "bbbbbbb",
@@ -290,6 +298,7 @@ export const map: LoadResult = {
           },
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "recorded",
             "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "shortSha": "aaaaaaa",
@@ -334,6 +343,56 @@ export const map: LoadResult = {
         ]
       }
     ]
+  }
+};
+
+export const terminalMap: LoadResult = {
+  "kind": "loaded",
+  "generation": 1,
+  "map": {
+    "screen": "map",
+    "envs": [
+      "staging"
+    ],
+    "rows": [
+      {
+        "label": "shop",
+        "repoRoot": "/Users/you/code/shop",
+        "pathMissing": false,
+        "cells": [
+          {
+            "kind": "present",
+            "terminalRun": {
+              "runId": "00000065-0",
+              "startedAtMs": 1791794820000
+            },
+            "mark": "incomplete",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791794820000,
+            "age": "3m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [
+              "deploy incomplete"
+            ],
+            "outcome": {
+              "text": "Unfinished",
+              "tone": "bad",
+              "kind": "unfinished"
+            },
+            "flags": [],
+            "target": "staging1:/var/www/shop",
+            "targetMoved": null,
+            "needsAttention": true,
+            "receipt": 0,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      }
+    ],
+    "problems": []
   }
 };
 
@@ -383,6 +442,7 @@ export const smokeCells: Record<string, CellView> = {
     "staleReceipt": null,
     "target": "staging1:/var/www/shop",
     "targetMoved": null,
+    "terminalRun": null,
     "words": ""
   },
   "passed": {
@@ -416,6 +476,7 @@ export const smokeCells: Record<string, CellView> = {
     "staleReceipt": null,
     "target": "staging1:/var/www/shop",
     "targetMoved": null,
+    "terminalRun": null,
     "words": ""
   },
   "upOnlyFailed": {
@@ -446,6 +507,7 @@ export const smokeCells: Record<string, CellView> = {
     "staleReceipt": null,
     "target": "staging1:/var/www/shop",
     "targetMoved": null,
+    "terminalRun": null,
     "words": "no code change in the last run"
   }
 };
@@ -1632,6 +1694,7 @@ export const watchResults: LoadResult = {
         "cells": [
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "recorded",
             "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "shortSha": "aaaaaaa",
@@ -1669,6 +1732,7 @@ export const watchResults: LoadResult = {
         "cells": [
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "recorded",
             "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "shortSha": "aaaaaaa",
@@ -1706,6 +1770,7 @@ export const watchResults: LoadResult = {
         "cells": [
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "recorded",
             "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "shortSha": "aaaaaaa",
@@ -1743,6 +1808,7 @@ export const watchResults: LoadResult = {
         "cells": [
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "recorded",
             "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "shortSha": "aaaaaaa",
@@ -1780,6 +1846,7 @@ export const watchResults: LoadResult = {
         "cells": [
           {
             "kind": "present",
+            "terminalRun": null,
             "mark": "recorded",
             "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "shortSha": "aaaaaaa",
@@ -2646,6 +2713,11 @@ export const deployReview: DeployReview = {
   ],
   "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "watchMs": 120000
+};
+
+export const terminalEntry: DeployEntry = {
+  "kind": "unavailable",
+  "reason": "A deploy is running in a terminal on this Mac. Follow it in that terminal."
 };
 
 export const runInfo: RunInfo = {
@@ -3704,6 +3776,12 @@ export const lockHeld: CommandError = {
   "blockedKind": "lockHeld",
   "code": "blocked",
   "message": "alex@MacBook · target 1234567. Last heartbeat 30 seconds ago."
+};
+
+export const terminalLockHeld: CommandError = {
+  "blockedKind": "lockHeld",
+  "code": "blocked",
+  "message": "alex@MacBook · target 1234567. Last heartbeat 30 seconds ago. This is the terminal run on this Mac. Follow it in that terminal."
 };
 
 export const staleLock: CommandError = {

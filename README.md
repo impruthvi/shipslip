@@ -608,6 +608,12 @@ Laravel log when configured, then opens the saved receipt. You can stop after
 the current step, stop the log watch, or return to the grid and leave the run
 going in the app.
 
+Deploys started with `slip` in a terminal on this Mac also show as Running in
+the grid and under Deploys running. Follow them in that terminal: the app
+disables Deploy and offers no recovery while the terminal owns the journal.
+When the process exits, the app shows the finished receipt or the usual
+unfinished-run recovery choices.
+
 Recovery choices come from the saved receipt and each opens a review before
 confirmation. Re-attach follows an unfinished run without starting its active
 step twice. You can also rerun the recipe, run from a chosen step on the code

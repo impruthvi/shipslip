@@ -37,7 +37,7 @@ function ended(outcome: OutcomeView, flags: FlagView[], last: boolean): Status |
 /** The one word a board row shows for a cell. The latest risk wins over an
  * older success: a failed last attempt outranks the success it sits on. */
 export function status(cell: EnvCellView, live?: string): Status {
-  if (live) return { word: "Running", tone: "running" };
+  if (live || cell.terminalRun) return { word: "Running", tone: "running" };
   if (cell.mark === "notKnown") return { word: "Not known", tone: "attention" };
   const last = cell.lastAttempt && ended(cell.lastAttempt.outcome, cell.lastAttempt.flags, true);
   if (last) return last;
@@ -58,6 +58,7 @@ export function status(cell: EnvCellView, live?: string): Status {
  * the sidebar's reason. */
 export function reason(cell: EnvCellView, live?: string): { text: string; className: string } | null {
   if (live) return { text: live, className: "muted" };
+  if (cell.terminalRun) return { text: "Running from the terminal", className: "muted" };
   const last = cell.lastAttempt;
   if (last && last.outcome.tone === "bad") {
     return { text: `Last: ${lowerFirst(last.outcome.text)} · ${last.age}`, className: "" };
@@ -161,6 +162,7 @@ export function cellName(
   if (cell.kind === "absent") return `${label}, ${env}, none`;
   const parts = [label, env];
   if (live) parts.push(live);
+  else if (cell.terminalRun) parts.push("Running from the terminal");
   parts.push(cell.shortSha ? `${markLabel[cell.mark]} ${cell.shortSha}` : cell.words);
   if (cell.age) parts.push(cell.age);
   parts.push(...cell.qualifiers);
@@ -197,7 +199,7 @@ export function Cell({ cell, selected = false, compareLine, live, expanded = fal
       className={`cell${cell.mark === "notKnown" ? " cell-hatched" : ""}${never ? " cell-empty" : ""}${selected ? " cell-selected" : ""}`}
     >
       <div className="cell-head">
-        <Mark kind={live ? "live" : cell.mark} muted={never && !live} />
+        <Mark kind={live || cell.terminalRun ? "live" : cell.mark} muted={never && !live && !cell.terminalRun} />
         <Flap status={status(cell, live)} />
         <span className="cell-sha mono" title={cell.sha ?? undefined}>
           {cell.shortSha ?? "—"}

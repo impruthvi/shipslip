@@ -55,12 +55,21 @@ function Item({
 export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onProblem, live, busy }: Props) {
   const map = state.phase === "shown" && state.loaded.map.screen !== "firstRun" ? state.loaded.map : null;
   const labels = map?.rows.map((row) => row.label) ?? [];
+  const terminal = map?.rows.flatMap((row, rowIndex) =>
+    row.cells.flatMap((cell, colIndex) => {
+      const env = map.envs[colIndex];
+      if (cell.kind !== "present" || !cell.terminalRun
+        || runs.some((run) => run.checkout === row.repoRoot && run.env === env)) return [];
+      return [{ row, rowIndex, colIndex, env, run: cell.terminalRun }];
+    }),
+  ) ?? [];
   const attention = map
     ? map.rows
         .flatMap((row, r) =>
           row.cells.flatMap((cell, c) => {
-            if (cell.kind !== "present" || !cell.needsAttention) return [];
             const env = map.envs[c];
+            if (cell.kind !== "present" || !cell.needsAttention || cell.terminalRun
+              || live[`${row.repoRoot}\n${env}`]) return [];
             const running = live[`${row.repoRoot}\n${env}`];
             return [{ row, cell, r, c, env, said: status(cell, running), why: reason(cell, running) }];
           }),
@@ -74,7 +83,7 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
         <h2 id="side-runs" className="side-title">
           Deploys running
         </h2>
-        {runs.length === 0 ? (
+        {runs.length === 0 && terminal.length === 0 ? (
           <p className="side-empty muted">None started here</p>
         ) : (
           <ul className="side-list">
@@ -107,6 +116,26 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
                           ? <ConnectionGap gap={run.connectionGap} now={now} />
                           : elapsed(now - run.startedAtMs)}
                       </span>
+                    </span>
+                  </span>
+                </Item>
+              </li>
+            ))}
+            {terminal.map(({ row, rowIndex, colIndex, env, run }, index) => (
+              <li key={run.runId}>
+                <Item
+                  busy={busy}
+                  onClick={() => onProblem(rowIndex, colIndex)}
+                  buttonRef={runs.length === 0 && index === 0 ? runsButton : undefined}
+                >
+                  <span className="side-line">
+                    <span className="side-mark" aria-hidden><Mark kind="live" /></span>
+                    <span className="side-name" title={row.repoRoot}>{row.label}</span>
+                  </span>{" "}
+                  <span className="side-why">
+                    <span className="side-why-text muted">
+                      {env}<Folder path={twinFolder(labels, row.label, row.repoRoot)} />
+                      {" · Running from the terminal"}
                     </span>
                   </span>
                 </Item>

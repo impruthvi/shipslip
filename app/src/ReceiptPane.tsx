@@ -65,10 +65,10 @@ export function ReceiptPane({
   const shownKey = receipt.shown?.key;
 
   useEffect(() => {
-    if (!focusSlip || shownKey !== requestKey) return;
+    if (!focusSlip || (!next.cell.terminalRun && shownKey !== requestKey)) return;
     pane.current?.querySelector<HTMLElement>(".slip-title")?.focus();
     onSlipFocused();
-  }, [focusSlip, shownKey, requestKey, onSlipFocused]);
+  }, [focusSlip, shownKey, requestKey, onSlipFocused, next.cell.terminalRun]);
 
   const onPointerDown = (event: PointerEvent<HTMLDivElement>) => {
     drag.current = { x: event.clientX, width };
@@ -114,31 +114,41 @@ export function ReceiptPane({
       />
       {head}
       {entry}
-      <ReceiptTabs cell={next.cell} role={next.role} onView={onView} />
-      {opening && (
-        <p className="pane-opening muted">
-          Opening receipt for {next.label} · {next.env}…
-        </p>
-      )}
-      {shown && (
-        <div
-          id="receipt-panel"
-          className={`pane-slip${opening ? " pane-slip-dim" : ""}${print ? " pane-slip-print" : ""}`}
-          aria-busy={opening}
-          role={tabs(next.cell).length > 1 ? "tabpanel" : undefined}
-          aria-labelledby={tabs(next.cell).length > 1 ? `receipt-tab-${next.role}` : undefined}
-        >
-          <Slip
-            key={slipKey(shown.key, shown.opened)}
-            opened={shown.opened}
-            cell={shown.meta.cell}
-            label={shown.meta.label}
-            env={shown.meta.env}
-            context={withoutLinks(context(shown.meta.cell, shown.meta.role), shown.meta.cell)}
-            onView={onView}
-            attachOffered={shown.opened.kind === "receipt" && shown.opened.runId === attachRunId}
-          />
-        </div>
+      {next.cell.terminalRun ? (
+        <section className="pane-slip">
+          <h2 className="slip-title" tabIndex={-1}>Running from the terminal</h2>
+          <p>Follow this run in the terminal where it started.</p>
+          <p className="mono muted">Run {next.cell.terminalRun.runId}</p>
+        </section>
+      ) : (
+        <>
+          <ReceiptTabs cell={next.cell} role={next.role} onView={onView} />
+          {opening && (
+            <p className="pane-opening muted">
+              Opening receipt for {next.label} · {next.env}…
+            </p>
+          )}
+          {shown && (
+            <div
+              id="receipt-panel"
+              className={`pane-slip${opening ? " pane-slip-dim" : ""}${print ? " pane-slip-print" : ""}`}
+              aria-busy={opening}
+              role={tabs(next.cell).length > 1 ? "tabpanel" : undefined}
+              aria-labelledby={tabs(next.cell).length > 1 ? `receipt-tab-${next.role}` : undefined}
+            >
+              <Slip
+                key={slipKey(shown.key, shown.opened)}
+                opened={shown.opened}
+                cell={shown.meta.cell}
+                label={shown.meta.label}
+                env={shown.meta.env}
+                context={withoutLinks(context(shown.meta.cell, shown.meta.role), shown.meta.cell)}
+                onView={onView}
+                attachOffered={shown.opened.kind === "receipt" && shown.opened.runId === attachRunId}
+              />
+            </div>
+          )}
+        </>
       )}
     </aside>
   );

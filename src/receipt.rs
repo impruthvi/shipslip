@@ -485,6 +485,25 @@ impl ReceiptJournal {
         })
     }
 
+    /// Checks an existing sidecar without creating it or taking over the journal.
+    /// A successful non-blocking lock is released before this returns.
+    pub fn is_claimed(path: &Path) -> Result<bool, ReceiptError> {
+        let lock_path = path.with_extension("json.lock");
+        let file = match File::open(&lock_path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(source) => return Err(io_error(&lock_path, source)),
+        };
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                FileExt::unlock(&file).map_err(|source| io_error(&lock_path, source))?;
+                Ok(false)
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
+            Err(source) => Err(io_error(&lock_path, source)),
+        }
+    }
+
     /// Holds an OS file lock until this journal is dropped. A killed process
     /// releases it automatically, while the receipt remains available.
     pub fn claim(&self) -> Result<(), ReceiptError> {

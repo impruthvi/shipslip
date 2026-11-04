@@ -146,7 +146,11 @@ impl App {
             .receipt_stamp
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        Ok(previous.as_ref() != Some(&stamp))
+        Ok(previous.as_ref() != Some(&stamp)
+            || self
+                .state
+                .journal_claims_changed()
+                .map_err(|error| error.to_string())?)
     }
 
     fn compare(&self, generation: u64, row: usize, a: usize, b: usize) -> CompareResult {
@@ -230,6 +234,31 @@ mod tests {
         assert!(app.receipts_changed().unwrap());
         assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
         assert!(!app.receipts_changed().unwrap());
+    }
+
+    #[test]
+    fn receipt_changes_notice_a_terminal_exit_without_a_journal_write() {
+        let fx = Fixture::new();
+        let mut saved = run(1, "production");
+        saved["status"] = json!("InProgress");
+        saved["outcome"] = serde_json::Value::Null;
+        let path = fx.save(&saved);
+        let journal = shipslip::receipt::ReceiptJournal::load(&path).unwrap();
+        journal.claim().unwrap();
+        let app = app(&fx, None);
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+        assert!(!app.receipts_changed().unwrap());
+        let before = std::fs::read(&path).unwrap();
+
+        drop(journal);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(app.receipts_changed().unwrap());
+        assert!(matches!(app.load_map(), LoadResult::Loaded(_)));
+        assert!(!app.receipts_changed().unwrap());
+
+        let journal = shipslip::receipt::ReceiptJournal::load(&path).unwrap();
+        journal.claim().unwrap();
+        assert!(app.receipts_changed().unwrap());
     }
 
     #[test]

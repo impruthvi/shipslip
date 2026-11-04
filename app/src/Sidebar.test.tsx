@@ -49,3 +49,36 @@ test("the running row replaces its animation and run timer with the recorded con
   expect(within(runs).queryByText(/Connection lost/)).toBeNull();
   expect(runs.querySelector(".mark-spin")).not.toBeNull();
 });
+
+test("a terminal run is listed only under Deploys running and opens its environment", () => {
+  if (fixtures.terminalMap.kind !== "loaded") throw new Error("fixture");
+  const current = props(false);
+  const state: MapState = { phase: "shown", loaded: fixtures.terminalMap, readAt: new Date(0), failure: null };
+  render(<Sidebar {...current} state={state} runs={[]} />);
+  const runs = screen.getByRole("region", { name: "Deploys running" });
+  expect(within(runs).getAllByRole("listitem")).toHaveLength(1);
+  expect(runs).toHaveTextContent("shop");
+  expect(runs).toHaveTextContent("staging · Running from the terminal");
+  expect(within(screen.getByRole("region", { name: /^Needs attention/ })).queryByRole("listitem")).toBeNull();
+  fireEvent.click(within(runs).getByRole("button"));
+  expect(current.onProblem).toHaveBeenCalledWith(0, 0);
+  expect(current.onFollow).not.toHaveBeenCalled();
+});
+
+test.each([false, true])("an app-owned running environment is not duplicated (terminal marker: %s)", (terminalMarker) => {
+  if (fixtures.terminalMap.kind !== "loaded") throw new Error("fixture");
+  const loaded = structuredClone(fixtures.terminalMap);
+  const { map } = loaded;
+  const row = map.rows[0];
+  const env = map.envs[0];
+  const cell = row.cells[0];
+  if (cell.kind !== "present") throw new Error("fixture");
+  if (!terminalMarker) cell.terminalRun = null;
+  const run = { ...fixtures.runInfo, checkout: row.repoRoot, env, project: row.label };
+  const state: MapState = { phase: "shown", loaded, readAt: new Date(0), failure: null };
+  render(<Sidebar {...props(false)} state={state} runs={[run]} live={{ [`${row.repoRoot}\n${env}`]: "Step 1" }} />);
+  const runs = screen.getByRole("region", { name: "Deploys running" });
+  expect(within(runs).getAllByRole("listitem")).toHaveLength(1);
+  expect(runs).not.toHaveTextContent("Running from the terminal");
+  expect(within(screen.getByRole("region", { name: /^Needs attention/ })).queryByRole("listitem")).toBeNull();
+});

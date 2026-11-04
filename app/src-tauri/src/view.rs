@@ -88,6 +88,7 @@ pub enum CellView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnvCellView {
+    pub terminal_run: Option<TerminalRunView>,
     pub mark: MarkView,
     pub sha: Option<String>,
     pub short_sha: Option<String>,
@@ -111,6 +112,32 @@ pub struct EnvCellView {
     pub stale_receipt: Option<usize>,
     /// The newest run, when it is not the one behind the code.
     pub last_attempt: Option<AttemptView>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalRunView {
+    pub run_id: String,
+    pub started_at_ms: u64,
+}
+
+pub fn terminal_run(
+    run: &AttemptSummary,
+) -> Result<Option<TerminalRunView>, shipslip::receipt::ReceiptError> {
+    use shipslip::receipt::{self, ReceiptJournal, ReceiptStatus};
+
+    if !run.badge.outcome.unfinished || !ReceiptJournal::is_claimed(&run.path)? {
+        return Ok(None);
+    }
+    let saved = receipt::read(&run.path)?;
+    Ok(
+        (saved.status == ReceiptStatus::InProgress && saved.owner_pid != std::process::id()).then(
+            || TerminalRunView {
+                run_id: run.run_id.field(),
+                started_at_ms: millis(run.started_at_ms),
+            },
+        ),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -327,6 +354,10 @@ fn cell_view(cell: &EnvCell, now_ms: u128, locators: &mut Locators) -> EnvCellVi
             .is_some_and(|run| run.run_id != last.run_id)
     });
     EnvCellView {
+        terminal_run: cell
+            .last_attempt
+            .as_ref()
+            .and_then(|run| terminal_run(run).ok().flatten()),
         mark: match text.mark {
             Mark::Recorded => MarkView::Recorded,
             Mark::Incomplete => MarkView::Incomplete,
@@ -581,6 +612,42 @@ mod tests {
             CellView::Present(cell) => cell,
             CellView::Absent => panic!("cell {row},{col} is absent"),
         }
+    }
+
+    #[test]
+    fn a_held_journal_is_running_until_it_finishes_or_releases_its_sidecar() {
+        use shipslip::receipt::ReceiptJournal;
+
+        let fx = Fixture::new();
+        let mut saved = run(1, "production");
+        saved["status"] = json!("InProgress");
+        saved["outcome"] = Value::Null;
+        saved["finished_at_ms"] = Value::Null;
+        let path = fx.save(&saved);
+        let before = fs::read(&path).unwrap();
+        let cell = || serde_json::to_value(present(&load(&fx).0, 0, 0)).unwrap();
+        assert_eq!(cell()["terminalRun"], Value::Null);
+        assert!(!path.with_extension("json.lock").exists());
+
+        let journal = ReceiptJournal::load(&path).unwrap();
+        journal.claim().unwrap();
+        assert_eq!(
+            cell()["terminalRun"],
+            json!({"runId": "00000001-0", "startedAtMs": 1000})
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        journal.set_owner_pid(std::process::id()).unwrap();
+        assert_eq!(cell()["terminalRun"], Value::Null);
+        journal.set_owner_pid(1).unwrap();
+
+        drop(journal);
+        assert_eq!(cell()["terminalRun"], Value::Null);
+        let journal = ReceiptJournal::load(&path).unwrap();
+        journal.claim().unwrap();
+        journal.finish(shipslip::DeployOutcome::Succeeded).unwrap();
+        assert_eq!(cell()["terminalRun"], Value::Null);
+        assert_eq!(cell()["outcome"]["kind"], "succeeded");
     }
 
     #[test]

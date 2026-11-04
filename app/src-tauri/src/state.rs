@@ -9,13 +9,13 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde::Serialize;
 use shipslip::config::LoadedConfig;
 use shipslip::git::{Comparison, Git};
-use shipslip::receipt::compare_envs_with;
+use shipslip::receipt::{compare_envs_with, ReceiptError};
 use shipslip::records::{CodeState, EnvCell, ReceiptQueryError, Status as Overview};
 
 use shipslip::records::receipt_at;
 
 use crate::receipt_view::{slip, SlipView};
-use crate::view::{self, compare_view, CompareView, Locators, MapView};
+use crate::view::{self, compare_view, CellView, CompareView, Locators, MapView};
 
 #[derive(Default)]
 pub struct AppState {
@@ -113,6 +113,31 @@ pub fn with_git(git: Option<&Git>) -> impl Fn(&Path, &str, &str) -> Comparison +
 }
 
 impl AppState {
+    pub fn journal_claims_changed(&self) -> Result<bool, ReceiptError> {
+        let Some(snapshot) = self.inner().snapshot.clone() else {
+            return Ok(false);
+        };
+        for (row, viewed) in snapshot.overview.repos.iter().zip(&snapshot.map.rows) {
+            for run in row
+                .envs
+                .iter()
+                .filter_map(|cell| cell.last_attempt.as_ref())
+            {
+                if !run.badge.outcome.unfinished {
+                    continue;
+                }
+                let run_id = run.run_id.field();
+                let was_claimed = viewed.cells.iter().any(|cell| {
+                    matches!(cell, CellView::Present(cell) if cell.terminal_run.as_ref().is_some_and(|run| run.run_id == run_id))
+                });
+                if view::terminal_run(run)?.is_some() != was_claimed {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     /// Resolves a UI position through the current map. Paths are never inputs
     /// to deployment commands, and an env must belong to the selected row.
     pub fn resolve_target(
