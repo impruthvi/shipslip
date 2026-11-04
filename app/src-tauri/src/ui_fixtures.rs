@@ -235,6 +235,7 @@ fn smoke_cells() -> BTreeMap<&'static str, Value> {
 
 /// Every answer the UI handles, keyed so the preview can serve them.
 struct Fixtures {
+    terminal_map: LoadResult,
     map: LoadResult,
     watch_results: LoadResult,
     compares: BTreeMap<String, Value>,
@@ -320,6 +321,12 @@ fn build() -> (Fixtures, Vec<String>) {
     unfinished["steps"][1]["status"] = json!("Running");
     unfinished["steps"][1]["exit_code"] = json!(null);
     unfinished["steps"][1]["finished_at_ms"] = json!(null);
+    let terminal_path = empty.save(&unfinished);
+    let journal = shipslip::receipt::ReceiptJournal::load(&terminal_path).unwrap();
+    journal.claim().unwrap();
+    let terminal_map =
+        AppState::default().load_map(|| NOW, || overview(&empty.receipts(), &empty.trust()));
+    drop(journal);
     slips.insert("unfinished", unfinished);
     let mut gaps = b.deploy("shop", "staging", 2, &sha('a'));
     gaps["steps"][1]["finished_at_ms"] = json!(null);
@@ -391,6 +398,7 @@ fn build() -> (Fixtures, Vec<String>) {
         .collect();
     (
         Fixtures {
+            terminal_map,
             map,
             watch_results,
             compares,
@@ -425,6 +433,12 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
         let _ = write!(out, "\nexport const {name}: {ty} = {};\n", json(value));
     };
     item(&mut out, "map", "LoadResult", &fixtures.map);
+    item(
+        &mut out,
+        "terminalMap",
+        "LoadResult",
+        &fixtures.terminal_map,
+    );
     item(
         &mut out,
         "smokeCells",
@@ -467,6 +481,12 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
     item(&mut out, "quitRuns", "QuitRun[]", &fixtures.quit_runs);
     let deploy = |name: &str| &fixtures.deploy[name];
     item(&mut out, "deployReview", "DeployReview", deploy("review"));
+    item(
+        &mut out,
+        "terminalEntry",
+        "DeployEntry",
+        deploy("terminalEntry"),
+    );
     item(&mut out, "runInfo", "RunInfo", deploy("runInfo"));
     item(&mut out, "gapRunInfo", "RunInfo", deploy("gapRunInfo"));
     item(
@@ -523,6 +543,12 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
     );
     item(&mut out, "refusal", "CommandError", deploy("refusal"));
     item(&mut out, "lockHeld", "CommandError", deploy("lockHeld"));
+    item(
+        &mut out,
+        "terminalLockHeld",
+        "CommandError",
+        deploy("terminalLockHeld"),
+    );
     item(&mut out, "staleLock", "CommandError", deploy("staleLock"));
     item(&mut out, "trustReview", "TrustReview", deploy("trust"));
     item(

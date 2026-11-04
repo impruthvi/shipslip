@@ -197,6 +197,7 @@ fn prepare_requires_trust_before_ssh_and_preserves_connection_diagnostics() {
 
 #[derive(Default)]
 struct Remote {
+    refused_lock: Mutex<Option<shipslip::LockOwner>>,
     held: std::sync::atomic::AtomicBool,
     released: AtomicUsize,
     fail_release: std::sync::atomic::AtomicBool,
@@ -223,6 +224,16 @@ impl Transport for Remote {
         _: usize,
     ) -> Result<i32, TransportError> {
         let lines = if script.contains("echo acquired") {
+            let refusal = self
+                .refused_lock
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|owner| format!("held 30 {}", serde_json::to_string(owner).unwrap()));
+            if let Some(refusal) = refusal {
+                output.send(refusal).await.unwrap();
+                return Ok(0);
+            }
             assert!(
                 !self.held.swap(true, Ordering::SeqCst),
                 "duplicate remote lock acquisition"
@@ -638,6 +649,176 @@ fn running_step_1(journal: &ReceiptJournal) {
     journal.begin_step(1, 3_000).unwrap();
 }
 
+#[test]
+fn a_terminal_journal_blocks_deploy_and_attach_without_changing_it() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        let root = unfinished_deploy(&fx, &sessions, running_step_1).await;
+        let path = receipt::find_open(&fx.receipts(), "example", "production", &root)
+            .unwrap()
+            .unwrap();
+        let journal = ReceiptJournal::load(&path).unwrap();
+        journal.claim().unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        assert_eq!(
+            sessions
+                .deploy_entry(root.clone(), "production".into())
+                .await,
+            DeployEntry::Unavailable {
+                reason:
+                    "A deploy is running in a terminal on this Mac. Follow it in that terminal."
+                        .into(),
+            }
+        );
+        let error = sessions
+            .review_attach(root.clone(), "production".into())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Busy);
+        let error = sessions
+            .prepare(root.clone(), "production".into(), RunPlan::Deploy)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Busy);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(sessions.connector.0.load(Ordering::SeqCst), 0);
+
+        drop(journal);
+        assert!(matches!(
+            sessions
+                .deploy_entry(root.clone(), "production".into())
+                .await,
+            DeployEntry::Ready {
+                recovery: Some(_),
+                ..
+            }
+        ));
+        sessions
+            .review_attach(root, "production".into())
+            .await
+            .unwrap();
+        let probe = ReceiptJournal::load(&path).unwrap();
+        probe.claim().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unreadable_sidecar_blocks_deploy_and_attach_without_contacting_ssh() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        let root = unfinished_deploy(&fx, &sessions, running_step_1).await;
+        let path = receipt::find_open(&fx.receipts(), "example", "production", &root)
+            .unwrap()
+            .unwrap();
+        let sidecar = path.with_extension("json.lock");
+        std::fs::remove_file(&sidecar).unwrap();
+        std::os::unix::fs::symlink(sidecar.file_name().unwrap(), &sidecar).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let entry = sessions
+            .deploy_entry(root.clone(), "production".into())
+            .await;
+        assert!(
+            matches!(entry, DeployEntry::Unavailable { reason } if reason.contains("receipt I/O"))
+        );
+        let error = sessions
+            .review_attach(root.clone(), "production".into())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Local);
+        let error = sessions
+            .prepare(root, "production".into(), RunPlan::Deploy)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Local);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(sessions.connector.0.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn attach_confirmation_refuses_a_sidecar_claimed_after_the_review() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        let root = unfinished_deploy(&fx, &sessions, running_step_1).await;
+        let review = sessions
+            .review_attach(root.clone(), "production".into())
+            .await
+            .unwrap();
+        let path = receipt::find_open(&fx.receipts(), "example", "production", &root)
+            .unwrap()
+            .unwrap();
+        let journal = ReceiptJournal::load(&path).unwrap();
+        journal.claim().unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let error = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Local);
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(sessions.connector.0.load(Ordering::SeqCst), 0);
+    });
+}
+
+#[test]
+fn a_lock_refusal_names_the_terminal_only_when_its_run_id_matches() {
+    struct TerminalStarts {
+        journal: ReceiptJournal,
+        remote: Arc<Remote>,
+    }
+    impl Connector for TerminalStarts {
+        type Remote = Remote;
+        async fn connect(&self, _: &str) -> Result<Arc<Remote>, TransportError> {
+            self.journal.claim().unwrap();
+            Ok(self.remote.clone())
+        }
+    }
+
+    tauri::async_runtime::block_on(async {
+        for matches in [false, true] {
+            let fx = Fixture::new();
+            let setup = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+            let root = unfinished_deploy(&fx, &setup, running_step_1).await;
+            let path = receipt::find_open(&fx.receipts(), "example", "production", &root)
+                .unwrap()
+                .unwrap();
+            let journal = ReceiptJournal::load(&path).unwrap();
+            let saved = journal.snapshot();
+            let remote = Arc::new(Remote::default());
+            *remote.refused_lock.lock().unwrap() = Some(shipslip::LockOwner {
+                run_id: if matches {
+                    saved.run_id
+                } else {
+                    "another-run".into()
+                },
+                user: "alex".into(),
+                machine: "MacBook".into(),
+                pid: 42,
+                started_at: 0,
+                target_sha: saved.target_sha,
+            });
+            let sessions = Sessions::new(
+                fx.receipts(),
+                fx.trust(),
+                TerminalStarts { journal, remote },
+            );
+            let error = sessions
+                .prepare(root, "production".into(), RunPlan::Deploy)
+                .await
+                .unwrap_err();
+            assert_eq!(error.blocked_kind, Some(BlockedKind::LockHeld));
+            assert_eq!(error.message.contains("terminal run on this Mac"), matches);
+            assert!(error.next_step.is_none());
+        }
+    });
+}
+
 fn step(index: Option<usize>, command: &str) -> RecoveryStep {
     RecoveryStep {
         index,
@@ -904,13 +1085,15 @@ fn journal_creation_failure_cancels_preview_before_launch() {
         let root = checkout(&fx, "one");
         let remote = Arc::new(Remote::default());
         let bad_root = fx.dir().join("not-a-directory");
-        std::fs::write(&bad_root, "x").unwrap();
-        let sessions = Sessions::new(bad_root, fx.trust(), remote.clone());
+        std::fs::create_dir(&bad_root).unwrap();
+        let sessions = Sessions::new(bad_root.clone(), fx.trust(), remote.clone());
         approve(&sessions, &root).await;
         let review = sessions
             .prepare(root, "production".into(), RunPlan::Deploy)
             .await
             .unwrap();
+        std::fs::remove_dir(&bad_root).unwrap();
+        std::fs::write(&bad_root, "x").unwrap();
         assert_eq!(
             sessions
                 .confirm(&review.handle, Some("production".into()))
@@ -2493,6 +2676,7 @@ fn recent_lock_refusals_show_the_holder_short_commit_and_heartbeat_without_break
             }),
             &key,
             "web1",
+            None,
         )
     };
     for (seconds, age) in [
@@ -2525,6 +2709,7 @@ fn a_recent_lock_with_unreadable_holder_details_still_only_offers_waiting() {
             env: "production".into(),
         },
         "web1",
+        None,
     );
     assert_eq!(error.blocked_kind, Some(BlockedKind::LockHeld));
     assert_eq!(
@@ -2552,6 +2737,7 @@ fn stale_lock_refusals_start_at_the_library_threshold_and_offer_review_before_br
             }),
             &key,
             "web1",
+            None,
         );
         assert_eq!(
             serde_json::to_value(&error).unwrap()["blockedKind"],
@@ -2579,6 +2765,7 @@ fn other_preflight_refusals_keep_their_next_steps() {
         PrepareError::Blocked(shipslip::BlockReason::FetchFailed("denied".into())),
         &key,
         "web1",
+        None,
     );
     assert_eq!(fetch.blocked_kind, Some(BlockedKind::FetchFailed));
     assert!(fetch.next_step.is_none());
@@ -2587,6 +2774,7 @@ fn other_preflight_refusals_keep_their_next_steps() {
         PrepareError::Blocked(shipslip::BlockReason::UpToDate),
         &key,
         "web1",
+        None,
     );
     assert_eq!(current.blocked_kind, Some(BlockedKind::UpToDate));
     assert!(current.message.contains("Rerun"));

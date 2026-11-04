@@ -117,6 +117,22 @@ async function settle() {
   await act(async () => {});
 }
 
+test("a terminal run disables Deploy and offers only following it in its terminal", async () => {
+  loadMap.mockResolvedValue(fixtures.terminalMap);
+  entry.mockResolvedValue(fixtures.terminalEntry);
+  render(<App />);
+  await settle();
+  const panel = screen.getByRole("complementary", { name: "Receipt" });
+  const button = within(panel).getByRole("button", { name: "Deploy shop → staging…" });
+  expect(button).toBeDisabled();
+  expect(button).toHaveAccessibleDescription("A deploy is running in a terminal on this Mac. Follow it in that terminal.");
+  expect(within(panel).getByText("Follow this run in the terminal where it started.")).toBeInTheDocument();
+  expect(within(panel).queryByRole("button", { name: /Attach|Bring app out|Run from step|Rerun/ })).toBeNull();
+  expect(within(panel).queryByText(/slip attach/)).toBeNull();
+  expect(prepare).not.toHaveBeenCalled();
+  expect(reviewAttach).not.toHaveBeenCalled();
+});
+
 /** The launch selection's app and env, as the heading names them. */
 function selectedCell() {
   if (fixtures.map.kind !== "loaded") throw new Error("fixture");
@@ -690,6 +706,12 @@ test.each([
     error: fixtures.lockHeld,
     title: "Another run deploying",
     body: fixtures.lockHeld.message,
+    command: null,
+  },
+  {
+    error: fixtures.terminalLockHeld,
+    title: "Another run deploying",
+    body: fixtures.terminalLockHeld.message,
     command: null,
   },
   {

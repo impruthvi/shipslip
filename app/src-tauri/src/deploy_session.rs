@@ -429,6 +429,26 @@ pub enum DeployEntry {
     },
 }
 
+const TERMINAL_RUN_REASON: &str =
+    "A deploy is running in a terminal on this Mac. Follow it in that terminal.";
+
+fn terminal_run(
+    receipts_root: &Path,
+    project: &str,
+    env: &str,
+    checkout: &Path,
+) -> Result<Option<receipt::Receipt>, CommandError> {
+    let Some(path) = receipt::find_open(receipts_root, project, env, checkout).map_err(local)?
+    else {
+        return Ok(None);
+    };
+    if !ReceiptJournal::is_claimed(&path).map_err(local)? {
+        return Ok(None);
+    }
+    let saved = receipt::read(&path).map_err(local)?;
+    Ok((saved.status == ReceiptStatus::InProgress).then_some(saved))
+}
+
 fn entry_sync(checkout: &Path, env: &str, trust_path: &Path, receipts_root: &Path) -> DeployEntry {
     let unavailable = |reason: String| DeployEntry::Unavailable { reason };
     let Ok(checkout) = std::fs::canonicalize(checkout) else {
@@ -452,6 +472,11 @@ fn entry_sync(checkout: &Path, env: &str, trust_path: &Path, receipts_root: &Pat
     let Some(snapshot) = config.trust_snapshot(env) else {
         return DeployEntry::Hidden;
     };
+    match terminal_run(receipts_root, config.project_name(), env, &checkout) {
+        Ok(Some(_)) => return unavailable(TERMINAL_RUN_REASON.into()),
+        Ok(None) => {}
+        Err(error) => return unavailable(error.message),
+    }
     match config::trust_status(trust_path, &checkout, env, &snapshot) {
         Ok(status) => DeployEntry::Ready {
             production: snapshot.production,
@@ -755,7 +780,7 @@ impl<C: Connector> Sessions<C> {
                 }
             }
         };
-        let (Some(checkout), DeployEntry::Ready { .. }) = (checkout, &entry) else {
+        let Some(checkout) = checkout else {
             return entry;
         };
         let key = Key { checkout, env };
@@ -1256,6 +1281,9 @@ impl<C: Connector> Sessions<C> {
                     "There is no unfinished run for this checkout and environment.",
                 )
             })?;
+            if ReceiptJournal::is_claimed(&path).map_err(local)? {
+                return Err(CommandError::new(ErrorCode::Busy, TERMINAL_RUN_REASON));
+            }
             let before = std::fs::read(&path).map_err(local)?;
             let receipt = receipt::read(&path).map_err(local)?;
             if std::fs::read(&path).map_err(local)? != before {
@@ -1655,6 +1683,23 @@ impl<C: Connector> Sessions<C> {
         .await
     }
 
+    async fn terminal_run(
+        &self,
+        trusted: &TrustedTarget,
+    ) -> Result<Option<receipt::Receipt>, CommandError> {
+        let root = self.receipts_root.clone();
+        let trusted = trusted.clone();
+        blocking(move || {
+            terminal_run(
+                &root,
+                trusted.project(),
+                &trusted.target().env,
+                trusted.repo_root(),
+            )
+        })
+        .await
+    }
+
     async fn prepare_inner(
         self: &Arc<Self>,
         checkout: PathBuf,
@@ -1690,6 +1735,9 @@ impl<C: Connector> Sessions<C> {
             id
         };
         let result = async {
+            if self.terminal_run(&trusted).await?.is_some() {
+                return Err(CommandError::new(ErrorCode::Busy, TERMINAL_RUN_REASON));
+            }
             let target = trusted.target();
             progress(PrepareProgress::Connecting {
                 alias: escape_field(&target.ssh_alias),
@@ -1700,7 +1748,7 @@ impl<C: Connector> Sessions<C> {
                 .await
                 .map_err(|e| connection(e, &target.ssh_alias))?;
             let branch = escape_field(&target.branch);
-            let preview = shipslip::prepare_with_progress(&trusted, plan, &*remote, |phase| {
+            let prepared = shipslip::prepare_with_progress(&trusted, plan, &*remote, |phase| {
                 progress(match phase {
                     PreparePhase::Fetching => PrepareProgress::Fetching {
                         branch: branch.clone(),
@@ -1709,8 +1757,23 @@ impl<C: Connector> Sessions<C> {
                     PreparePhase::Locking => PrepareProgress::Locking,
                 })
             })
-            .await
-            .map_err(|e| prepare_error(e, &key, &trusted.target().ssh_alias))?;
+            .await;
+            let preview = match prepared {
+                Ok(preview) => preview,
+                Err(error) => {
+                    let terminal = if matches!(&error, PrepareError::LockHeld(_)) {
+                        self.terminal_run(&trusted).await.ok().flatten()
+                    } else {
+                        None
+                    };
+                    return Err(prepare_error(
+                        error,
+                        &key,
+                        &target.ssh_alias,
+                        terminal.as_ref().map(|run| run.run_id.as_str()),
+                    ));
+                }
+            };
             let review = DeployReview::from_preview(id.clone(), &preview, &key.checkout);
             let ready = Ready {
                 stamp: loaded.stamp,
@@ -1857,7 +1920,12 @@ fn lock_not_released(key: &Key) -> CommandError {
     result.next_step = break_lock_command(&key.checkout.to_string_lossy(), &key.env);
     result
 }
-fn prepare_error(error: PrepareError, key: &Key, alias: &str) -> CommandError {
+fn prepare_error(
+    error: PrepareError,
+    key: &Key,
+    alias: &str,
+    terminal_run_id: Option<&str>,
+) -> CommandError {
     let env = &key.env;
     match error {
         PrepareError::Transport(e) => connection(e, alias),
@@ -1878,11 +1946,19 @@ fn prepare_error(error: PrepareError, key: &Key, alias: &str) -> CommandError {
                 None => "The lock holder's details could not be read".into(),
             };
             let stale = info.is_stale();
-            let message = if stale {
+            let mut message = if stale {
                 format!("{holder}. The holder stopped sending a heartbeat {age} ago. Review the holder and check the old run on the server before breaking the lock.")
             } else {
                 format!("{holder}. Last heartbeat {age} ago.")
             };
+            if info
+                .owner
+                .as_ref()
+                .is_some_and(|owner| Some(owner.run_id.as_str()) == terminal_run_id)
+            {
+                message
+                    .push_str(" This is the terminal run on this Mac. Follow it in that terminal.");
+            }
             let mut result = CommandError::new(ErrorCode::Blocked, message);
             result.blocked_kind = Some(if stale {
                 BlockedKind::StaleLock
@@ -2370,7 +2446,11 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         checkout: "/Users/you/code/shop".into(),
         env: "production".into(),
     };
-    for (name, age_secs) in [("lockHeld", 30), ("staleLock", 600)] {
+    for (name, age_secs, terminal_run_id) in [
+        ("lockHeld", 30, None),
+        ("staleLock", 600, None),
+        ("terminalLockHeld", 30, Some("another-run")),
+    ] {
         views.insert(
             name,
             to_value(prepare_error(
@@ -2387,12 +2467,20 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
                 }),
                 &checkout,
                 "shop-prod",
+                terminal_run_id,
             ))
             .unwrap(),
         );
     }
 
     views.insert("review", to_value(&review).unwrap());
+    views.insert(
+        "terminalEntry",
+        to_value(DeployEntry::Unavailable {
+            reason: TERMINAL_RUN_REASON.into(),
+        })
+        .unwrap(),
+    );
     views.insert("runInfo", to_value(&info).unwrap());
     views.insert(
         "entries",

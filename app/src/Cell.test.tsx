@@ -27,6 +27,16 @@ function find(repoRoot: string, env: string) {
 }
 
 describe("cells", () => {
+  test("a terminal-driven run shows Running and where to follow it", () => {
+    if (fixtures.terminalMap.kind !== "loaded") throw new Error("fixture");
+    const map = fixtures.terminalMap.map;
+    const row = map.rows[0];
+    render(<ReleaseMap map={map} selected={{ repoRoot: row.repoRoot, env: map.envs[0], row: 0, col: 0 }} />);
+    expect(screen.getByText("Running")).toHaveClass("flap-running");
+    expect(screen.getByText("Running from the terminal")).toBeInTheDocument();
+    expect(document.querySelector(".mark-spin")).not.toBeNull();
+  });
+
   test("a board line: mark, status word, 7-char commit, age", () => {
     const c = cell("/Users/you/code/shop", "production");
     expect(within(c).getByRole("img", { name: "recorded code" })).toBeInTheDocument();
