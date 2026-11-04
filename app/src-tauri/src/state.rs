@@ -10,7 +10,7 @@ use serde::Serialize;
 use shipslip::config::LoadedConfig;
 use shipslip::git::{Comparison, Git};
 use shipslip::receipt::{compare_envs_with, ReceiptError};
-use shipslip::records::{CodeState, EnvCell, ReceiptQueryError, Status as Overview};
+use shipslip::records::{env_order, CodeState, EnvCell, ReceiptQueryError, Status as Overview};
 
 use shipslip::records::receipt_at;
 
@@ -336,7 +336,8 @@ pub fn with_configured_envs(mut overview: Overview) -> Overview {
                 newer_elsewhere: None,
             });
         }
-        repo.envs.sort_by(|a, b| a.env.cmp(&b.env));
+        repo.envs
+            .sort_by(|a, b| env_order(a.env.raw(), b.env.raw()));
     }
     overview
 }
@@ -404,6 +405,7 @@ mod tests {
             root.join(".shipslip.toml"),
             "[project]\nname = \"app\"\nstack = \"laravel\"\n\
              [env.production]\nssh = \"web1\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = true\n\
+             [env.demo]\nssh = \"web3\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = false\n\
              [env.staging]\nssh = \"web2\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = false\n",
         )
         .unwrap();
@@ -414,7 +416,7 @@ mod tests {
 
         let shown = with_configured_envs(overview(&fx.receipts(), &fx.trust()).unwrap());
         let envs: Vec<_> = shown.repos[0].envs.iter().map(|c| c.env.raw()).collect();
-        assert_eq!(envs, ["production", "staging"]);
+        assert_eq!(envs, ["production", "staging", "demo"]);
         let staging = &shown.repos[0].envs[1];
         assert_eq!(staging.code, CodeState::NeverDeployed);
         assert!(!staging.approved);

@@ -578,3 +578,48 @@ fn receipt_json_and_terminal_list_preserve_the_unknown_run_fixture() {
         )
     );
 }
+
+#[test]
+fn status_lists_production_then_staging_then_by_name() {
+    let fixture = Fixture::new();
+    let project = fixture.receipts().parent().unwrap().to_path_buf();
+    for (n, env) in ["qa", "staging", "production"].iter().enumerate() {
+        let dir = project.join(env);
+        fs::create_dir_all(&dir).unwrap();
+        let run_id = format!("{:08x}-0", n + 1);
+        let receipt = json!({
+            "version": 1, "project": "app", "repo_root": "/work/app", "run_id": run_id,
+            "owner_pid": 1, "confirmed": true, "started_at_ms": 1000, "finished_at_ms": 2000,
+            "status": "Final", "phase": "Finished",
+            "target": {
+                "env": env, "production": false, "ssh_alias": "app", "path": "/srv/app",
+                "branch": "main", "steps": ["php artisan optimize"], "maintenance": false
+            },
+            "run_plan": "Deploy", "from_sha": "a".repeat(40), "target_sha": "b".repeat(40),
+            "commits": [], "recipe_hash": "c".repeat(64), "steps": [],
+            "maintenance_down_done": false, "maintenance_up_done": false,
+            "app_left_down": false, "mutation_started": true, "outcome": "Succeeded"
+        });
+        fs::write(
+            dir.join(format!("1000-{run_id}.json")),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+    }
+    let output = fixture.status(&["--json"]);
+    assert!(output.status.success(), "{output:?}");
+    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let envs: Vec<&str> = status["repos"][0]["envs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|cell| cell["env"].as_str().unwrap())
+        .collect();
+    assert_eq!(envs, ["production", "staging", "qa"]);
+    let text = String::from_utf8(fixture.status(&[]).stdout).unwrap();
+    let at = |env: &str| text.find(env).unwrap_or_else(|| panic!("{env} in {text}"));
+    assert!(
+        at("production") < at("staging") && at("staging") < at("qa"),
+        "{text}"
+    );
+}

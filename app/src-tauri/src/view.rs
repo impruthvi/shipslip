@@ -2,7 +2,6 @@
 //! receipt, the trust store or the file system is escaped here, and receipt
 //! files are replaced by ids, so the UI never holds or sends a path.
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -14,8 +13,8 @@ use shipslip::receipt::{comparison_text, EnvComparison};
 mod words;
 use crate::receipt_words::headline;
 use shipslip::records::{
-    self, copy_is_safe, AttemptSummary, Badge, EnvCell, Flag, Mark, NextSteps, Part, ProblemKind,
-    ReceiptQueryError, RepoRow, StaleHint, Status as Overview, Untrusted,
+    self, copy_is_safe, env_order, AttemptSummary, Badge, EnvCell, Flag, Mark, NextSteps, Part,
+    ProblemKind, ReceiptQueryError, RepoRow, StaleHint, Status as Overview, Untrusted,
 };
 use shipslip::transport::ConnectFailure;
 use words::{age, code_text, newer_elsewhere_text, short_sha, stale_hint_text, target_moved_text};
@@ -254,15 +253,16 @@ pub fn load_error(error: &ReceiptQueryError) -> String {
     }
 }
 
-/// Every env any checkout has, sorted; one grid column each.
+/// Every env any checkout has, in `env_order`; one grid column each.
 pub fn columns(overview: &Overview) -> Vec<&str> {
-    overview
+    let mut columns: Vec<&str> = overview
         .repos
         .iter()
         .flat_map(|row| row.envs.iter().map(|cell| cell.env.raw()))
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+        .collect();
+    columns.sort_by(|a, b| env_order(a, b));
+    columns.dedup();
+    columns
 }
 
 #[derive(Debug, Serialize)]
@@ -612,6 +612,27 @@ mod tests {
             CellView::Present(cell) => cell,
             CellView::Absent => panic!("cell {row},{col} is absent"),
         }
+    }
+
+    #[test]
+    fn columns_run_production_then_staging_then_by_name_across_checkouts() {
+        let fx = Fixture::new();
+        for (n, (project, env)) in [
+            ("app", "qa"),
+            ("app", "staging"),
+            ("shop", "demo"),
+            ("shop", "production"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut receipt = run(n as u64 + 1, env);
+            receipt["project"] = json!(project);
+            receipt["repo_root"] = json!(format!("/work/{project}"));
+            fx.save(&receipt);
+        }
+        let (view, _) = load(&fx);
+        assert_eq!(view.envs, ["production", "staging", "demo", "qa"]);
     }
 
     #[test]

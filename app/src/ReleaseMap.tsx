@@ -1,4 +1,4 @@
-import { useRef, useState, type KeyboardEvent } from "react";
+import { useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Cell, cellName } from "./Cell";
 import type { CompareLine, Pair } from "./compare";
 import { SourceMarker, TargetMarker } from "./ComparePicker";
@@ -43,6 +43,15 @@ function resolve(map: MapView, key: FocusKey | null, selected: Selection | null)
   return selected ?? first(map);
 }
 
+/** The scrollLeft that shows content span [left, right] in a view `width`
+ * wide whose first `inset` px sit under the sticky App column, moving as
+ * little as it can. A span too wide to fit shows its left edge. */
+export function revealScroll(scroll: number, width: number, inset: number, left: number, right: number): number {
+  if (right - left > width - inset || left < scroll + inset) return Math.max(0, left - inset);
+  if (right > scroll + width) return right - width;
+  return scroll;
+}
+
 export function ReleaseMap({
   map,
   selected = null,
@@ -55,6 +64,7 @@ export function ReleaseMap({
   const source = compare ? map.envs.indexOf(compare.pair.a) : -1;
   const target = compare ? map.envs.indexOf(compare.pair.b) : -1;
   const grid = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
   const [focusKey, setFocusKey] = useState<FocusKey | null>(null);
   const active = resolve(map, focusKey, selected);
   const labels = map.rows.map((row) => row.label);
@@ -63,6 +73,25 @@ export function ReleaseMap({
   const focusCell = ({ row, col }: Pos) => {
     grid.current?.querySelector<HTMLElement>(`[data-row="${row}"][data-col="${col}"]`)?.focus();
   };
+
+  // A new pair, or a new environment that shifts columns, scrolls both
+  // compared columns into view; when they cannot both fit, the target.
+  const envKey = map.envs.join("\n");
+  useLayoutEffect(() => {
+    const view = scroller.current;
+    if (!view || source < 0 || target < 0) return;
+    const origin = view.getBoundingClientRect().left - view.scrollLeft;
+    const heads = [source, target].map((col) =>
+      view.querySelector(`[data-env-col="${col}"]`)?.getBoundingClientRect(),
+    );
+    const app = view.querySelector(".grid-heads .grid-app")?.getBoundingClientRect();
+    if (!heads[0] || !heads[1] || !app) return;
+    let left = Math.min(heads[0].left, heads[1].left) - origin;
+    let right = Math.max(heads[0].right, heads[1].right) - origin;
+    if (right - left > view.clientWidth - app.width) [left, right] = [heads[1].left - origin, heads[1].right - origin];
+    const next = revealScroll(view.scrollLeft, view.clientWidth, app.width, left, right);
+    if (next !== view.scrollLeft) view.scrollLeft = next;
+  }, [source, target, envKey]);
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     const cell = (event.target as HTMLElement).closest<HTMLElement>("[data-row]");
@@ -86,14 +115,14 @@ export function ReleaseMap({
 
   return (
     <>
-      <div className="grid-scroll">
+      <div className="grid-scroll" ref={scroller}>
         <div className="grid" role="grid" aria-label="Release map" ref={grid} onKeyDown={onKeyDown}>
           <div className="grid-heads" role="row">
             <div className="grid-app caps muted" role="columnheader">
               App
             </div>
             {map.envs.map((env, col) => (
-              <div className="grid-env grid-head" role="columnheader" key={env}>
+              <div className="grid-env grid-head" role="columnheader" key={env} data-env-col={col}>
                 <span className="grid-head-env caps">
                   {col === source && <SourceMarker />}
                   {col === target && <TargetMarker />}

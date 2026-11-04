@@ -237,6 +237,7 @@ fn smoke_cells() -> BTreeMap<&'static str, Value> {
 struct Fixtures {
     terminal_map: LoadResult,
     map: LoadResult,
+    wide_map: LoadResult,
     watch_results: LoadResult,
     compares: BTreeMap<String, Value>,
     receipts: BTreeMap<String, ReceiptResult>,
@@ -392,14 +393,34 @@ fn build() -> (Fixtures, Vec<String>) {
     let watch_results =
         AppState::default().load_map(|| NOW, || overview(&watch_fx.receipts(), &watch_fx.trust()));
 
-    let homes = [fx.dir(), empty.dir(), broken.dir(), watch_fx.dir()]
-        .iter()
-        .map(|dir| dir.to_string_lossy().into_owned())
-        .collect();
+    // More environments than fit across, in no particular order on disk.
+    let wide_fx = Fixture::new();
+    let mut b = Builder {
+        fx: &wide_fx,
+        next: 300,
+    };
+    for env in ["uat", "demo", "staging", "qa", "production", "sandbox"] {
+        let deploy = b.deploy("shop", env, 30, &sha('a'));
+        b.save(&deploy);
+    }
+    let wide_map =
+        AppState::default().load_map(|| NOW, || overview(&wide_fx.receipts(), &wide_fx.trust()));
+
+    let homes = [
+        fx.dir(),
+        empty.dir(),
+        broken.dir(),
+        watch_fx.dir(),
+        wide_fx.dir(),
+    ]
+    .iter()
+    .map(|dir| dir.to_string_lossy().into_owned())
+    .collect();
     (
         Fixtures {
             terminal_map,
             map,
+            wide_map,
             watch_results,
             compares,
             receipts,
@@ -433,6 +454,7 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
         let _ = write!(out, "\nexport const {name}: {ty} = {};\n", json(value));
     };
     item(&mut out, "map", "LoadResult", &fixtures.map);
+    item(&mut out, "wideMap", "LoadResult", &fixtures.wide_map);
     item(
         &mut out,
         "terminalMap",

@@ -1286,3 +1286,21 @@ fn an_unreadable_env_directory_is_a_problem_for_that_env_only() {
         CodeState::Recorded { .. }
     ));
 }
+
+#[test]
+fn environments_run_production_then_staging_then_by_name() {
+    let fx = Fixture::new();
+    for (n, env) in ["qa", "staging", "demo", "production", "zeta"]
+        .iter()
+        .enumerate()
+    {
+        fx.save(&run(n as u64 + 1, env));
+    }
+    let overview = fx.overview();
+    let envs: Vec<&str> = overview.repos[0]
+        .envs
+        .iter()
+        .map(|cell| cell.env.raw())
+        .collect();
+    assert_eq!(envs, ["production", "staging", "demo", "qa", "zeta"]);
+}

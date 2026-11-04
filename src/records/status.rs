@@ -252,6 +252,17 @@ impl EnvCell {
     }
 }
 
+/// How every front-end orders environments: production, staging, then the
+/// rest by name.
+pub fn env_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let rank = |env: &str| match env {
+        "production" => 0,
+        "staging" => 1,
+        _ => 2,
+    };
+    rank(a).cmp(&rank(b)).then_with(|| a.cmp(b))
+}
+
 /// The environments this Mac knows from local receipts and approvals.
 /// This read-only query never contacts a server. Times are absolute epoch
 /// milliseconds; front-ends supply their own relative wording.

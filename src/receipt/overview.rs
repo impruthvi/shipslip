@@ -16,7 +16,7 @@ use super::{
 };
 use super::{ReceiptStepStatus, ReceiptSummary};
 use crate::git::{Comparison, Git};
-use crate::records::{Flag, Untrusted};
+use crate::records::{env_order, Flag, Untrusted};
 use crate::{DeployOutcome, RunPlan};
 
 /// Receipts of one cell read before it settles on "no code change".
@@ -186,7 +186,7 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
                 }
                 envs.push(built);
             }
-            envs.sort_by(|a, b| a.env.cmp(&b.env));
+            envs.sort_by(|a, b| env_order(a.env.raw(), b.env.raw()));
             let label = row.project.clone().unwrap_or_else(|| {
                 Path::new(&repo_root)
                     .file_name()

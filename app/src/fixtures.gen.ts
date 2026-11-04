@@ -346,6 +346,176 @@ export const map: LoadResult = {
   }
 };
 
+export const wideMap: LoadResult = {
+  "kind": "loaded",
+  "generation": 1,
+  "map": {
+    "screen": "map",
+    "envs": [
+      "production",
+      "staging",
+      "demo",
+      "qa",
+      "sandbox",
+      "uat"
+    ],
+    "rows": [
+      {
+        "label": "shop",
+        "repoRoot": "/Users/you/code/shop",
+        "pathMissing": false,
+        "cells": [
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791793295000,
+            "age": "28m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [],
+            "target": "production1:/var/www/shop",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 0,
+            "staleReceipt": null,
+            "lastAttempt": null
+          },
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791793295000,
+            "age": "28m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [],
+            "target": "staging1:/var/www/shop",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 1,
+            "staleReceipt": null,
+            "lastAttempt": null
+          },
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791793295000,
+            "age": "28m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [],
+            "target": "demo1:/var/www/shop",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 2,
+            "staleReceipt": null,
+            "lastAttempt": null
+          },
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791793295000,
+            "age": "28m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [],
+            "target": "qa1:/var/www/shop",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 3,
+            "staleReceipt": null,
+            "lastAttempt": null
+          },
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791793295000,
+            "age": "28m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [],
+            "target": "sandbox1:/var/www/shop",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 4,
+            "staleReceipt": null,
+            "lastAttempt": null
+          },
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791793295000,
+            "age": "28m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "flags": [],
+            "target": "uat1:/var/www/shop",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 5,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      }
+    ],
+    "problems": []
+  }
+};
+
 export const terminalMap: LoadResult = {
   "kind": "loaded",
   "generation": 1,
