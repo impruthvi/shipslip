@@ -1,4 +1,5 @@
-import { useState, type FormEvent } from "react";
+import { useState } from "react";
+import { TypedConfirm } from "./TypedConfirm";
 import type { TrustReview as Review, TrustRow } from "./types";
 
 function Value({ row, lines, mark }: { row: TrustRow; lines: string[]; mark: "+" | "−" | null }) {
@@ -79,7 +80,6 @@ export function TrustReview({
    * Rejects with a `CommandError`. */
   onEdit: () => Promise<void>;
 }) {
-  const [typed, setTyped] = useState("");
   const [editError, setEditError] = useState<string | null>(null);
   const edit = () => {
     setEditError(null);
@@ -90,12 +90,6 @@ export function TrustReview({
   const [showUnchanged, setShowUnchanged] = useState(false);
   const changed = review.settings.filter((row) => row.changed);
   const unchanged = review.settings.filter((row) => !row.changed);
-  const ready = typed === review.env && !changedAgain;
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    if (ready && busy === null) onApprove(typed);
-  };
 
   return (
     <>
@@ -149,30 +143,22 @@ export function TrustReview({
           </p>
         )}
       </div>
-      <form className="workspace-footer" onSubmit={submit}>
+      <div className="workspace-footer">
         <button type="button" className="button" disabled={busy !== null} onClick={onBack}>
           Back
         </button>
         <span className="muted footer-note">
-          Approving lets you prepare a deploy. Deploying needs its own confirmation.
+          Approving goes on to the review. Nothing runs until you confirm it there.
         </span>
-        <div className="footer-end">
-          <label className="typed-field">
-            Type {review.env} to approve
-            <input
-              value={typed}
-              onChange={(event) => setTyped(event.target.value)}
-              autoComplete="off"
-              autoCapitalize="off"
-              spellCheck={false}
-              disabled={busy !== null}
-            />
-          </label>
-          <button type="submit" className="button button-primary" disabled={!ready || busy !== null}>
-            {busy === "approving" ? "Approving…" : "Approve configuration"}
-          </button>
-        </div>
-      </form>
+        <TypedConfirm
+          expected={review.env}
+          verb="approve"
+          action={busy === "approving" ? "Approving…" : "Approve configuration"}
+          busy={busy !== null}
+          blocked={changedAgain}
+          onConfirm={() => onApprove(review.env)}
+        />
+      </div>
     </>
   );
 }

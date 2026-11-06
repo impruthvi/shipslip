@@ -15,7 +15,7 @@ import { useReleaseMap } from "./useReleaseMap";
 import { useSeen } from "./useSeen";
 import { useLiveRuns } from "./useLiveRuns";
 import { useSelection } from "./useSelection";
-import { Workspace, type DeployTarget, type Leave, type Start } from "./Workspace";
+import { Workspace, type DeployTarget, type Leave, type Next, type Start } from "./Workspace";
 import { notify } from "./notify";
 import { twinFolder } from "./text";
 import { deploy } from "./deployApi";
@@ -122,12 +122,13 @@ export default function App() {
       folder: map ? twinFolder(map.rows.map((x) => x.label), row.label, row.repoRoot) : null,
       production: entry.production,
     };
-    let start: Start;
-    if (entry.needsTrust) start = { kind: "trust" };
-    else if (choice.kind === "review") start = { kind: "deploy", plan: "Deploy" };
-    else if (choice.kind === "rerun") start = { kind: "deploy", plan: "Rerun" };
-    else if (choice.kind === "fromStep") start = { kind: "pick", steps: entry.steps, step: choice.step };
-    else start = { kind: choice.kind };
+    let next: Next;
+    if (choice.kind === "review") next = { kind: "deploy", plan: "Deploy" };
+    else if (choice.kind === "rerun") next = { kind: "deploy", plan: "Rerun" };
+    else if (choice.kind === "fromStep") next = { kind: "pick", steps: entry.steps, step: choice.step };
+    else next = { kind: choice.kind };
+    // Unapproved settings are reviewed first, then the choice goes on.
+    const start: Start = entry.needsTrust ? { kind: "trust", then: next } : next;
     setApproved(null);
     setWorkspace({ target, start });
   };
