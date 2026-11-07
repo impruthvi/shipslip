@@ -1145,6 +1145,7 @@ fn needs_attention_for_each_kind_of_cell() {
         started_at_ms: 1000,
         kind: ReceiptKind::Deploy,
         run_plan: RunPlan::Deploy,
+        steps_run: None,
         badge: Badge {
             outcome: Outcome {
                 kind: outcome,

@@ -16,6 +16,9 @@ pub struct ReceiptRecord {
     pub repo_root: Untrusted,
     pub target: Target,
     pub run_plan: RunPlan,
+    /// The steps a run-from-step ran, e.g. "steps 4–5 only".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps_run: Option<String>,
     pub started_at_ms: u128,
     pub finished_at_ms: Option<u128>,
     pub duration_ms: Option<u128>,
@@ -113,6 +116,7 @@ impl ReceiptRecord {
                 log_path: receipt.target.log_path().into(),
             },
             run_plan: receipt.run_plan,
+            steps_run: receipt.steps_run(),
             started_at_ms: receipt.started_at_ms,
             finished_at_ms: receipt.finished_at_ms,
             duration_ms: receipt

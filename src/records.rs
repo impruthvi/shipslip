@@ -19,7 +19,7 @@ pub use crate::receipt::markdown::{
 };
 pub use logs::*;
 pub use next_steps::{copy_is_safe, failed_step_options, NextStep, NextSteps, Part};
-pub use outcome::{describe_plan, Badge, Flag, Outcome, OutcomeKind};
+pub use outcome::{describe_plan, describe_steps_run, Badge, Flag, Outcome, OutcomeKind};
 pub use receipt::{
     receipt, receipt_at, ErrorGroup, ErrorVariant, ReceiptQueryError, ReceiptRecord, Smoke, Target,
     Watch,

@@ -47,6 +47,15 @@ test("rows run maintenance on, step 0, the recipe, then maintenance off", () => 
   expect(plain.map((r) => r.index)).toEqual(["0", "1", "2", "3"]);
 });
 
+test("step 0 is named by the run's step 0 label, with the exact command as detail", () => {
+  const empty = { ...fixtures.runBatches.running.state, steps: {}, maintenanceDown: null };
+  const zero = runRows(fixtures.runInfo, empty).find((r) => r.index === "0");
+  expect(zero?.command).toBe("git fast-forward to bbbbbbb");
+  expect(zero?.detail).toBe(`git merge --ff-only ${"b".repeat(40)}`);
+  const one = runRows(fixtures.runInfo, empty).find((r) => r.index === "1");
+  expect(one?.detail).toBeNull();
+});
+
 test("reruns skip the fast-forward and from-step runs mark earlier steps skipped", () => {
   const empty = { ...fixtures.runBatches.running.state, steps: {}, maintenanceDown: null };
   const rerun = runRows({ ...fixtures.runInfo, runPlan: "Rerun" }, empty);

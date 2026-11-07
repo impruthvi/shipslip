@@ -257,7 +257,14 @@ export function Running({
                       {inGap ? <Mark kind="notKnown" size={12} /> : <StepMark status={status} />}
                     </span>
                     <span className="recipe-index mono muted">{row.index}</span>
-                    <code>{row.command}</code>
+                    {row.detail === null ? (
+                      <code>{row.command}</code>
+                    ) : (
+                      <span className="step-name">
+                        <span>{row.command}</span>
+                        <code className="mono-detail muted">{row.detail}</code>
+                      </span>
+                    )}
                     {row.progress?.timing && (
                       <StepTime timing={row.progress.timing} className="elapsed muted" />
                     )}

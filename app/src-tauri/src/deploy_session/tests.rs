@@ -2415,7 +2415,10 @@ fn deploy_entry_says_why_an_env_cannot_be_deployed_and_when_trust_comes_first() 
             DeployEntry::Ready {
                 production: true,
                 needs_trust: true,
-                steps: vec!["true".into()],
+                steps: vec![PickStepView {
+                    command: "true".into(),
+                    ran_ok_last_run: false,
+                }],
                 recovery: None,
             }
         );
@@ -2426,7 +2429,10 @@ fn deploy_entry_says_why_an_env_cannot_be_deployed_and_when_trust_comes_first() 
             DeployEntry::Ready {
                 production: true,
                 needs_trust: false,
-                steps: vec!["true".into()],
+                steps: vec![PickStepView {
+                    command: "true".into(),
+                    ran_ok_last_run: false,
+                }],
                 recovery: None,
             }
         );
@@ -2533,7 +2539,10 @@ fn deploy_entry_preserves_recovery_from_saved_receipts_and_unreadable_barriers()
         let expected = DeployEntry::Ready {
             production: true,
             needs_trust: false,
-            steps: vec!["true".into()],
+            steps: vec![PickStepView {
+                command: "true".into(),
+                ran_ok_last_run: false,
+            }],
             recovery: Some(RecoveryView {
                 run_id: "00000001-0".into(),
                 sentence: "Step 1 failed (exit 1): true".into(),
@@ -2579,7 +2588,10 @@ fn deploy_entry_preserves_recovery_from_saved_receipts_and_unreadable_barriers()
                 DeployEntry::Ready {
                     production: true,
                     needs_trust: false,
-                    steps: vec!["true".into()],
+                    steps: vec![PickStepView {
+                        command: "true".into(),
+                        ran_ok_last_run: false,
+                    }],
                     recovery: None,
                 }
             );
@@ -2921,5 +2933,99 @@ fn running_list_reads_connection_gaps_without_a_window_subscription() {
         assert!(view["runs"][0]["connectionGap"].is_null());
         release.send(()).await.unwrap();
         until(|| sessions.current_runs().runs.is_empty());
+    });
+}
+
+#[test]
+fn step_zero_has_one_label_on_the_preview_and_the_run() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Arc::new(Remote::default()));
+        approve(&sessions, &root).await;
+        let review = sessions
+            .prepare(root, "production".into(), RunPlan::Deploy)
+            .await
+            .unwrap();
+        let expected = StepZeroView {
+            label: "git fast-forward to 2222222".into(),
+            command: "git merge --ff-only 2222222222222222222222222222222222222222".into(),
+        };
+        assert_eq!(review.step_zero.as_ref(), Some(&expected));
+        let info = sessions
+            .confirm(&review.handle, Some("production".into()))
+            .await
+            .unwrap();
+        assert_eq!(info.step_zero.as_ref(), Some(&expected));
+        sessions.wait_idle().await;
+    });
+}
+
+#[test]
+fn step_picker_says_which_steps_ran_ok_in_the_last_run() {
+    use crate::fixture::run;
+    use serde_json::json;
+
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "one");
+        let toml = root.join(".shipslip.toml");
+        let text = std::fs::read_to_string(&toml).unwrap();
+        std::fs::write(
+            &toml,
+            text.replace(r#"["true"]"#, r#"["one", "two", "three", "four"]"#),
+        )
+        .unwrap();
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        approve(&sessions, &root).await;
+
+        // An older run where every step ran OK is not the last run.
+        let mut older = run(1, "production");
+        older["project"] = json!("example");
+        older["repo_root"] = json!(root);
+        older["target"]["steps"] = json!(["one", "two", "three", "four"]);
+        let commands = ["git merge --ff-only", "one", "two", "three", "four"];
+        let steps: Vec<_> = commands
+            .iter()
+            .enumerate()
+            .map(|(index, command)| {
+                json!({"index": index, "command": command, "status": "Ok", "exit_code": 0, "output": []})
+            })
+            .collect();
+        older["steps"] = json!(steps);
+        fx.save(&older);
+        // The last run: step 3 was another command then, step 4 never ran.
+        let mut last = older.clone();
+        last["run_id"] = json!("00000002-0");
+        last["started_at_ms"] = json!(2000);
+        last["finished_at_ms"] = json!(2500);
+        last["target"]["steps"] = json!(["one", "two", "old three", "four"]);
+        last["steps"][2]["status"] = json!("Failed");
+        last["steps"][2]["exit_code"] = json!(1);
+        last["steps"][3]["command"] = json!("old three");
+        last["steps"][4]["status"] = json!("NotStarted");
+        last["steps"][4]["exit_code"] = json!(null);
+        last["outcome"] = json!({"FailedAtStep": {"step": 2, "partial_update": false}});
+        fx.save(&last);
+
+        let DeployEntry::Ready { steps, .. } = sessions
+            .deploy_entry(root.clone(), "production".into())
+            .await
+        else {
+            panic!("not ready");
+        };
+        let ran_ok: Vec<_> = steps
+            .iter()
+            .map(|step| (step.command.as_str(), step.ran_ok_last_run))
+            .collect();
+        assert_eq!(
+            ran_ok,
+            [
+                ("one", true),
+                ("two", false),
+                ("three", false),
+                ("four", false)
+            ]
+        );
     });
 }

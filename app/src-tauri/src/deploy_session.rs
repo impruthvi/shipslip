@@ -423,10 +423,39 @@ pub enum DeployEntry {
         /// New or changed settings: Trust review comes first.
         needs_trust: bool,
         /// Recipe steps 1..N, for picking where a run starts.
-        steps: Vec<String>,
+        steps: Vec<PickStepView>,
         /// What this checkout's newest run left to do.
         recovery: Option<RecoveryView>,
     },
+}
+
+/// One recipe step in the step picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickStepView {
+    pub command: String,
+    /// The newest deploy's receipt recorded this same command ending OK.
+    pub ran_ok_last_run: bool,
+}
+
+/// The recipe for the step picker, marking the steps the newest deploy
+/// recorded as OK. A step whose command has changed since is not marked.
+fn pick_steps(recipe: &[String], runs: &[ReceiptSummary]) -> Vec<PickStepView> {
+    let last = runs.iter().find(|run| run.kind != receipt::ReceiptKind::Up);
+    recipe
+        .iter()
+        .enumerate()
+        .map(|(i, command)| PickStepView {
+            command: escape_field(command),
+            ran_ok_last_run: last.is_some_and(|run| {
+                run.steps.iter().any(|row| {
+                    row.kind == records::StepKind::Step { index: i + 1 }
+                        && row.status == records::StepState::Ok
+                        && row.command.raw() == command
+                })
+            }),
+        })
+        .collect()
 }
 
 const TERMINAL_RUN_REASON: &str =
@@ -478,17 +507,15 @@ fn entry_sync(checkout: &Path, env: &str, trust_path: &Path, receipts_root: &Pat
         Err(error) => return unavailable(error.message),
     }
     match config::trust_status(trust_path, &checkout, env, &snapshot) {
-        Ok(status) => DeployEntry::Ready {
-            production: snapshot.production,
-            needs_trust: !matches!(status, TrustStatus::Trusted),
-            steps: snapshot.steps.iter().map(|s| escape_field(s)).collect(),
-            recovery: recovery_from(&newest_runs(
-                receipts_root,
-                config.project_name(),
-                env,
-                &checkout,
-            )),
-        },
+        Ok(status) => {
+            let runs = newest_runs(receipts_root, config.project_name(), env, &checkout);
+            DeployEntry::Ready {
+                production: snapshot.production,
+                needs_trust: !matches!(status, TrustStatus::Trusted),
+                steps: pick_steps(&snapshot.steps, &runs),
+                recovery: recovery_from(&runs),
+            }
+        }
         Err(error) => unavailable(format!(
             "Approved settings can't be read: {}",
             escape_field(&error.to_string())
@@ -561,7 +588,29 @@ pub struct DeployReview {
     pub more_commits: usize,
     pub steps: Vec<String>,
     pub run_plan: RunPlan,
+    /// `None` when the plan does not move the code.
+    pub step_zero: Option<StepZeroView>,
 }
+
+/// Step 0 as every screen names it, with the exact command as detail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StepZeroView {
+    /// e.g. "git fast-forward to 2222222".
+    pub label: String,
+    pub command: String,
+}
+
+impl StepZeroView {
+    /// `None` unless `plan` is a deploy, the only plan that moves the code.
+    fn of(plan: Option<RunPlan>, target_sha: &str) -> Option<Self> {
+        (plan == Some(RunPlan::Deploy)).then(|| Self {
+            label: escape_field(&shipslip::step_zero_label(target_sha)),
+            command: escape_field(&shipslip::step_zero_command(target_sha)),
+        })
+    }
+}
+
 impl DeployReview {
     fn from_preview(handle: String, preview: &Preview, checkout: &std::path::Path) -> Self {
         Self {
@@ -587,6 +636,7 @@ impl DeployReview {
                 .map(|s| escape_field(s))
                 .collect(),
             run_plan: preview.run_plan(),
+            step_zero: StepZeroView::of(Some(preview.run_plan()), preview.target_sha()),
         }
     }
 }
@@ -613,9 +663,17 @@ pub struct RunInfo {
     pub watch_ms: Option<u64>,
     pub started_at_ms: u64,
     pub connection_gap: Option<ConnectionGapView>,
+    /// `None` when the run does not move the code.
+    pub step_zero: Option<StepZeroView>,
 }
 
 impl RunInfo {
+    /// The commit the run moves to, and with it step 0's label.
+    fn set_target(&mut self, target_sha: Option<&str>) {
+        self.target_sha = target_sha.map(escape_field);
+        self.step_zero = target_sha.and_then(|sha| StepZeroView::of(self.run_plan, sha));
+    }
+
     /// A run starting now. `run_id` and `target_sha` are filled in by the caller.
     fn starting(
         handle: &str,
@@ -645,6 +703,7 @@ impl RunInfo {
             run_plan,
             watch_ms: run_plan.and(watch_ms(target)),
             connection_gap: None,
+            step_zero: None,
             started_at_ms: u64::try_from(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1378,7 +1437,7 @@ impl<C: Connector> Sessions<C> {
                 None => RunInfo::starting(handle, &project, &key, "up", trusted.target(), None),
             };
             info.run_id = saved.as_ref().map(|r| escape_field(&r.run_id));
-            info.target_sha = saved.as_ref().map(|r| escape_field(&r.target_sha));
+            info.set_target(saved.as_ref().map(|r| r.target_sha.as_str()));
             {
                 let mut state = self.registry();
                 if state.page != page {
@@ -1555,7 +1614,7 @@ impl<C: Connector> Sessions<C> {
             Some(ready.preview.run_plan()),
         );
         info.run_id = Some(escape_field(ready.preview.run_id()));
-        info.target_sha = Some(escape_field(ready.preview.target_sha()));
+        info.set_target(Some(ready.preview.target_sha()));
         let result = {
             let mut state = self.registry();
             if state.page != page {
@@ -2003,7 +2062,7 @@ fn cancelled() -> CommandError {
 impl RunInfo {
     /// A production deploy of shop, as the UI fixtures show it.
     pub(crate) fn sample(handle: &str, operation: &'static str) -> Self {
-        Self {
+        let mut info = Self {
             handle: handle.into(),
             project: "shop".into(),
             checkout: "/Users/you/code/shop".into(),
@@ -2025,7 +2084,10 @@ impl RunInfo {
             watch_ms: Some(120_000),
             started_at_ms: 1_791_795_000_000,
             connection_gap: None,
-        }
+            step_zero: None,
+        };
+        info.set_target(Some(&"b".repeat(40)));
+        info
     }
 }
 
@@ -2094,6 +2156,7 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
             "php artisan optimize".into(),
         ],
         run_plan: RunPlan::Deploy,
+        step_zero: StepZeroView::of(Some(RunPlan::Deploy), &"b".repeat(40)),
     };
     let feed = RunFeed::new(info.clone());
     let batch = |feed: &RunFeed| {
@@ -2144,7 +2207,8 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         exit_code: Some(0),
         times: StepTimes::default(),
     });
-    step(0, "git fast-forward", Some(StepStatus::Ok));
+    let step_zero = shipslip::step_zero_label(&"b".repeat(40));
+    step(0, &step_zero, Some(StepStatus::Ok));
     step(1, "composer install --no-dev", None);
     views.insert("running", batch(&feed));
     feed.record(DeployEvent::ConnectionLost {
@@ -2164,7 +2228,7 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
     for event in [
         DeployEvent::StepStarted {
             index: 0,
-            name: "git fast-forward".into(),
+            name: step_zero.clone(),
         },
         DeployEvent::StepFinished {
             index: 0,
@@ -2482,6 +2546,14 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
         .unwrap(),
     );
     views.insert("runInfo", to_value(&info).unwrap());
+    // The step picker after a run stopped after step 1: only step 1 ran OK.
+    let picker = DeployEntry::Ready {
+        production: true,
+        needs_trust: false,
+        steps: pick_steps(&info.steps, &[ReceiptSummary::from(&stopped)]),
+        recovery: None,
+    };
+    views.insert("pickerEntry", to_value(&picker).unwrap());
     views.insert(
         "entries",
         to_value([
@@ -2492,12 +2564,7 @@ pub(crate) fn sample_deploy_views() -> std::collections::BTreeMap<&'static str, 
             DeployEntry::Running {
                 handle: "run-1".into(),
             },
-            DeployEntry::Ready {
-                production: true,
-                needs_trust: false,
-                steps: info.steps.clone(),
-                recovery: None,
-            },
+            picker,
         ])
         .unwrap(),
     );

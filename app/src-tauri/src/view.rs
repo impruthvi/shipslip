@@ -100,6 +100,8 @@ pub struct EnvCellView {
     pub evidence: Vec<String>,
     /// How the run behind the code ended, else the newest run.
     pub outcome: Option<OutcomeView>,
+    /// The steps that run ran when it was a run-from-step, e.g. "steps 4–5 only".
+    pub steps_run: Option<String>,
     pub flags: Vec<FlagView>,
     pub target: Option<String>,
     pub target_moved: Option<String>,
@@ -216,6 +218,8 @@ pub enum FlagKind {
 pub struct AttemptView {
     pub receipt: usize,
     pub outcome: OutcomeView,
+    /// e.g. "steps 4–5 only" for a run-from-step.
+    pub steps_run: Option<String>,
     pub flags: Vec<FlagView>,
     pub at_ms: u64,
     pub age: String,
@@ -379,6 +383,7 @@ fn cell_view(cell: &EnvCell, now_ms: u128, locators: &mut Locators) -> EnvCellVi
         words: text.words,
         evidence: text.evidence,
         outcome: opened.map(|run| outcome(&run.badge)),
+        steps_run: opened.and_then(|run| run.steps_run.clone()),
         flags: opened.map(|run| flags(&run.badge)).unwrap_or_default(),
         target: cell.target.as_ref().map(Untrusted::field),
         target_moved: target_moved_text(cell),
@@ -393,6 +398,7 @@ fn attempt_view(attempt: &AttemptSummary, now_ms: u128, locators: &mut Locators)
     AttemptView {
         receipt: locators.id(&attempt.path),
         outcome: outcome(&attempt.badge),
+        steps_run: attempt.steps_run.clone(),
         flags: flags(&attempt.badge),
         at_ms: millis(attempt.started_at_ms),
         age: age(now_ms, attempt.started_at_ms),
@@ -818,6 +824,47 @@ mod tests {
             assert_eq!(outcome.kind, expected);
             assert_eq!(outcome.tone, Tone::Bad);
         }
+    }
+
+    #[test]
+    fn a_run_from_step_is_labelled_with_the_steps_it_ran() {
+        let fx = Fixture::new();
+        fx.save(&run(1, "staging"));
+        let mut partial = run(2, "staging");
+        partial["run_plan"] = json!({"FromStep": 2});
+        partial["target"]["steps"] = json!(["a", "b", "c"]);
+        partial["steps"] = json!([
+            {"index": 1, "command": "a", "status": "Skipped", "exit_code": null, "output": []},
+            {"index": 2, "command": "b", "status": "Ok", "exit_code": 0, "output": []},
+            {"index": 3, "command": "c", "status": "Failed", "exit_code": 1, "output": []}
+        ]);
+        partial["outcome"] = json!({"FailedAtStep": {"step": 3, "partial_update": false}});
+        fx.save(&partial);
+        let (view, _) = load(&fx);
+        let cell = present(&view, 0, 0);
+        assert_eq!(cell.steps_run.as_deref(), Some("steps 2–3 only"));
+
+        let full = Fixture::new();
+        full.save(&run(1, "staging"));
+        let (view, _) = load(&full);
+        assert_eq!(present(&view, 0, 0).steps_run, None);
+
+        // A from-step that changed nothing is the last attempt, not the code.
+        let stopped = Fixture::new();
+        stopped.save(&run(1, "staging"));
+        let mut stop = run(2, "staging");
+        stop["run_plan"] = json!({"FromStep": 1});
+        stop["outcome"] = json!({"StoppedInMaintenance": "LockLost"});
+        stop["mutation_started"] = json!(false);
+        stop["steps"] = json!([
+            {"index": 1, "command": "php artisan migrate --force", "status": "NotStarted", "exit_code": null, "output": []}
+        ]);
+        stopped.save(&stop);
+        let (view, _) = load(&stopped);
+        let cell = present(&view, 0, 0);
+        assert_eq!(cell.steps_run, None);
+        let last = cell.last_attempt.as_ref().unwrap();
+        assert_eq!(last.steps_run.as_deref(), Some("step 1 only"));
     }
 
     #[test]

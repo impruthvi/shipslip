@@ -115,12 +115,24 @@ pub(crate) fn plan_steps(
     plan: RunPlan,
     target_sha: &str,
 ) -> Vec<(usize, String)> {
-    let fast_forward =
-        (plan == RunPlan::Deploy).then(|| (0, format!("git merge --ff-only {target_sha}")));
+    let fast_forward = (plan == RunPlan::Deploy).then(|| (0, step_zero_command(target_sha)));
     fast_forward
         .into_iter()
         .chain((1..).zip(target.steps.iter().cloned()))
         .collect()
+}
+
+/// Step 0's name wherever it is shown: the preview, the run and the receipt.
+pub fn step_zero_label(target_sha: &str) -> String {
+    format!(
+        "git fast-forward to {}",
+        target_sha.get(..7).unwrap_or(target_sha)
+    )
+}
+
+/// The exact command step 0 runs on the server.
+pub fn step_zero_command(target_sha: &str) -> String {
+    format!("git merge --ff-only {target_sha}")
 }
 
 /// How long the log is watched after the last step.
@@ -1562,7 +1574,7 @@ async fn run_steps_locked<T: Transport>(
         .filter(|(index, _)| *index == 0 || *index >= first_recipe_step)
         .map(|(index, body)| {
             let name = if index == 0 {
-                "git fast-forward".to_string()
+                step_zero_label(&preview.target_sha)
             } else {
                 body.clone()
             };
@@ -3246,7 +3258,7 @@ mod tests {
             vec![
                 DeployEvent::StepStarted {
                     index: 0,
-                    name: "git fast-forward".into()
+                    name: "git fast-forward to 2222222".into()
                 },
                 DeployEvent::Output {
                     index: 0,

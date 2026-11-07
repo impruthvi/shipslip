@@ -217,6 +217,7 @@ fn a_successful_up_reads_as_app_brought_up() {
         started_at_ms: NOW - 5 * 60_000,
         kind: ReceiptKind::Up,
         run_plan: RunPlan::Deploy,
+        steps_run: None,
         badge: Badge {
             outcome: Outcome {
                 kind: OutcomeKind::Succeeded,
@@ -247,6 +248,7 @@ fn map_shows_last_runs_targets_hints_and_problems() {
         started_at_ms: NOW - 20 * 60_000,
         kind: ReceiptKind::Deploy,
         run_plan: RunPlan::Deploy,
+        steps_run: None,
         badge: Badge {
             outcome: Outcome {
                 kind: OutcomeKind::Succeeded,

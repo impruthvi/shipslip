@@ -71,6 +71,8 @@ export interface EnvCellView {
   words: string;
   evidence: string[];
   outcome: OutcomeView | null;
+  /** The steps a run-from-step ran, e.g. "steps 4–5 only"; null for a full run. */
+  stepsRun: string | null;
   flags: FlagView[];
   target: string | null;
   targetMoved: string | null;
@@ -83,6 +85,7 @@ export interface EnvCellView {
 export interface AttemptView {
   receipt: number;
   outcome: OutcomeView;
+  stepsRun: string | null;
   flags: FlagView[];
   atMs: number;
   age: string;
@@ -154,7 +157,10 @@ export interface RecordedConnectionGap {
 
 export interface StepView {
   index: string;
+  /** The command, or step 0's label. */
   command: string;
+  /** The exact command when `command` is step 0's label. */
+  detail: string | null;
   status: StepStatus;
   label: string;
   exitCode: number | null;
@@ -209,6 +215,7 @@ export interface ReceiptView {
   target: string;
   branch: string;
   plan: string;
+  stepsRun: string | null;
   startedAtMs: number;
   finishedAtMs: number | null;
   duration: string | null;
@@ -259,10 +266,24 @@ export type DeployEntry =
       production: boolean;
       needsTrust: boolean;
       /** Recipe steps 1..N, for picking where a run starts. */
-      steps: string[];
+      steps: PickStep[];
       /** What this checkout's newest run left to do. */
       recovery: RecoveryView | null;
     };
+
+/** A recipe step in the step picker. */
+export interface PickStep {
+  command: string;
+  /** The newest deploy's receipt recorded this command ending OK. */
+  ranOkLastRun: boolean;
+}
+
+/** Step 0 as every screen names it, with the exact command as detail. */
+export interface StepZeroView {
+  /** e.g. "git fast-forward to 2222222". */
+  label: string;
+  command: string;
+}
 
 /** One way to continue after a run, with the CLI command that does the same. */
 export type RecoveryAction = (
@@ -370,6 +391,8 @@ export interface DeployReview {
   /** Recipe steps 1..N; step 0, the git fast-forward, is built in. */
   steps: string[];
   runPlan: RunPlan;
+  /** null when the plan does not move the code. */
+  stepZero: StepZeroView | null;
 }
 
 export type ErrorCode =
@@ -414,6 +437,8 @@ export interface RunInfo {
   watchMs: number | null;
   startedAtMs: number;
   connectionGap: ConnectionGapView | null;
+  /** null when the run does not move the code. */
+  stepZero: StepZeroView | null;
 }
 
 export type ProgressStatus =

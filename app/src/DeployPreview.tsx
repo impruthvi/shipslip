@@ -130,10 +130,13 @@ export function Preview({
                 <code>php artisan down</code>
               </li>
             )}
-            {deploying && (
+            {review.stepZero && (
               <li>
                 <span className="recipe-index muted">0</span>
-                <code>git merge --ff-only {review.targetSha.slice(0, 7)}</code>
+                <span className="step-name">
+                  <span>{review.stepZero.label}</span>
+                  <code className="mono-detail muted">{review.stepZero.command}</code>
+                </span>
               </li>
             )}
             {review.steps.map((step, i) => {

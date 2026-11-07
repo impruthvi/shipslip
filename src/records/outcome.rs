@@ -251,6 +251,12 @@ impl Receipt {
         }
     }
 
+    /// The steps a run-from-step ran, e.g. "steps 4–5 only"; `None` for a
+    /// run of every step.
+    pub fn steps_run(&self) -> Option<String> {
+        describe_steps_run(self.run_plan, self.target.steps.len())
+    }
+
     /// How the run ended, in one sentence with any recorded reason.
     pub fn summary(&self) -> Option<Untrusted> {
         let outcome = self.outcome.as_ref()?;
@@ -275,6 +281,18 @@ impl Receipt {
             outcome => outcome.summary(),
         }))
     }
+}
+
+/// The steps a run-from-step runs out of `recipe_steps`, e.g. "steps 4–5 only".
+pub fn describe_steps_run(plan: RunPlan, recipe_steps: usize) -> Option<String> {
+    let RunPlan::FromStep(first) = plan else {
+        return None;
+    };
+    Some(if first >= recipe_steps {
+        format!("step {first} only")
+    } else {
+        format!("steps {first}–{recipe_steps} only")
+    })
 }
 
 pub fn describe_plan(plan: RunPlan) -> String {

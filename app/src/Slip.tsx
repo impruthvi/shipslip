@@ -192,6 +192,14 @@ function ReceiptSlip({
           <span className="slip-to" title={receipt.targetSha}>
             {receipt.targetSha.slice(0, 7)}
           </span>
+          {receipt.stepsRun && (
+            <>
+              <span className="muted" aria-hidden>
+                ·
+              </span>
+              <span className="muted">{receipt.stepsRun}</span>
+            </>
+          )}
         </div>
       </div>
       <div className="slip-body">
@@ -284,6 +292,7 @@ function Steps({ steps }: { steps: StepView[] }) {
                 <span className={loud ? `${step.status === "unknown" ? "tone-attention" : "tone-bad"} step-loud` : ""}>
                   {step.command}
                 </span>
+                {step.detail !== null && <code className="mono-detail muted">{step.detail}</code>}
                 {step.status !== "ok" && (
                   <span className="muted">
                     {" · "}

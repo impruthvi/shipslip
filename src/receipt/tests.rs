@@ -870,3 +870,20 @@ fn up_output_is_bounded_durable_and_only_exported_with_details() {
         1
     );
 }
+
+#[test]
+fn a_run_from_step_names_the_steps_it_ran() {
+    let mut value = receipt_json("aaaa0001-0", 1000, "staging");
+    value["target"]["steps"] = json!(["a", "b", "c", "d", "e"]);
+    let mut receipt = |plan: Value| {
+        value["run_plan"] = plan;
+        parse(value.clone()).steps_run()
+    };
+    assert_eq!(
+        receipt(json!({"FromStep": 4})),
+        Some("steps 4–5 only".into())
+    );
+    assert_eq!(receipt(json!({"FromStep": 5})), Some("step 5 only".into()));
+    assert_eq!(receipt(json!("Deploy")), None);
+    assert_eq!(receipt(json!("Rerun")), None);
+}

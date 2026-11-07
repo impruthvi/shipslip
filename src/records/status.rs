@@ -164,6 +164,9 @@ pub struct AttemptSummary {
     pub started_at_ms: u128,
     pub kind: ReceiptKind,
     pub run_plan: RunPlan,
+    /// The steps a run-from-step ran, e.g. "steps 4–5 only".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steps_run: Option<String>,
     pub badge: Badge,
     pub next_steps: NextSteps,
     /// The receipt file.
@@ -212,6 +215,7 @@ impl AttemptSummary {
             started_at_ms: receipt.started_at_ms,
             kind: receipt.kind,
             run_plan: receipt.run_plan,
+            steps_run: receipt.steps_run(),
             badge: receipt.badge(),
             next_steps: receipt.next_steps(),
             path: path.to_path_buf(),
