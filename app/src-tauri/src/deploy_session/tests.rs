@@ -3007,6 +3007,16 @@ fn step_picker_says_which_steps_ran_ok_in_the_last_run() {
         last["steps"][4]["exit_code"] = json!(null);
         last["outcome"] = json!({"FailedAtStep": {"step": 2, "partial_update": false}});
         fx.save(&last);
+        // A newer Up runs no recipe steps, so the deploy is still the last run.
+        let mut up = last.clone();
+        up["version"] = json!(2);
+        up["kind"] = json!("up");
+        up["run_id"] = json!("00000003-0");
+        up["started_at_ms"] = json!(3000);
+        up["finished_at_ms"] = json!(3500);
+        up["steps"] = json!([{"index": 0, "command": "php artisan up", "status": "Ok", "exit_code": 0, "output": []}]);
+        up["outcome"] = json!("Succeeded");
+        fx.save(&up);
 
         let DeployEntry::Ready { steps, .. } = sessions
             .deploy_entry(root.clone(), "production".into())

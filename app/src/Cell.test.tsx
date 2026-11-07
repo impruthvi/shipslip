@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, test } from "vitest";
 import * as fixtures from "./fixtures.gen";
-import { cellName, Flap, reason, status } from "./Cell";
+import { Cell, cellName, Flap, reason, status } from "./Cell";
 import { ReleaseMap } from "./ReleaseMap";
 import type { FlagView, MapView, OutcomeKind } from "./types";
 
@@ -33,6 +33,8 @@ describe("cells", () => {
     expect(status(cell).word).toBe("Succeeded");
     expect(reason(cell)?.text).toBe("Steps 2–3 only · checked out at start");
     expect(cellName("shop", "staging", cell)).toContain("Succeeded · steps 2–3 only");
+    render(<Cell cell={cell} expanded />);
+    expect(screen.getByText("Steps 2–3 only · checked out at start")).toHaveClass("cell-reason");
     const lastFailed = {
       ...cell,
       lastAttempt: {
