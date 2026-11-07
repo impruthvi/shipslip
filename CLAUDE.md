@@ -12,4 +12,4 @@ Use `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `won
 
 ### Domain docs
 
-Single-context: root `GLOSSARY.md` and `docs/adr/`. Before exploring the codebase, read `docs/agents/domain.md`.
+Domain words: `GLOSSARY.md`. Read its _Avoid_ lines before naming anything. Decisions: `docs/adr/`. Layout: `docs/agents/domain.md`.

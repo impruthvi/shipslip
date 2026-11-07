@@ -61,24 +61,18 @@ app/src/              React UI; styles.css holds every colour and size token
 - Remote output is untrusted text; never render it as HTML (`react/no-danger` is an ESLint error).
 - Every failure path gets a test. Transport behavior (exit codes, disconnect, Ctrl-C, lock break) must be proven against a real sshd before any production deploy.
 
-## App UI rules
+## App UI
 
-- Colours come only from `app/src/styles.css` `:root` variables; ESLint rejects raw hex values elsewhere. Light and dark follow macOS.
-- Status colour is earned: red only for a failed step, new errors, or a failed smoke check. Stopped, unknown, unfinished and "maintenance?" are amber. Success is quiet ink, not green.
-- Evidence marks say where the code came from (recorded, incomplete, observed, not known, no code); the status word carries severity. Don't merge the two.
-- Never claim the app knows what is on the server right now. No "live" wording (`LiveState.test.tsx` enforces it); say what this Mac recorded and when.
-- Motion is minimal and off under reduced motion; the running indicator is the only continuous animation.
-- Keep the Rust view types as the source of status; the UI maps `OutcomeKind` / `FlagKind`, it doesn't parse strings.
+Before UI work, read the App UI section of `CODING_STANDARDS.md`: colour, status and wording rules review holds the change to.
 
 ## Conventions
 
-- Rust 2021, `cargo fmt` + `clippy -D warnings` clean before commit.
+- Work on a feature branch; `.githooks/pre-commit` refuses commits on `main`. Enable it once per clone: `git config core.hooksPath .githooks`.
 - Conventional Commits (`feat:`, `fix:`, `test:`, `chore:`, `docs:`).
-- Small, explicit code over clever abstractions; no new dependency when a few lines will do.
-- Comment only where the code can't say it.
+- Review standards: `CODING_STANDARDS.md`.
 
 ## Agent docs
 
 - Issues and specs: GitHub Issues for `impruthvi/shipslip`. See `docs/agents/issue-tracker.md`.
 - Triage labels: see `docs/agents/triage-labels.md`.
-- Domain vocabulary: root `GLOSSARY.md` and `docs/adr/` when they exist. See `docs/agents/domain.md`.
+- Domain words: `GLOSSARY.md`. Read its _Avoid_ lines before naming anything. Decisions: `docs/adr/`.

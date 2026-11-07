@@ -127,7 +127,7 @@ export default function App() {
     else if (choice.kind === "rerun") next = { kind: "deploy", plan: "Rerun" };
     else if (choice.kind === "fromStep") next = { kind: "pick", steps: entry.steps, step: choice.step };
     else next = { kind: choice.kind };
-    // Unapproved settings are reviewed first, then the choice goes on.
+    // A config that needs approval is reviewed first, then the choice goes on.
     const start: Start = entry.needsTrust ? { kind: "trust", then: next } : next;
     setApproved(null);
     setWorkspace({ target, start });
