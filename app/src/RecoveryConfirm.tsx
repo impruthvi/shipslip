@@ -1,5 +1,5 @@
-import { useState, type FormEvent } from "react";
 import { actionConsequence } from "./DeployEntry";
+import { TypedConfirm } from "./TypedConfirm";
 import type { RecoveryReview } from "./types";
 
 export type RecoveryBusy = "confirming" | "releasing" | null;
@@ -19,19 +19,12 @@ export function RecoveryConfirm({
   /** Up only: release this review and prepare run-from-step instead. */
   onFromStep: (step: number) => void;
 }) {
-  const [typed, setTyped] = useState("");
-  const ready = !review.production || typed === review.env;
   const attach = review.operation === "attach";
   const watched = review.watched;
   const fromStep = review.fromStep;
   // A recipe step by number; `php artisan down` or `up` by its command.
   const watchedName = (step: string) =>
     watched?.index == null ? <code>{watched?.command}</code> : `${step} ${watched.index}`;
-
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    if (ready && busy === null) onConfirm(review.production ? typed : null);
-  };
 
   return (
     <>
@@ -113,34 +106,21 @@ export function RecoveryConfirm({
         )}
         {!attach && <p className="workspace-section muted">Takes the deploy lock when you confirm.</p>}
       </div>
-      <form className="workspace-footer" onSubmit={submit}>
+      <div className="workspace-footer">
         <button type="button" className="button" disabled={busy !== null} onClick={onBack}>
           Back
         </button>
         {busy === "releasing" && <span className="muted">Closing…</span>}
-        <div className="footer-end">
-          {review.production && (
-            <label className="typed-field">
-              Type {review.env} to continue
-              <input
-                value={typed}
-                onChange={(event) => setTyped(event.target.value)}
-                autoComplete="off"
-                autoCapitalize="off"
-                spellCheck={false}
-                disabled={busy !== null}
-              />
-            </label>
-          )}
-          <button type="submit" className="button button-primary" disabled={!ready || busy !== null}>
-            {busy === "confirming"
-              ? "Starting…"
-              : attach
-                ? "Attach and continue"
-                : "Bring app out of maintenance"}
-          </button>
-        </div>
-      </form>
+        <TypedConfirm
+          expected={review.production ? review.env : null}
+          verb="continue"
+          action={
+            busy === "confirming" ? "Starting…" : attach ? "Attach and continue" : "Bring app out of maintenance"
+          }
+          busy={busy !== null}
+          onConfirm={onConfirm}
+        />
+      </div>
     </>
   );
 }

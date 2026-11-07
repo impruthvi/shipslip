@@ -1,5 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useState } from "react";
 import { firstStep } from "./run";
+import { TypedConfirm } from "./TypedConfirm";
 import { clock } from "./time";
 import type { DeployReview, RunPlan } from "./types";
 
@@ -53,12 +54,10 @@ export function Preview({
   /** "Already up to date": release this preview and prepare a rerun. */
   onRerun: () => void;
 }) {
-  const [typed, setTyped] = useState("");
   const [allCommits, setAllCommits] = useState(false);
   const count = review.commits.length + review.moreCommits;
   const listed = allCommits ? review.commits : review.commits.slice(0, FIRST_COMMITS);
   const hidden = count - listed.length;
-  const ready = !review.production || typed === review.env;
   const deploying = review.runPlan === "Deploy";
   const first = firstStep(review.runPlan);
   const running = deploying ? review.steps.length : review.steps.length - Math.max(first, 1) + 1;
@@ -68,10 +67,6 @@ export function Preview({
     review.watchMs !== null && `log watch ${Math.round(review.watchMs / 60_000)} min`,
   ].filter(Boolean);
 
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    if (ready && busy === null) onDeploy(review.production ? typed : null);
-  };
   const canRun = !deploying || count > 0;
 
   return (
@@ -185,32 +180,21 @@ export function Preview({
           Server lock held since {clock(lockedAt)} · Back releases it
         </p>
       </div>
-      <form className="workspace-footer" onSubmit={submit}>
+      <div className="workspace-footer">
         <button type="button" className="button" disabled={busy !== null} onClick={onBack}>
           Back
         </button>
         {busy === "releasing" && <span className="muted">Releasing the server lock…</span>}
         {canRun && (
-          <div className="footer-end">
-            {review.production && (
-              <label className="typed-field">
-                Type {review.env} to {deploying ? "deploy" : "continue"}
-                <input
-                  value={typed}
-                  onChange={(event) => setTyped(event.target.value)}
-                  autoComplete="off"
-                  autoCapitalize="off"
-                  spellCheck={false}
-                  disabled={busy !== null}
-                />
-              </label>
-            )}
-            <button type="submit" className="button button-primary" disabled={!ready || busy !== null}>
-              {busy === "confirming" ? "Starting…" : planAction(review.runPlan, review.env)}
-            </button>
-          </div>
+          <TypedConfirm
+            expected={review.production ? review.env : null}
+            verb={deploying ? "deploy" : "continue"}
+            action={busy === "confirming" ? "Starting…" : planAction(review.runPlan, review.env)}
+            busy={busy !== null}
+            onConfirm={onDeploy}
+          />
         )}
-      </form>
+      </div>
     </>
   );
 }

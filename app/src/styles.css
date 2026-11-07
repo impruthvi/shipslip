@@ -1696,14 +1696,18 @@ button.side-item:hover {
   margin-left: auto;
 }
 
-.typed-field {
+.typed-action {
   display: flex;
-  align-items: center;
-  gap: var(--space-8);
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-4);
+}
+
+.typed-note {
   font-size: var(--text-12);
 }
 
-.typed-field input {
+.typed-input {
   width: 160px;
   height: 32px;
   padding: 0 var(--space-8);

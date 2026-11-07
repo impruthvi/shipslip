@@ -38,11 +38,15 @@ export type Start =
   | { kind: "deploy"; plan: RunPlan }
   /** Run from step: pick where, then prepare. */
   | { kind: "pick"; steps: string[]; step: number }
-  | { kind: "trust" }
+  /** Review settings first; approving goes on to `then`, or back to the map. */
+  | { kind: "trust"; then: Next | null }
   | { kind: "up" }
   | { kind: "attach" }
   /** Back to a run already going. */
   | { kind: "follow"; info: RunInfo };
+
+/** Where an approved trust review goes on to. */
+export type Next = Exclude<Start, { kind: "trust" } | { kind: "follow" }>;
 
 /** `finished`: a run ended, so its receipt should open. `approved`: settings
  * were approved. `away`: the map was shown while a run keeps going. */
@@ -115,6 +119,8 @@ export function Workspace({
   announce: Announce;
 }) {
   const [screen, setScreen] = useState<Screen>(() => initial(start));
+  /** What the workspace is on now: the start, or where an approval went on to. */
+  const [stage, setStage] = useState<Start>(start);
   const [now, setNow] = useState(() => Date.now());
   const [alias, setAlias] = useState<string | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
@@ -173,7 +179,9 @@ export function Workspace({
       );
   };
 
-  const loadTrust = () => {
+  /** `then` is where approving goes on to; null leaves for the map. */
+  const loadTrust = (then: Next | null) => {
+    setStage({ kind: "trust", then });
     setScreen({ kind: "loading" });
     const { generation, row, env } = props.current.target;
     deploy.reviewTrust(generation, row, env).then(
@@ -183,6 +191,7 @@ export function Workspace({
   };
 
   const loadRecovery = (operation: "up" | "attach") => {
+    setScreen({ kind: "loading" });
     const { generation, row, env } = props.current.target;
     const review = operation === "up" ? deploy.reviewUp : deploy.reviewAttach;
     review(generation, row, env).then(
@@ -203,10 +212,9 @@ export function Workspace({
     if (!started.current) {
       started.current = true;
       const first = props.current.start;
-      if (first.kind === "deploy") prepare(first.plan);
-      else if (first.kind === "trust") loadTrust();
-      else if (first.kind === "up" || first.kind === "attach") loadRecovery(first.kind);
+      if (first.kind === "trust") loadTrust(first.then);
       else if (first.kind === "follow") setAlias(first.info.sshAlias);
+      else begin(first);
     }
     return () => {
       alive.current = false;
@@ -224,6 +232,14 @@ export function Workspace({
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
   }, [screen]);
+
+  /** Opens what a deploy entry choice leads to. */
+  function begin(next: Next) {
+    setStage(next);
+    if (next.kind === "deploy") prepare(next.plan);
+    else if (next.kind === "pick") setScreen({ kind: "pick", steps: next.steps, step: next.step });
+    else loadRecovery(next.kind);
+  }
 
   const cancel = () => {
     cancelled.current = true;
@@ -284,7 +300,10 @@ export function Workspace({
       return { label: "Rerun…", run: () => prepare("Rerun") };
     }
     // The settings changed after the map was read: review them here.
-    if (error.code === "untrusted") return { label: "Review configuration", run: loadTrust };
+    if (error.code === "untrusted") {
+      const then: Next | null = retry === null ? null : { kind: "deploy", plan: retry };
+      return { label: "Review configuration", run: () => loadTrust(then) };
+    }
     return undefined;
   };
   const rerun = () => {
@@ -294,11 +313,19 @@ export function Workspace({
     deploy.cancel(handle).then(() => alive.current && prepare("Rerun"), refuse);
   };
   const approve = (typedEnv: string) => {
-    if (screen.kind !== "trust") return;
+    if (screen.kind !== "trust" || stage.kind !== "trust") return;
     const shown = screen;
+    const { then } = stage;
     setScreen({ ...shown, busy: "approving" });
     deploy.approveTrust(shown.review.handle, typedEnv).then(
-      () => alive.current && props.current.onLeave("approved"),
+      () => {
+        if (!alive.current) return;
+        // Approval never runs anything: the next screen has its own confirm.
+        if (then) {
+          props.current.announce(`Configuration approved for ${props.current.target.env}`);
+          begin(then);
+        } else props.current.onLeave("approved");
+      },
       (error: unknown) => {
         if (!alive.current) return;
         const refused = refusal(error);
@@ -354,10 +381,10 @@ export function Workspace({
     ? "deploy"
     : screen.kind === "running"
       ? screen.info.operation
-      : start.kind === "up" || start.kind === "attach"
-        ? start.kind
-        : start.kind === "follow"
-          ? start.info.operation
+      : stage.kind === "up" || stage.kind === "attach"
+        ? stage.kind
+        : stage.kind === "follow"
+          ? stage.info.operation
           : "deploy";
   // The verb follows the plan being run: a rerun is not called a deploy.
   const plan: RunPlan | null =
@@ -369,11 +396,11 @@ export function Workspace({
         ? screen.review.runPlan
         : screen.kind === "running"
           ? screen.info.runPlan
-          : start.kind === "deploy"
-            ? start.plan
+          : stage.kind === "deploy"
+            ? stage.plan
             : null;
   const title =
-    start.kind === "trust" || screen.kind === "trust"
+    stage.kind === "trust"
       ? `Review configuration · ${target.label} · ${target.env}`
       : operation === "up"
         ? `Bring ${target.label} → ${target.env} out of maintenance`
@@ -466,7 +493,7 @@ export function Workspace({
           changedAgain={screen.changedAgain}
           onBack={back}
           onApprove={approve}
-          onReviewAgain={loadTrust}
+          onReviewAgain={() => loadTrust(stage.kind === "trust" ? stage.then : null)}
           onEdit={editConfig}
         />
       )}

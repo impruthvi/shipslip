@@ -590,7 +590,7 @@ async function renderApp() {
   return selectedCell();
 }
 
-test("changed settings open the trust review; approving returns to the pane with a note", async () => {
+test("changed settings open the trust review; approving goes on to the preview, which still needs its confirm", async () => {
   entry.mockResolvedValue(ready({ needsTrust: true }));
   reviewTrust.mockResolvedValue(fixtures.trustReview);
   const cell = await renderApp();
@@ -612,7 +612,7 @@ test("changed settings open the trust review; approving returns to the pane with
   expect(settings.getByRole("heading", { level: 3, name: "ssh" })).toBeInTheDocument();
 
   expect(
-    screen.getByText("Approving lets you prepare a deploy. Deploying needs its own confirmation."),
+    screen.getByText("Approving goes on to the review. Nothing runs until you confirm it there."),
   ).toBeInTheDocument();
   const approve = screen.getByRole("button", { name: "Approve configuration" });
   expect(approve).toBeDisabled();
@@ -620,16 +620,35 @@ test("changed settings open the trust review; approving returns to the pane with
     target: { value: "production" },
   });
   approveTrust.mockResolvedValue(undefined);
-  entry.mockResolvedValue(ready());
+  prepare.mockResolvedValue(production);
   fireEvent.click(approve);
   await settle();
   expect(approveTrust).toHaveBeenCalledWith("trust-1", "production");
-  expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
-  expect(loadMap).toHaveBeenCalledTimes(2);
-  expect(screen.getByText(`Configuration approved for ${cell.env}`)).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: DEPLOY })).toHaveFocus();
-  // Approval alone never prepares a deploy.
-  expect(prepare).not.toHaveBeenCalled();
+  expect(prepare).toHaveBeenCalledWith(1, cell.row, cell.env, "Deploy", expect.any(Function));
+  expect(screen.getByText("aaaaaaa → bbbbbbb")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(`Deploy ${cell.label} → ${cell.env}`);
+  expect(screen.getByTestId("announce-polite")).toHaveTextContent(`Configuration approved for ${cell.env}`);
+  // Nothing runs without the usual typed confirm.
+  expect(screen.getByRole("button", { name: "Deploy to production" })).toBeDisabled();
+  expect(screen.getByLabelText("Type production to deploy")).toHaveValue("");
+  expect(confirm).not.toHaveBeenCalled();
+});
+
+test("approving from a refused prepare goes on to that same plan's preview", async () => {
+  const { pending } = await openWorkspace();
+  await act(async () => pending.reject({ code: "untrusted", message: "Review and approve these settings first." }));
+  reviewTrust.mockResolvedValue(fixtures.trustReview);
+  fireEvent.click(screen.getByRole("button", { name: "Review configuration" }));
+  await settle();
+  fireEvent.change(screen.getByLabelText("Type production to approve"), { target: { value: "production" } });
+  approveTrust.mockResolvedValue(undefined);
+  prepare.mockResolvedValue(production);
+  fireEvent.click(screen.getByRole("button", { name: "Approve configuration" }));
+  await settle();
+  expect(prepare).toHaveBeenCalledTimes(2);
+  expect(prepare).toHaveBeenLastCalledWith(1, expect.any(Number), expect.any(String), "Deploy", expect.any(Function));
+  expect(screen.getByRole("button", { name: "Deploy to production" })).toBeDisabled();
+  expect(confirm).not.toHaveBeenCalled();
 });
 
 test("a config that changed during the review must be reviewed again; escape goes back", async () => {
