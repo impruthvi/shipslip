@@ -38,14 +38,14 @@ export type Start =
   | { kind: "deploy"; plan: RunPlan }
   /** Run from step: pick where, then prepare. */
   | { kind: "pick"; steps: string[]; step: number }
-  /** Review settings first; approving goes on to `then`, or back to the map. */
+  /** Review the config for approval first; approving goes on to `then`, or back to the map. */
   | { kind: "trust"; then: Next | null }
   | { kind: "up" }
   | { kind: "attach" }
   /** Back to a run already going. */
   | { kind: "follow"; info: RunInfo };
 
-/** Where an approved trust review goes on to. */
+/** Where an approval goes on to. */
 export type Next = Exclude<Start, { kind: "trust" } | { kind: "follow" }>;
 
 /** `finished`: a run ended, so its receipt should open. `approved`: settings
