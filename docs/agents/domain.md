@@ -17,6 +17,16 @@ when terms or decisions get resolved.
 - `/docs/adr/`: numbered architecture decision records.
 - `/src/`: implementation.
 
+## Adding a field the app shows
+
+A new field crosses every layer, in this order:
+
+1. Library record: `src/records/` (`ReceiptRecord`, `AttemptSummary`). New JSON fields take `skip_serializing_if = "Option::is_none"` so the record schema test holds.
+2. App view: `app/src-tauri/src/view.rs`, `receipt_view.rs`, or `deploy_session.rs` for deploy screens.
+3. UI type: `app/src/types.ts`, by hand.
+4. Fixture: a new state gets an export in `app/src-tauri/src/ui_fixtures.rs` (deploy screens: `sample_deploy_views` in `deploy_session.rs`), then `UPDATE_UI_FIXTURES=1 cargo test ui_fixtures`. tsc now checks step 3 against what Rust sends.
+5. Component, and a Vitest test that renders the fixture.
+
 ## Use the glossary's vocabulary
 
 Use terms from `GLOSSARY.md` in issue titles, proposals, hypotheses,

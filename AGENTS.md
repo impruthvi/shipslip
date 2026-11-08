@@ -27,7 +27,7 @@ npm test                           # Vitest
 ```
 
 App backend (`app/src-tauri/`): `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
-After changing a view type in `app/src-tauri/src/view.rs` or `receipt_view.rs`, regenerate the UI fixtures with `UPDATE_UI_FIXTURES=1 cargo test ui_fixtures` (writes `app/src/fixtures.gen.ts`).
+After changing a view type in `app/src-tauri/src/view.rs` or `receipt_view.rs`, regenerate the UI fixtures with `UPDATE_UI_FIXTURES=1 cargo test ui_fixtures` (writes `app/src/fixtures.gen.ts`). Adding a field the app shows: follow the path in `docs/agents/domain.md`.
 
 CI runs all of the above; keep each one clean before committing.
 

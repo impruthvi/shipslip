@@ -13,7 +13,7 @@ The ordered list of commands an environment runs on the server after the code mo
 _Avoid_: Script, pipeline, hooks
 
 **Step**:
-One command from the recipe, run once on the server. Step 0 is the fast-forward of the code itself.
+One command from the recipe, run once on the server. On a deploy, step 0 is the fast-forward of the code itself. An Up's receipt records `php artisan up` as step 0.
 _Avoid_: Task, job, command (when meaning the recorded unit)
 
 **Maintenance down / up**:
