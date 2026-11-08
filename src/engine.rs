@@ -1328,7 +1328,12 @@ async fn run_steps<T: Transport>(
             () = heartbeat_forever(&*transport, path, run_id) => unreachable!("heartbeat never ends"),
         }
     };
-    if resume.is_some() && !using_saved_checks && watch_result.status == WatchStatus::Complete {
+    // The watch window opens only once the outcome is saved, so a re-attached
+    // run without one never had a watch to interrupt.
+    let watch_was_underway = resume
+        .as_ref()
+        .is_some_and(|receipt| receipt.outcome.is_some());
+    if watch_was_underway && !using_saved_checks && watch_result.status == WatchStatus::Complete {
         watch_result.status = WatchStatus::Partial;
         watch_result.warnings.push(
             "Log watch restarted after attach; entries during the interruption may be missing"
@@ -1336,16 +1341,8 @@ async fn run_steps<T: Transport>(
         );
     }
     if let Some(previous) = resume.as_ref().and_then(|receipt| receipt.watch.as_ref()) {
-        if !app_down
-            && resume
-                .as_ref()
-                .is_some_and(|receipt| receipt.outcome.is_none())
-        {
+        if !app_down && !watch_was_underway {
             merge_previous_watch(&mut watch_result, previous);
-            watch_result.status = WatchStatus::Partial;
-            watch_result
-                .warnings
-                .push("Previous observation was interrupted".into());
         }
     }
     let saved = journal.as_ref().map(|journal| {
@@ -1507,14 +1504,6 @@ fn merge_previous_watch(current: &mut WatchResult, previous: &WatchResult) {
             current.new_errors.push(group.clone());
         } else {
             current.overflow_groups += 1;
-        }
-    }
-    for warning in &previous.warnings {
-        if current.warnings.len() >= 20 {
-            break;
-        }
-        if !current.warnings.contains(warning) {
-            current.warnings.push(warning.clone());
         }
     }
 }
@@ -2527,6 +2516,7 @@ mod tests {
         lose_acquire_response: AtomicBool,
         reconnect_fails: bool,
         fail_lock_checks: bool,
+        log_exists_empty: bool,
         reconnects: AtomicUsize,
         lock: Mutex<LockSim>,
         server: Mutex<ServerSim>,
@@ -2972,7 +2962,13 @@ mod tests {
                 let _ = output.send(self.probe(script)).await;
                 Ok(0)
             } else if script.contains("@missing") && script.contains("@file") {
-                let _ = output.send("@missing".into()).await;
+                if self.log_exists_empty {
+                    for line in ["@file 1 0 0 0 0", "c3RvcmFnZS9sb2dzL2xhcmF2ZWwubG9n", ""] {
+                        let _ = output.send(line.into()).await;
+                    }
+                } else {
+                    let _ = output.send("@missing".into()).await;
+                }
                 Ok(0)
             } else if script.contains("@fetch_head") {
                 let lines = self.server.lock().unwrap().preflight_lines();
@@ -5355,6 +5351,80 @@ mod tests {
         assert_eq!(
             events.last(),
             Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+    }
+
+    async fn reattach_after(record: impl FnOnce(&ReceiptJournal)) -> Receipt {
+        let fake = Arc::new(Fake {
+            log_exists_empty: true,
+            ..preflight()
+        });
+        let mut target = target(false, &[]);
+        target.watch_log = true;
+        let preview = prepare(&trusted(target), &*fake).await.unwrap();
+        let dir = TempReceipts::new();
+        let journal = ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap();
+        journal.confirm().unwrap();
+        journal.begin_step(0, now_ms()).unwrap();
+        journal
+            .finish_step(0, StepStatus::Ok, Some(0), StepTimes::default())
+            .unwrap();
+        record(&journal);
+        let path = journal.path().to_path_buf();
+        drop(journal);
+
+        let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (events, _handle) = attach(&trusted(resumed.snapshot().target), resumed, fake).unwrap();
+        let events = collect(events).await;
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded)),
+            "{events:#?}"
+        );
+        crate::receipt::read(&path).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_that_starts_after_reattach_is_complete() {
+        let receipt = reattach_after(|journal| {
+            let mut during = WatchResult::not_run();
+            during.status = WatchStatus::Partial;
+            during.duration_ms = 16_000;
+            during.observed_lines = 3;
+            during
+                .warnings
+                .push("Lost the connection for 5s; log lines from that time may be missing".into());
+            journal
+                .observation(during, SmokeResult::NotConfigured, None)
+                .unwrap();
+            journal
+                .detached("detached while observing step 0".into())
+                .unwrap();
+        })
+        .await;
+        let watch = receipt.watch.unwrap();
+        assert_eq!(watch.status, WatchStatus::Complete, "{watch:#?}");
+        assert!(watch.warnings.is_empty(), "{watch:#?}");
+        assert_eq!(
+            watch.observed_lines, 3,
+            "lines seen before the detach are kept"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_interrupted_after_the_steps_stays_flagged() {
+        let receipt = reattach_after(|journal| {
+            journal.record_outcome(DeployOutcome::Succeeded).unwrap();
+        })
+        .await;
+        let watch = receipt.watch.unwrap();
+        assert_eq!(watch.status, WatchStatus::Partial, "{watch:#?}");
+        assert!(
+            watch
+                .warnings
+                .iter()
+                .any(|warning| warning.starts_with("Log watch restarted after attach")),
+            "{watch:#?}"
         );
     }
 
