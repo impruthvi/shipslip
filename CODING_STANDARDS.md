@@ -20,6 +20,7 @@ Rules marked _(enforced)_ have a check that fails CI; review can skip them.
 ## Tests
 
 - Every failure path the change adds has a test. An untested branch the change adds is a blocker, not a note.
+- A check that something is absent targets the element or exact text it would appear in, not a loose pattern over the whole screen: `/only$/` also matches `git merge --ff-only`.
 - A workspace flow that moves to another screen asserts that screen's `h1` on arrival. The heading takes focus on every screen change, so a stale one is what a screen reader announces.
 
 ## Code
