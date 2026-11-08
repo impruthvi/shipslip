@@ -91,13 +91,20 @@ export default function QuitDialog() {
             </li>
           ))}
         </ul>
-        <p className="muted quit-now-note">
-          Quit now: {[...new Set(runs.map((run) => run.quitNow))].join(" ")}
-        </p>
         <div className="quit-actions">
-          <button type="button" className="toolbar-button" onClick={() => void quit.quitNow()}>
-            Quit now
-          </button>
+          <div className="quit-now">
+            <button
+              type="button"
+              className="toolbar-button"
+              aria-describedby="quit-now-note"
+              onClick={() => void quit.quitNow()}
+            >
+              Quit now
+            </button>
+            <p id="quit-now-note" className="muted quit-now-note">
+              {[...new Set(runs.map((run) => run.quitNow))].join(" ")}
+            </p>
+          </div>
           {!leaving && (
             <>
               <button type="button" className="toolbar-button" onClick={detach}>

@@ -30,6 +30,8 @@
   --color-rule: #e2e0d9;
   --color-hatch: #e6e4dd;
   --color-selection: #e8ecf7;
+  /* The receipt's outline, so white paper shows on the light panel. */
+  --color-slip-edge: #bdb9ad;
   --color-accent: #2445a8;
   --color-focus: var(--color-accent);
   --color-status-bad: #b42318;
@@ -85,6 +87,8 @@
     --color-rule: #37393e;
     --color-hatch: #303236;
     --color-selection: #26324d;
+    /* Lit paper already stands out on the dark desk. */
+    --color-slip-edge: transparent;
     --color-accent: #9db3ff;
     --color-status-bad: #ff9a8f;
     --color-status-bad-soft: #3d2323;
@@ -1160,7 +1164,8 @@ button.side-item:hover {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  filter: drop-shadow(0 1px 1px color-mix(in srgb, var(--color-text) 6%, transparent))
+  filter: drop-shadow(0 0 0.5px var(--color-slip-edge))
+    drop-shadow(0 1px 1px color-mix(in srgb, var(--color-text) 6%, transparent))
     drop-shadow(0 8px 24px color-mix(in srgb, var(--color-text) 7%, transparent));
 }
 
@@ -1505,20 +1510,27 @@ button.side-item:hover {
   font-weight: var(--font-weight-medium);
 }
 
-.quit-now-note {
-  font-size: var(--text-12);
-}
-
 .quit-actions {
   display: flex;
+  align-items: flex-start;
   justify-content: flex-end;
   gap: var(--space-8);
   margin-top: var(--space-4);
 }
 
-.quit-actions .toolbar-button:first-child {
-  margin-right: auto;
-  color: var(--color-status-bad);
+/* Quit now is plain: its consequence sits underneath, never red. */
+.quit-now {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.quit-now-note {
+  font-size: var(--text-12);
+  line-height: 16px;
 }
 
 .quit-actions .quit-primary {
