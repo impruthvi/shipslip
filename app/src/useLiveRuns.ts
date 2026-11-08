@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { deploy } from "./deployApi";
 import type { LiveRuns, RunInfo } from "./types";
 
@@ -7,11 +7,17 @@ const TICK_MS = 1000;
 const NONE: LiveRuns = { runs: [], closedPreviews: [] };
 
 /** Runs going now, asked of Rust every 2 seconds. `onEnded` hears runs
- * leave the list, so the map can show their result. `now` ticks while any run. */
-export function useLiveRuns(onEnded: (runs: RunInfo[]) => void): { live: LiveRuns; now: number } {
+ * leave the list, so the map can show their result. `now` ticks while any run.
+ * `forget` drops a run the workspace saw end, before Rust stops listing it. */
+export function useLiveRuns(onEnded: (runs: RunInfo[]) => void): {
+  live: LiveRuns;
+  now: number;
+  forget: (handle: string) => void;
+} {
   const [live, setLive] = useState<LiveRuns>(NONE);
   const [now, setNow] = useState(() => Date.now());
   const ended = useRef(onEnded);
+  const forgotten = useRef(new Set<string>());
   useEffect(() => {
     ended.current = onEnded;
   });
@@ -21,8 +27,9 @@ export function useLiveRuns(onEnded: (runs: RunInfo[]) => void): { live: LiveRun
     let known: RunInfo[] = [];
     const ask = () =>
       deploy.liveRuns().then(
-        (next) => {
+        (all) => {
           if (gone) return;
+          const next = { ...all, runs: all.runs.filter((run) => !forgotten.current.has(run.handle)) };
           const handles = new Set(next.runs.map((run) => run.handle));
           const left = known.filter((run) => !handles.has(run.handle));
           if (left.length > 0) ended.current(left);
@@ -47,5 +54,10 @@ export function useLiveRuns(onEnded: (runs: RunInfo[]) => void): { live: LiveRun
     return () => window.clearInterval(timer);
   }, [running]);
 
-  return { live, now };
+  const forget = useCallback((handle: string) => {
+    forgotten.current.add(handle);
+    setLive((prev) => ({ ...prev, runs: prev.runs.filter((run) => run.handle !== handle) }));
+  }, []);
+
+  return { live, now, forget };
 }

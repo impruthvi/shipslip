@@ -84,7 +84,7 @@ export default function App() {
     entryVersion,
   );
   // A run that ended away from the workspace shows on its cell; the selection stays.
-  const { live, now } = useLiveRuns(
+  const { live, now, forget } = useLiveRuns(
     useCallback(
       (ended: RunInfo[]) => {
         refresh();
@@ -272,6 +272,7 @@ export default function App() {
             target={workspace.target}
             start={workspace.start}
             onLeave={onLeave}
+            onRunEnded={forget}
             announce={announce}
           />
         ) : (

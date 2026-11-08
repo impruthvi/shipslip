@@ -60,7 +60,8 @@ type Screen =
   | { kind: "preparing"; plan: RunPlan; phases: { progress: PrepareProgress; at: number }[]; cancelling: boolean }
   | { kind: "refused"; error: CommandError; retry: RunPlan | null }
   | { kind: "preview"; review: DeployReview; lockedAt: Date; busy: PreviewBusy }
-  | { kind: "running"; info: RunInfo }
+  /** `held`: the run has an outcome the developer reads before leaving. */
+  | { kind: "running"; info: RunInfo; held?: boolean }
   | { kind: "loading" }
   | { kind: "trust"; review: TrustReviewData; busy: TrustBusy; changedAgain: boolean }
   | { kind: "pick"; steps: PickStep[]; step: number }
@@ -112,11 +113,14 @@ export function Workspace({
   target,
   start,
   onLeave,
+  onRunEnded,
   announce,
 }: {
   target: DeployTarget;
   start: Start;
   onLeave: (how: Leave) => void;
+  /** A followed run reached its outcome; it is no longer running. */
+  onRunEnded: (handle: string) => void;
   announce: Announce;
 }) {
   const [screen, setScreen] = useState<Screen>(() => initial(start));
@@ -260,7 +264,7 @@ export function Workspace({
         cancel();
         break;
       case "running":
-        onLeave("away");
+        onLeave(screen.held ? "finished" : "away");
         break;
       default:
         onLeave("back");
@@ -338,7 +342,7 @@ export function Workspace({
     );
   };
 
-  // Escape is Back or Cancel; a running deploy ignores it. Dialogs own it while open.
+  // Escape is Back or Cancel; a running deploy ignores it until it ends. Dialogs own it while open.
   const backRef = useRef(back);
   useEffect(() => {
     backRef.current = back;
@@ -347,6 +351,7 @@ export function Workspace({
     screen.kind === "refused" ||
     screen.kind === "pick" ||
     screen.kind === "taken" ||
+    (screen.kind === "running" && screen.held === true) ||
     (screen.kind === "trust" && screen.busy === null) ||
     (screen.kind === "recovery" && screen.busy === null) ||
     (screen.kind === "preview" && screen.busy === null) ||
@@ -530,8 +535,10 @@ export function Workspace({
           info={screen.info}
           announce={announce}
           onLeave={() => onLeave("away")}
-          onEnd={(terminal) => {
+          onDone={() => onLeave("finished")}
+          onEnd={(terminal, ending) => {
             const plan = screen.info.runPlan;
+            if (ending !== "lost") onRunEnded(screen.info.handle);
             if (terminal.kind === "finished" && terminal.lockTaken && plan !== null) {
               announce(LOCK_TAKEN, true);
               setScreen({ kind: "taken", plan });
@@ -539,7 +546,8 @@ export function Workspace({
             }
             announce(endSentence(terminal), true);
             void notify(`${target.label} → ${target.env}`, endSentence(terminal));
-            onLeave("finished");
+            if (ending === "held") setScreen({ ...screen, held: true });
+            else onLeave("finished");
           }}
         />
       )}

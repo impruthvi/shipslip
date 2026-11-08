@@ -51,6 +51,7 @@ const reviewUp = vi.fn<(generation: number, row: number, env: string) => Promise
 const reviewAttach = vi.fn<(generation: number, row: number, env: string) => Promise<RecoveryReview>>();
 const liveRuns = vi.fn<() => Promise<LiveRuns>>();
 let send: (batch: RunBatch) => void = () => {};
+let followError: CommandError | null = null;
 const unfollow = vi.fn();
 vi.mock("./deployApi", () => ({
   deploy: {
@@ -59,6 +60,7 @@ vi.mock("./deployApi", () => ({
     confirm: (...args: [string, string | null]) => confirm(...args),
     cancel: (handle: string) => cancel(handle),
     follow: async (_handle: string, onBatch: (batch: RunBatch) => void) => {
+      if (followError) throw followError;
       send = onBatch;
       return unfollow;
     },
@@ -105,6 +107,7 @@ beforeEach(() => {
   cancel.mockReset().mockResolvedValue(undefined);
   stop.mockReset().mockResolvedValue(undefined);
   unfollow.mockReset();
+  followError = null;
   reviewTrust.mockReset();
   approveTrust.mockReset();
   openConfig.mockReset();
@@ -546,12 +549,23 @@ test("a failed stop says why and can be tried again", async () => {
   expect(screen.getByRole("button", { name: "Stop after this step" })).toBeEnabled();
 });
 
-test("when the run ends the workspace closes, the map re-reads and the end is announced", async () => {
+test("a failed run with no log watch stays on its outcome until the developer opens the receipt", async () => {
   await startRun();
   await act(async () => send(fixtures.runBatches.running));
   const reads = loadMap.mock.calls.length;
   expect(screen.getByText(/^Step 1 of 3 · app in maintenance mode · \d/)).toBeInTheDocument();
+  expect(fixtures.runBatches.failed.state.watchWindowMs).toBeNull();
   await act(async () => send(fixtures.runBatches.failed));
+  await settle();
+  expect(screen.queryByRole("grid", { name: "Release map" })).not.toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Failed at step 1 · exit 1 · composer install --no-dev" }))
+    .toHaveClass("tone-bad");
+  expect(screen.getByRole("region", { name: "Output of step 1" })).toBeInTheDocument();
+  expect(screen.getByTestId("announce-assertive")).toHaveTextContent("Deploy failed at step 1.");
+  expect(screen.queryByRole("button", { name: "Leave running" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Stop after this step" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Open receipt" }));
   expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
   expect(loadMap.mock.calls.length).toBe(reads + 1);
   await settle();
@@ -560,8 +574,62 @@ test("when the run ends the workspace closes, the map re-reads and the end is an
   fireEvent.click(screen.getAllByRole("gridcell").find((c) => c.getAttribute("aria-selected") === "false")!);
   await settle();
   expect(document.querySelector(".pane-slip-print")).toBeNull();
-  expect(screen.getByTestId("announce-assertive")).toHaveTextContent("Deploy failed at step 1.");
   expect(unfollow).toHaveBeenCalled();
+});
+
+test("a stop that took effect stays on its amber outcome; Escape opens the receipt", async () => {
+  await startRun();
+  const batch = fixtures.runBatches.stoppedHeadline;
+  await act(async () => send({
+    ...batch,
+    state: {
+      ...batch.state,
+      terminal: { kind: "finished", label: "Stopped", summary: "Deploy stopped after step 1.", succeeded: false, unknown: false, lockTaken: false },
+    },
+  }));
+  await settle();
+  expect(screen.getByRole("heading", { name: "Stopped after step 1 · Steps 2, 3 did not run" }))
+    .toHaveClass("tone-attention");
+  expect(screen.getByTestId("announce-assertive")).toHaveTextContent("Deploy stopped after step 1.");
+  fireEvent.keyDown(window, { key: "Escape" });
+  await settle();
+  expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
+  expect(document.querySelector(".pane-slip-print")).not.toBeNull();
+});
+
+test("a succeeded run closes the workspace at its end and the map re-reads", async () => {
+  await startRun();
+  await act(async () => send(fixtures.runBatches.running));
+  const reads = loadMap.mock.calls.length;
+  await act(async () => send(fixtures.runBatches.succeeded));
+  expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
+  expect(loadMap.mock.calls.length).toBe(reads + 1);
+  expect(screen.getByTestId("announce-assertive")).toHaveTextContent("Deploy run succeeded.");
+});
+
+test("a run with an outcome leaves the running list at once, before the next poll", async () => {
+  liveRuns.mockResolvedValue({ runs: [fixtures.runInfo], closedPreviews: [] });
+  await startRun();
+  const runs = () => within(screen.getByRole("region", { name: "Deploys running" }));
+  expect(runs().queryByText("None started here")).not.toBeInTheDocument();
+  await act(async () => send(fixtures.runBatches.failed));
+  expect(runs().getByText("None started here")).toBeInTheDocument();
+  // Rust may still list the run until its feed closes; the outcome wins.
+  fireEvent.click(screen.getByRole("button", { name: "Open receipt" }));
+  await settle();
+  const grid = within(screen.getByRole("grid", { name: "Release map" }));
+  expect(grid.queryByText("Running")).not.toBeInTheDocument();
+  expect(runs().getByText("None started here")).toBeInTheDocument();
+});
+
+test("a run that cannot be followed stays in the running list", async () => {
+  liveRuns.mockResolvedValue({ runs: [fixtures.runInfo], closedPreviews: [] });
+  followError = { code: "notFound", message: "This run can no longer be followed here." };
+  await startRun();
+  expect(screen.getByTestId("announce-assertive")).toHaveTextContent("This run can no longer be followed here.");
+  expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
+  const runs = within(screen.getByRole("region", { name: "Deploys running" }));
+  expect(runs.queryByText("None started here")).not.toBeInTheDocument();
 });
 
 test("a run that can no longer be followed closes with its reason", async () => {

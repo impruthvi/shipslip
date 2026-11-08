@@ -6,7 +6,7 @@ import { ConnectionGap, ReattachedNote } from "./ConnectionGap";
 import { StepTime } from "./StepTime";
 import { applyBatch, headlineLine, progressLine, runRows, watching, type RunLog } from "./run";
 import { countdown, elapsed, spoken } from "./time";
-import type { CommandError, OutputLine, ProgressStatus, RunInfo, Terminal } from "./types";
+import type { CommandError, OutputLine, ProgressStatus, RunHeadline, RunInfo, Terminal } from "./types";
 
 const TICK_MS = 1000;
 
@@ -59,18 +59,33 @@ function Output({ label, lines }: { label: string; lines: OutputLine[] }) {
   );
 }
 
+/** `held`: a failed or stopped run keeps its outcome on screen until the developer
+ * leaves. `lost`: the run could not be followed; it may still be running. */
+export type Ending = "held" | "closes" | "lost";
+
+function holds(terminal: Terminal, headline: RunHeadline | null): boolean {
+  return (
+    terminal.kind === "finished" &&
+    !terminal.lockTaken &&
+    (headline?.kind === "failed" || headline?.kind === "stopped")
+  );
+}
+
 /** A run in progress: its steps as they go, then the log watch. */
 export function Running({
   info,
   announce,
   onEnd,
   onLeave,
+  onDone,
 }: {
   info: RunInfo;
   announce: Announce;
-  onEnd: (terminal: Terminal) => void;
+  onEnd: (terminal: Terminal, ending: Ending) => void;
   /** Back to the map; the run keeps going on the server and here. */
   onLeave: () => void;
+  /** Back to the map with the ended run's receipt. */
+  onDone: () => void;
 }) {
   const [log, setLog] = useState<RunLog | null>(null);
   const [lost, setLost] = useState<CommandError | null>(null);
@@ -168,16 +183,17 @@ export function Running({
     }
   }, [state, rows, info.steps.length]);
 
+  const held = terminal !== null && holds(terminal, headline);
   useEffect(() => {
     if (ended.current) return;
     if (terminal) {
       ended.current = true;
-      props.current.onEnd(terminal);
+      props.current.onEnd(terminal, held ? "held" : "closes");
     } else if (lost) {
       ended.current = true;
-      props.current.onEnd({ kind: "error", reason: lost.message });
+      props.current.onEnd({ kind: "error", reason: lost.message }, "lost");
     }
-  }, [terminal, lost]);
+  }, [terminal, held, lost]);
 
   useEffect(() => {
     if (terminal) return;
@@ -203,7 +219,7 @@ export function Running({
   return (
     <>
       <div className="workspace-body">
-        {state && !terminal && (
+        {state && (!terminal || held) && (
           headline ? (
             <div className="run-outcome">
               <h2 className={`run-progress${headline.kind === "failed" ? " tone-bad" : headline.kind === "stopped" ? " tone-attention" : ""}`}>
@@ -328,9 +344,15 @@ export function Running({
         {stopping === "watch" && watchingNow && <span className="muted">Stopping the log watch…</span>}
         {stopError && <span className="tone-bad">{stopError}</span>}
         <div className="footer-end">
-          <button type="button" className="button" onClick={onLeave}>
-            Leave running
-          </button>
+          {held ? (
+            <button type="button" className="button" onClick={onDone}>
+              Open receipt
+            </button>
+          ) : (
+            <button type="button" className="button" onClick={onLeave}>
+              Leave running
+            </button>
+          )}
         </div>
       </footer>
     </>
