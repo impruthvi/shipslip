@@ -397,7 +397,7 @@ fn render_show(receipt: &ReceiptRecord) -> String {
         }
     }
 
-    if let Some(watch) = &receipt.watch {
+    if let Some(watch) = receipt.watch.as_ref().filter(|_| !badge.outcome.unfinished) {
         let _ = writeln!(
             out,
             "\nLog watch: {}, {}, {} lines read from {}",
@@ -447,7 +447,7 @@ fn render_show(receipt: &ReceiptRecord) -> String {
         }
     }
 
-    if let Some(smoke) = &receipt.smoke {
+    if let Some(smoke) = receipt.smoke.as_ref().filter(|_| !badge.outcome.unfinished) {
         let text = smoke_text(smoke);
         let _ = writeln!(out, "\nSmoke check: {text}");
     }

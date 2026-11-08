@@ -230,10 +230,18 @@ fn receipt_view(receipt: &ReceiptRecord) -> ReceiptView {
         }),
         commits: receipt.commits.iter().map(|c| c.field()).collect(),
         steps,
-        watch: receipt.watch.as_ref().map(|watch| {
-            record_watch_view(watch, target.log_path.raw(), receipt.checks_skip_reason)
-        }),
-        smoke: receipt.smoke.as_ref().map(smoke_text),
+        watch: receipt
+            .watch
+            .as_ref()
+            .filter(|_| !badge.outcome.unfinished)
+            .map(|watch| {
+                record_watch_view(watch, target.log_path.raw(), receipt.checks_skip_reason)
+            }),
+        smoke: receipt
+            .smoke
+            .as_ref()
+            .filter(|_| !badge.outcome.unfinished)
+            .map(smoke_text),
         notes: receipt.notes.iter().map(|note| note.field()).collect(),
         next_steps: guidance(&receipt.next_steps, receipt.repo_root.raw()),
     }
@@ -402,6 +410,27 @@ mod tests {
         );
         assert_eq!(view.steps[0].label, "✓ ok");
         assert!(view.next_steps.lines.is_empty());
+    }
+
+    #[test]
+    fn unfinished_run_shows_no_log_watch_or_smoke_result() {
+        let fx = Fixture::new();
+        let mut receipt = run(1, "staging");
+        receipt["status"] = json!("InProgress");
+        receipt["outcome"] = Value::Null;
+        receipt["app_left_down"] = json!(true);
+        receipt["watch"] = json!({
+            "status": "NotRun", "log_path": null, "duration_ms": 0,
+            "baseline_signatures": 0, "history_signatures": 0, "observed_lines": 0,
+            "parsed_lines": 0, "dropped_view_lines": 0, "truncated_entries": 0,
+            "new_errors": [], "overflow_groups": 0, "overflow_signatures": 0, "warnings": []
+        });
+        receipt["checks_skip_reason"] = json!("AppLeftInMaintenance");
+        receipt["smoke"] = json!("Skipped");
+        let view = open(&fx, &receipt);
+        assert!(view.watch.is_none() && view.smoke.is_none());
+        let flags: Vec<_> = view.flags.iter().map(|flag| flag.text.as_str()).collect();
+        assert_eq!(flags, ["app may be in maintenance mode"]);
     }
 
     #[test]

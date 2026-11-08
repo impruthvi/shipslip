@@ -575,6 +575,31 @@ fn next_steps_for_each_outcome_that_has_them() {
 }
 
 #[test]
+fn unfinished_runs_carry_no_log_watch_or_smoke_result() {
+    let mut skipped = deploy();
+    skipped["status"] = json!("InProgress");
+    skipped["app_left_down"] = json!(true);
+    skipped["watch"]["status"] = json!("NotRun");
+    skipped["checks_skip_reason"] = json!("AppLeftInMaintenance");
+    skipped["smoke"] = json!("Skipped");
+    let mut missing = deploy();
+    missing["status"] = json!("InProgress");
+    missing["watch"] = Value::Null;
+    missing["smoke"] = Value::Null;
+    let mut interrupted = deploy();
+    interrupted["status"] = json!("InProgress");
+    interrupted["watch"]["status"] = json!("Partial");
+    interrupted["smoke"] = json!({"Failed": {"status": 503, "reason": "HTTP 503"}});
+    for (value, flags) in [
+        (skipped, json!([{"kind": "app_left_down"}])),
+        (missing, json!([])),
+        (interrupted, json!([])),
+    ] {
+        assert_eq!(to_json(query(value))["flags"], flags);
+    }
+}
+
+#[test]
 fn unfinished_runs_new_errors_and_maintenance_have_next_steps() {
     let mut value = deploy();
     value["status"] = json!("InProgress");

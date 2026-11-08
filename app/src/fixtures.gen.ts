@@ -2206,7 +2206,7 @@ export const slips: Record<string, SlipView> = {
     "repoRoot": "/Users/you/code/shop",
     "runId": "00000066-0",
     "serverHead": null,
-    "smoke": "passed, HTTP 200 in 380 ms",
+    "smoke": null,
     "startedAtMs": 1791794880000,
     "startedBy": null,
     "steps": [
@@ -2275,20 +2275,7 @@ export const slips: Record<string, SlipView> = {
     "summary": null,
     "target": "staging1:/var/www/shop",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "watch": {
-      "baseline": [
-        14,
-        37
-      ],
-      "duration": "2m 0s",
-      "groups": [],
-      "kind": null,
-      "linesRead": 412,
-      "logPath": "storage/logs/laravel.log",
-      "moreGroups": 0,
-      "status": "complete",
-      "warnings": []
-    }
+    "watch": null
   },
   "copyWithheld": {
     "branch": "main",
@@ -2537,7 +2524,7 @@ export const slips: Record<string, SlipView> = {
     "repoRoot": "/Users/you/code/shop",
     "runId": "00000065-0",
     "serverHead": null,
-    "smoke": "passed, HTTP 200 in 380 ms",
+    "smoke": null,
     "startedAtMs": 1791794820000,
     "startedBy": null,
     "steps": [
@@ -2577,20 +2564,7 @@ export const slips: Record<string, SlipView> = {
     "summary": null,
     "target": "staging1:/var/www/shop",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "watch": {
-      "baseline": [
-        14,
-        37
-      ],
-      "duration": "2m 0s",
-      "groups": [],
-      "kind": null,
-      "linesRead": 412,
-      "logPath": "storage/logs/laravel.log",
-      "moreGroups": 0,
-      "status": "complete",
-      "warnings": []
-    }
+    "watch": null
   },
   "watchInterrupted": {
     "branch": "main",

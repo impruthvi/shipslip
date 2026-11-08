@@ -178,6 +178,24 @@ fn receipt_log_watch_results_match_markdown_wording() {
 }
 
 #[test]
+fn unfinished_receipt_shows_no_log_watch_or_smoke_check() {
+    let record = receipt(|value| {
+        value["status"] = json!("InProgress");
+        value["outcome"] = serde_json::Value::Null;
+        value["watch"] = serde_json::to_value(shipslip::WatchResult::not_run()).unwrap();
+        value["checks_skip_reason"] = json!("AppLeftInMaintenance");
+        value["smoke"] = json!("Skipped");
+    });
+    for text in [
+        render_show(&record),
+        shipslip::receipt::markdown(&record, false),
+    ] {
+        assert!(!text.contains("Log watch"), "{text}");
+        assert!(!text.contains("Smoke check"), "{text}");
+    }
+}
+
+#[test]
 fn show_escapes_server_text_and_cannot_forge_fields() {
     let text = render_show(&receipt(|value| {
         value["steps"][0]["output"] = json!(["\u{1b}[32mok\u{1b}[0m \u{1b}]0;pwned\u{7}"]);

@@ -142,7 +142,7 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
     }
 
     render_connection_gaps(&mut out, receipt, details);
-    if let Some(watch) = &receipt.watch {
+    if let Some(watch) = receipt.watch.as_ref().filter(|_| !badge.outcome.unfinished) {
         out.push_str("\n## Log watch\n\n");
         if watch.status == crate::WatchStatus::NotRun {
             let _ = writeln!(
@@ -205,7 +205,7 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
         }
     }
 
-    if let Some(smoke) = &receipt.smoke {
+    if let Some(smoke) = receipt.smoke.as_ref().filter(|_| !badge.outcome.unfinished) {
         out.push_str("\n## Smoke check\n\n");
         let text = match smoke {
             Smoke::NotConfigured => "Not configured.".into(),
