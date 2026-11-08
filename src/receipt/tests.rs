@@ -705,6 +705,72 @@ fn markdown_keeps_server_text_out_unless_details_are_requested() {
 }
 
 #[test]
+fn markdown_names_each_new_errors_message_with_details() {
+    let mut value = receipt_json("aaaa0001-0", 1000, "staging");
+    let group = |normalized: &str, message: &str, count| {
+        json!({
+            "exception": "Error", "file": null, "normalized_message": normalized,
+            "count": count, "overflow_variants": 0,
+            "variants": [{
+                "signature": normalized, "level": "ERROR", "message": message,
+                "display_file_line": null, "count": count, "phase": "After"
+            }]
+        })
+    };
+    value["watch"]["new_errors"] = json!([
+        group(
+            "checkout total mismatch",
+            "checkout total mismatch {\"order\":1}",
+            2
+        ),
+        group(
+            "webhook signature rejected",
+            "webhook signature rejected",
+            1
+        ),
+    ]);
+    let receipt = parse(value);
+
+    let detailed = markdown(&receipt, true);
+    assert!(
+        detailed.contains(
+            "| New error | Message | File | Count |\n|---|---|---|---|\n\
+             | `Error` | `checkout total mismatch {\"order\":1}` |  | 2 |\n\
+             | `Error` | `webhook signature rejected` |  | 1 |\n"
+        ),
+        "{detailed}"
+    );
+
+    let shared = markdown(&receipt, false);
+    assert!(!shared.contains("mismatch"), "{shared}");
+    assert!(!shared.contains("webhook"), "{shared}");
+    assert!(
+        shared.contains(
+            "| New error | File | Count |\n|---|---|---|\n| `Error` |  | 2 |\n| `Error` |  | 1 |\n"
+        ),
+        "{shared}"
+    );
+}
+
+#[test]
+fn markdown_message_falls_back_when_a_group_kept_no_variants() {
+    let mut value = receipt_json("aaaa0001-0", 1000, "staging");
+    value["watch"]["new_errors"] = json!([
+        {"exception": "Error", "file": null, "normalized_message": "queue stalled <num>",
+         "count": 4, "variants": [], "overflow_variants": 4},
+        {"exception": "RuntimeException", "file": null,
+         "count": 1, "variants": [], "overflow_variants": 1},
+    ]);
+    let detailed = markdown(&parse(value), true);
+    assert!(
+        detailed.contains(
+            "| `Error` | `queue stalled <num>` |  | 4 |\n| `RuntimeException` |  |  | 1 |\n"
+        ),
+        "{detailed}"
+    );
+}
+
+#[test]
 fn commits_past_the_preview_list_are_counted_and_old_receipts_have_none() {
     let mut value = receipt_json("aaaa0001-0", 1000, "staging");
     assert_eq!(parse(value.clone()).more_commits, 0);

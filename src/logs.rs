@@ -21,7 +21,8 @@ use base64::Engine as _;
 use sha2::{Digest, Sha256};
 
 use crate::observation::{
-    clip_utf8, parse_header, signature, ENTRY_BYTES, MAX_GROUPS, MAX_VARIANTS,
+    clip_utf8, parse_header, signature, EntrySignature, GroupKey, ENTRY_BYTES, MAX_GROUPS,
+    MAX_VARIANTS,
 };
 use crate::runner::run_collect;
 use crate::script::shell_quote;
@@ -1462,7 +1463,8 @@ pub struct Variant {
     pub count: u64,
 }
 
-/// Entries that share an exception class and app file.
+/// Entries that share an exception class and app file, or, when they name
+/// neither, a normalized message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Group {
     pub badge: Badge,
@@ -1470,6 +1472,7 @@ pub struct Group {
     pub(crate) full_id: String,
     pub class: String,
     pub file: Option<String>,
+    pub(crate) normalized_message: Option<String>,
     pub count: u64,
     pub first_seen: Option<String>,
     pub last_seen: Option<String>,
@@ -1497,7 +1500,7 @@ pub struct Groups {
 /// Groups entries at `min_level` or above whose text contains `grep`.
 pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Groups {
     let grep = grep.map(str::to_lowercase);
-    let mut index: HashMap<(String, Option<String>), usize> = HashMap::new();
+    let mut index: HashMap<GroupKey, usize> = HashMap::new();
     let mut overflow = HashMap::new();
     let mut groups: Vec<Group> = Vec::new();
     let mut variant_index: Vec<HashMap<String, usize>> = Vec::new();
@@ -1505,9 +1508,15 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
         if entry.level < min_level || !matches_grep(entry, grep.as_deref()) {
             continue;
         }
-        let (signature, class, file, display) =
-            signature(&entry.level.name().to_ascii_uppercase(), entry.message());
-        let key = (class.clone(), file.clone());
+        let entry_signature = signature(&entry.level.name().to_ascii_uppercase(), entry.message());
+        let key = entry_signature.group_key();
+        let EntrySignature {
+            signature,
+            class,
+            file,
+            display,
+            normalized_message,
+        } = entry_signature;
         let slot = match index.get(&key) {
             Some(slot) => *slot,
             None if groups.len() < MAX_GROUPS => {
@@ -1516,9 +1525,10 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
                 groups.push(Group {
                     badge: Badge::Seen,
                     id: String::new(),
-                    full_id: group_id(&class, file.as_deref()),
+                    full_id: group_id(&class, file.as_deref(), normalized_message.as_deref()),
                     class,
                     file,
+                    normalized_message,
                     count: 0,
                     first_seen: None,
                     last_seen: None,
@@ -1592,10 +1602,9 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
     let mut baseline_keys = HashSet::new();
     let mut baseline_signatures = HashSet::new();
     for entry in &snapshot.baseline_entries {
-        let (signature, class, file, _) =
-            signature(&entry.level.name().to_ascii_uppercase(), entry.message());
-        baseline_keys.insert((class, file));
-        baseline_signatures.insert(signature);
+        let entry_signature = signature(&entry.level.name().to_ascii_uppercase(), entry.message());
+        baseline_keys.insert(entry_signature.group_key());
+        baseline_signatures.insert(entry_signature.signature);
     }
     let badge = |seen: bool, channels: &[usize]| {
         if !snapshot.baseline_enabled || seen {
@@ -1611,7 +1620,11 @@ pub fn group(snapshot: &Snapshot, min_level: Level, grep: Option<&str>) -> Group
     };
     for group in &mut groups {
         group.badge = badge(
-            baseline_keys.contains(&(group.class.clone(), group.file.clone())),
+            baseline_keys.contains(&(
+                group.class.clone(),
+                group.file.clone(),
+                group.normalized_message.clone(),
+            )),
             &group.channels,
         );
         for variant in &mut group.variants {
@@ -1651,7 +1664,7 @@ const CONTEXT_TRIES: usize = 8;
 /// Laravel's formatter appends, for a short label. A Laravel exception's
 /// context starts on this line and closes lines later; any other context
 /// must be one or two complete JSON objects or arrays at the end.
-fn without_context(line: &str) -> &str {
+pub(crate) fn without_context(line: &str) -> &str {
     if let Some(key) = line.find("\"exception\":\"[object] (") {
         if let Some(start) = line[..key].rfind(" {") {
             return line[..start].trim_end();
@@ -1864,10 +1877,15 @@ fn matches_grep(entry: &Entry, grep: Option<&str>) -> bool {
     grep.is_none_or(|grep| entry.text.to_lowercase().contains(grep))
 }
 
-/// A stable ID for a class and file: the same group gets the same ID on
+/// A stable ID for a group's key: the same group gets the same ID on
 /// every run, so an ID printed earlier can be looked up again.
-fn group_id(class: &str, file: Option<&str>) -> String {
-    let digest = Sha256::digest(format!("{class}\0{}", file.unwrap_or("")));
+fn group_id(class: &str, file: Option<&str>, normalized_message: Option<&str>) -> String {
+    let mut key = format!("{class}\0{}", file.unwrap_or(""));
+    if let Some(message) = normalized_message {
+        key.push('\0');
+        key.push_str(message);
+    }
+    let digest = Sha256::digest(key);
     digest
         .iter()
         .take(16)
@@ -2192,7 +2210,7 @@ mod tests {
         assert_eq!(g.class, class);
         assert_eq!(g.count, 2);
         assert_eq!(g.badge, Badge::Seen);
-        assert_eq!(g.id, &group_id(class, Some(file))[..ID_LEN]);
+        assert_eq!(g.id, &group_id(class, Some(file), None)[..ID_LEN]);
     }
 
     #[test]
@@ -2218,6 +2236,51 @@ mod tests {
         assert_eq!(g.badge, Badge::Seen);
         assert!(g.variants.iter().all(|v| v.badge == Badge::Seen));
         assert_eq!(g.id, "gqmkp");
+    }
+
+    #[test]
+    fn errors_without_exception_or_file_group_by_message() {
+        let text = [
+            entry_line(
+                "2026-11-08 12:00:00",
+                "ERROR",
+                "checkout total mismatch {\"order\":1}",
+            ),
+            entry_line(
+                "2026-11-08 12:00:01",
+                "ERROR",
+                "webhook signature rejected {\"source\":\"x\"}",
+            ),
+            entry_line(
+                "2026-11-08 12:00:02",
+                "ERROR",
+                "checkout total mismatch {\"order\":2}",
+            ),
+        ]
+        .concat();
+        let baseline = entry_line(
+            "2026-11-08 11:00:00",
+            "ERROR",
+            "webhook signature rejected {\"source\":\"y\"}",
+        );
+        let mut snapshot = snapshot_of(&text, true);
+        snapshot.baseline_enabled = true;
+        snapshot.channels[0].baseline.available = true;
+        snapshot.baseline_entries = parse_entries(baseline.as_bytes(), 0, 0, "laravel.log");
+        let groups = group(&snapshot, Level::Error, None);
+        let summary: Vec<_> = groups
+            .groups
+            .iter()
+            .map(|g| (g.class.as_str(), g.message.as_str(), g.count, g.badge))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("Error", "checkout total mismatch", 2, Badge::New),
+                ("Error", "webhook signature rejected", 1, Badge::Seen),
+            ]
+        );
+        assert_ne!(groups.groups[0].id, groups.groups[1].id);
     }
 
     #[test]
@@ -2439,7 +2502,8 @@ mod tests {
             query.id,
             group_id(
                 "QueryException",
-                Some("/srv/app/app/Http/Controllers/OrderController.php")
+                Some("/srv/app/app/Http/Controllers/OrderController.php"),
+                None
             )[..ID_LEN]
         );
 
@@ -2463,6 +2527,7 @@ mod tests {
                 full_id: full.into(),
                 class: class.into(),
                 file: None,
+                normalized_message: None,
                 count: 1,
                 first_seen: None,
                 last_seen: None,

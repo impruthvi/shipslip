@@ -75,6 +75,8 @@ pub struct ErrorVariant {
 pub struct ErrorGroup {
     pub exception: String,
     pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normalized_message: Option<String>,
     pub count: u64,
     pub variants: Vec<ErrorVariant>,
     pub overflow_variants: u64,
@@ -393,8 +395,8 @@ struct LogState {
     history: Vec<String>,
     baseline: HashSet<String>,
     seen: HashSet<String>,
-    group_index: HashMap<(String, Option<String>), usize>,
-    overflow_group_keys: HashSet<(String, Option<String>)>,
+    group_index: HashMap<GroupKey, usize>,
+    overflow_group_keys: HashSet<GroupKey>,
     partial_line: Vec<u8>,
     dropping_line: bool,
     current_entry: Option<String>,
@@ -518,7 +520,15 @@ impl LogState {
         ) {
             return;
         }
-        let (signature, class, file, display) = signature(&header.level, &entry);
+        let entry_signature = signature(&header.level, &entry);
+        let key = entry_signature.group_key();
+        let EntrySignature {
+            signature,
+            class,
+            file,
+            display,
+            normalized_message,
+        } = entry_signature;
         if baseline {
             self.baseline.insert(signature.clone());
             self.known.insert(signature);
@@ -532,7 +542,6 @@ impl LogState {
         if self.known.contains(&signature) {
             return;
         }
-        let key = (class.clone(), file.clone());
         let group = if let Some(&index) = self.group_index.get(&key) {
             &mut self.result.new_errors[index]
         } else if self.result.new_errors.len() < MAX_GROUPS {
@@ -541,6 +550,7 @@ impl LogState {
             self.result.new_errors.push(ErrorGroup {
                 exception: class,
                 file,
+                normalized_message,
                 count: 0,
                 variants: Vec::new(),
                 overflow_variants: 0,
@@ -680,7 +690,7 @@ pub(crate) fn parse_header(line: &str) -> Option<Header> {
 /// Prefer Laravel's root exception object over mentions in the message or trace.
 /// Monolog may turn escaped newlines into literal line breaks, so the context
 /// string is not always valid JSON. In that case, read only its object prefix.
-fn exception_class(entry: &str) -> String {
+fn exception_class(entry: &str) -> Option<String> {
     static RE: OnceLock<(Regex, Regex, Regex)> = OnceLock::new();
     let (field_re, object_re, plain_re) = RE.get_or_init(|| {
         let class = r"(\\?[A-Za-z_][A-Za-z0-9_]*(?:\\+[A-Za-z_][A-Za-z0-9_]*)*)";
@@ -709,7 +719,7 @@ fn exception_class(entry: &str) -> String {
             .as_deref()
             .unwrap_or_else(|| value.strip_prefix('"').unwrap_or(value));
         if let Some(class) = object_re.captures(object) {
-            return canonical(&class[1]);
+            return Some(canonical(&class[1]));
         }
     }
     if let Some(class) = plain_re.captures(first_line) {
@@ -719,10 +729,10 @@ fn exception_class(entry: &str) -> String {
             .unwrap_or("")
             .to_ascii_lowercase();
         if name.ends_with("exception") || name.ends_with("error") {
-            return canonical(&class[1]);
+            return Some(canonical(&class[1]));
         }
     }
-    "Error".into()
+    None
 }
 
 fn patterns() -> &'static (Regex, Regex, Regex, Regex, Regex) {
@@ -743,11 +753,38 @@ fn patterns() -> &'static (Regex, Regex, Regex, Regex, Regex) {
     })
 }
 
-pub(crate) fn signature(
-    level: &str,
-    entry: &str,
-) -> (String, String, Option<String>, Option<String>) {
-    let (frame_re, uuid_re, number_re, single_quote_re, double_quote_re) = patterns();
+/// What makes entries one error group: exception, app file and, when both
+/// are missing, the normalized message.
+pub(crate) type GroupKey = (String, Option<String>, Option<String>);
+
+pub(crate) struct EntrySignature {
+    pub(crate) signature: String,
+    pub(crate) class: String,
+    pub(crate) file: Option<String>,
+    pub(crate) display: Option<String>,
+    pub(crate) normalized_message: Option<String>,
+}
+
+impl EntrySignature {
+    pub(crate) fn group_key(&self) -> GroupKey {
+        (
+            self.class.clone(),
+            self.file.clone(),
+            self.normalized_message.clone(),
+        )
+    }
+}
+
+fn normalize(text: &str) -> String {
+    let (_, uuid_re, number_re, single_quote_re, double_quote_re) = patterns();
+    let normalized = single_quote_re.replace_all(text, "<quoted>");
+    let normalized = double_quote_re.replace_all(&normalized, "<quoted>");
+    let normalized = uuid_re.replace_all(&normalized, "<uuid>");
+    number_re.replace_all(&normalized, "<num>").into_owned()
+}
+
+pub(crate) fn signature(level: &str, entry: &str) -> EntrySignature {
+    let frame_re = &patterns().0;
     let class = exception_class(entry);
     let frame = frame_re
         .captures_iter(entry)
@@ -761,19 +798,25 @@ pub(crate) fn signature(
         format!("{}:{line}", clip_utf8(&m[1], 512))
     });
     let first_line = clip_utf8(entry.lines().next().unwrap_or(entry), 2048);
-    let normalized = single_quote_re.replace_all(&first_line, "<quoted>");
-    let normalized = double_quote_re.replace_all(&normalized, "<quoted>");
-    let normalized = uuid_re.replace_all(&normalized, "<uuid>");
-    let normalized = number_re.replace_all(&normalized, "<num>");
-    (
-        format!(
-            "{level}|{class}|{}|{normalized}",
-            file.as_deref().unwrap_or("")
+    let normalized_message = match (&class, &file) {
+        (None, None) => Some(clip_utf8(
+            &normalize(crate::logs::without_context(&first_line)),
+            1024,
+        )),
+        _ => None,
+    };
+    let class = class.unwrap_or_else(|| "Error".into());
+    EntrySignature {
+        signature: format!(
+            "{level}|{class}|{}|{}",
+            file.as_deref().unwrap_or(""),
+            normalize(&first_line)
         ),
         class,
         file,
         display,
-    )
+        normalized_message,
+    }
 }
 
 pub(crate) fn clip_utf8(value: &str, limit: usize) -> String {
@@ -1416,7 +1459,7 @@ mod tests {
 
     #[test]
     fn app_file_is_a_whole_path_segment_outside_vendor() {
-        let file = |entry: &str| signature("ERROR", entry).2;
+        let file = |entry: &str| signature("ERROR", entry).file;
         assert_eq!(
             file("RuntimeException at /var/www/html/app/Http/Kernel.php:10"),
             Some("/var/www/html/app/Http/Kernel.php".into())
@@ -1463,7 +1506,7 @@ mod tests {
                 "ERROR",
                 "RuntimeException at /srv/app/app/Models/User.php(7): x"
             )
-            .3,
+            .display,
             Some("/srv/app/app/Models/User.php:7".into())
         );
     }
@@ -1556,6 +1599,7 @@ mod tests {
             [ErrorGroup {
                 exception: "Illuminate\\Database\\QueryException".into(),
                 file: Some(file.into()),
+                normalized_message: None,
                 count: 3,
                 variants: vec![
                     variant(
@@ -1623,7 +1667,11 @@ mod tests {
             ),
         ];
         for (level, entry, expected) in cases {
-            assert_eq!(signature(level, entry).0, *expected, "entry: {entry}");
+            assert_eq!(
+                signature(level, entry).signature,
+                *expected,
+                "entry: {entry}"
+            );
         }
     }
 
@@ -1646,14 +1694,14 @@ mod tests {
             let exception = format!("[object] ({class}(code: 0): {message} at /srv/app/app/Jobs/Export.php:16)\n[stacktrace]\n#0 /srv/app/vendor/ShareErrorsFromSession.php(48): handle()\n[previous exception] [object] (LogicException(code: 0): previous)");
             let context = serde_json::json!({"exception": exception});
             let entry = format!("RuntimeException mentioned by user {context}");
-            assert_eq!(signature("ERROR", &entry).1, class, "{entry}");
+            assert_eq!(signature("ERROR", &entry).class, class, "{entry}");
             // Monolog can render JSON's escaped newlines as actual line breaks.
             let inline = entry.replace("\\n", "\n");
-            assert_eq!(signature("ERROR", &inline).1, class, "{inline}");
+            assert_eq!(signature("ERROR", &inline).class, class, "{inline}");
         }
         let unicode_escape = r#"Failed {"exception":"[object] (Illuminate\u005cDatabase\u005cQueryException(code: 0): x)"}"#;
         assert_eq!(
-            signature("ERROR", unicode_escape).1,
+            signature("ERROR", unicode_escape).class,
             "Illuminate\\Database\\QueryException"
         );
     }
@@ -1669,7 +1717,7 @@ mod tests {
             ("QueryExceptionFactory: failed", "Error"),
             ("User mentioned QueryException in a message\n#0 /srv/app/vendor/RuntimeException.php:12", "Error"),
         ] {
-            assert_eq!(signature("ERROR", entry).1, expected, "{entry}");
+            assert_eq!(signature("ERROR", entry).class, expected, "{entry}");
         }
     }
 
@@ -1703,6 +1751,51 @@ mod tests {
             state.result.new_errors[0].exception,
             "Illuminate\\Database\\QueryException"
         );
+        assert_eq!(state.result.new_errors[0].count, 2);
+    }
+
+    #[test]
+    fn watch_groups_errors_without_exception_or_file_by_message() {
+        let entries =
+            "[2026-11-08 12:00:00] staging.ERROR: checkout total mismatch {\"order\":1}\n\
+[2026-11-08 12:00:01] staging.ERROR: webhook signature rejected {\"source\":\"x\"}\n\
+[2026-11-08 12:00:02] staging.ERROR: checkout total mismatch {\"order\":2}\n";
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let mut state = LogState::new(Vec::new());
+        state.bytes(entries.as_bytes(), LogPhase::After, false, &events);
+        state.flush(false, &events);
+        let groups: Vec<_> = state
+            .result
+            .new_errors
+            .iter()
+            .map(|group| {
+                (
+                    group.exception.as_str(),
+                    group.file.as_deref(),
+                    group.normalized_message.as_deref(),
+                    group.count,
+                )
+            })
+            .collect();
+        assert_eq!(
+            groups,
+            [
+                ("Error", None, Some("checkout total mismatch"), 2),
+                ("Error", None, Some("webhook signature rejected"), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn watch_keeps_grouping_by_class_when_an_exception_is_named() {
+        let entries = "[2026-11-08 12:00:00] staging.ERROR: RuntimeException: first failure\n\
+[2026-11-08 12:00:01] staging.ERROR: RuntimeException: second failure\n";
+        let (events, _receiver) = mpsc::unbounded_channel();
+        let mut state = LogState::new(Vec::new());
+        state.bytes(entries.as_bytes(), LogPhase::After, false, &events);
+        state.flush(false, &events);
+        assert_eq!(state.result.new_errors.len(), 1);
+        assert_eq!(state.result.new_errors[0].normalized_message, None);
         assert_eq!(state.result.new_errors[0].count, 2);
     }
 }
