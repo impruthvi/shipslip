@@ -1491,11 +1491,11 @@ fn merge_previous_watch(current: &mut WatchResult, previous: &WatchResult) {
         .overflow_signatures
         .saturating_add(previous.overflow_signatures);
     for group in &previous.new_errors {
-        if let Some(existing) = current
-            .new_errors
-            .iter_mut()
-            .find(|item| item.exception == group.exception && item.file == group.file)
-        {
+        if let Some(existing) = current.new_errors.iter_mut().find(|item| {
+            item.exception == group.exception
+                && item.file == group.file
+                && item.normalized_message == group.normalized_message
+        }) {
             existing.count = existing.count.saturating_add(group.count);
             existing.overflow_variants = existing
                 .overflow_variants
@@ -7110,5 +7110,37 @@ mod tests {
         ));
         drop(owner);
         next.claim().unwrap();
+    }
+
+    #[test]
+    fn merging_watches_keeps_message_groups_apart() {
+        let group = |message: &str, count| crate::ErrorGroup {
+            exception: "Error".into(),
+            file: None,
+            normalized_message: Some(message.into()),
+            count,
+            variants: Vec::new(),
+            overflow_variants: 0,
+        };
+        let mut previous = WatchResult::not_run();
+        previous.new_errors = vec![group("checkout total mismatch", 1)];
+        let mut current = WatchResult::not_run();
+        current.new_errors = vec![
+            group("webhook signature rejected", 1),
+            group("checkout total mismatch", 2),
+        ];
+        merge_previous_watch(&mut current, &previous);
+        let merged: Vec<_> = current
+            .new_errors
+            .iter()
+            .map(|group| (group.normalized_message.as_deref(), group.count))
+            .collect();
+        assert_eq!(
+            merged,
+            [
+                (Some("webhook signature rejected"), 1),
+                (Some("checkout total mismatch"), 3),
+            ]
+        );
     }
 }

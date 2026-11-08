@@ -91,7 +91,7 @@ A file Shipslip leaves on the server naming the last run and its target commit. 
 _Avoid_: Receipt (for the marker), deploy record
 
 **Error group**:
-Log entries that share an exception and app file. Its ID comes from those two, so the same group keeps its ID across snapshots.
+Log entries that share an exception and app file. Entries that name neither are grouped by their normalized message instead (numbers, IDs and quoted values replaced), so unrelated plain errors are not counted as one. Its ID comes from those, so the same group keeps its ID across snapshots.
 _Avoid_: Issue, incident
 
 **Baseline**:

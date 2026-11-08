@@ -252,6 +252,8 @@ impl From<&WatchResult> for Watch {
 pub struct ErrorGroup {
     pub exception: Untrusted,
     pub file: Option<Untrusted>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normalized_message: Option<Untrusted>,
     pub count: u64,
     pub variants: Vec<ErrorVariant>,
     pub overflow_variants: u64,
@@ -262,6 +264,7 @@ impl From<&crate::ErrorGroup> for ErrorGroup {
         Self {
             exception: value.exception.clone().into(),
             file: value.file.clone().map(Into::into),
+            normalized_message: value.normalized_message.clone().map(Into::into),
             count: value.count,
             variants: value.variants.iter().map(Into::into).collect(),
             overflow_variants: value.overflow_variants,

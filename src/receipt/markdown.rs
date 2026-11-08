@@ -10,7 +10,7 @@ use std::fmt::Write;
 
 use super::{format_duration, format_utc, strip_color, timing_suffix, Receipt};
 use crate::logs::{escape, escape_field};
-use crate::records::{ReceiptRecord, Smoke, StepKind};
+use crate::records::{ErrorGroup, ReceiptRecord, Smoke, StepKind};
 
 mod words;
 use words::{flag_text, headline, step_label};
@@ -161,11 +161,20 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
             );
         }
         if !watch.new_errors.is_empty() {
-            out.push_str("\n| New error | File | Count |\n|---|---|---|\n");
+            out.push_str(if details {
+                "\n| New error | Message | File | Count |\n|---|---|---|---|\n"
+            } else {
+                "\n| New error | File | Count |\n|---|---|---|\n"
+            });
             for group in &watch.new_errors {
+                let message = match (details, group_message(group)) {
+                    (false, _) => String::new(),
+                    (true, "") => "  |".into(),
+                    (true, text) => format!(" {} |", code(text)),
+                };
                 let _ = writeln!(
                     out,
-                    "| {} | {} | {} |",
+                    "| {} |{message} {} | {} |",
                     code(group.exception.raw()),
                     group
                         .file
@@ -265,6 +274,27 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
         }
     }
     out
+}
+
+/// The first line of a group's most frequent message.
+fn group_message(group: &ErrorGroup) -> &str {
+    // Reversed so the earliest of equally frequent variants wins.
+    let top = group
+        .variants
+        .iter()
+        .rev()
+        .max_by_key(|variant| variant.count);
+    top.map(|variant| variant.message.raw())
+        .or_else(|| {
+            group
+                .normalized_message
+                .as_ref()
+                .map(|message| message.raw())
+        })
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
 }
 
 fn row(out: &mut String, label: &str, value: &str) {

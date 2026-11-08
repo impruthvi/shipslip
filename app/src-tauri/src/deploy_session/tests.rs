@@ -1860,6 +1860,7 @@ fn replay_keeps_log_watch_smoke_and_unknown_result_details_safely() {
     watch.new_errors.push(shipslip::ErrorGroup {
         exception: "Exception\x1b[2J".into(),
         file: None,
+        normalized_message: None,
         count: 1,
         overflow_variants: 0,
         variants: vec![shipslip::ErrorVariant {
