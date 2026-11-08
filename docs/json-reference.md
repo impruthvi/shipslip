@@ -220,7 +220,9 @@ Receipt step rows may include `result_seen_at_ms` and `connection_gaps`.
 If a step finished during a connection gap, `finished_at_ms` and `duration_ms`
 are null; `result_seen_at_ms` says when this Mac read the result, not when the
 step ended. A gap has `lost_at_ms`, nullable `reattached_at_ms`, and untrusted
-transport `detail`. The timestamps all use this Mac's clock. Older receipts
+transport `detail`. `lost_at_ms` is when this Mac last heard from the server
+while following the step, not when it noticed the loss, which can be up to a
+minute later. The timestamps all use this Mac's clock. Older receipts
 without these fields keep their existing meaning.
 
 `run_plan` is either a string or `{"FromStep": N}`. Next-step parts use

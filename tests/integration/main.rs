@@ -2238,6 +2238,13 @@ async fn connection_gap_after_dropping_packets_does_not_guess_step_end() {
     recorded_connection_gap(true).await;
 }
 
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+}
+
 async fn recorded_connection_gap(drop_packets: bool) {
     let server = if drop_packets {
         Server::start_with_options(&["--cap-add=NET_ADMIN"]).await
@@ -2254,8 +2261,9 @@ async fn recorded_connection_gap(drop_packets: bool) {
     }
     let ssh = Arc::new(server.connect().await);
     let path = server.app("recorded-gap");
+    // Silent long enough that the gap cannot start at the last step output.
     let step = if drop_packets {
-        "echo once >> launches; echo started; sleep 2; echo finished"
+        "echo once >> launches; echo started; sleep 30; echo finished"
     } else {
         "echo once >> launches; echo started; while [ ! -e continue-step ]; do sleep 0.1; done; echo finished"
     };
@@ -2269,11 +2277,13 @@ async fn recorded_connection_gap(drop_packets: bool) {
     let (mut receiver, _handle) =
         execute_recorded(preview, confirmation, ssh, journal.clone()).unwrap();
     let mut events = Vec::new();
-    tokio::time::timeout(Duration::from_secs(120), async {
+    let mut dropped_at_ms = 0;
+    tokio::time::timeout(Duration::from_secs(150), async {
         while let Some(event) = receiver.recv().await {
             if is_output("started")(&event) {
                 if drop_packets {
-                    server.exec_as("root", "iptables -I OUTPUT -p tcp --sport 22 -j DROP; (sleep 40; iptables -D OUTPUT -p tcp --sport 22 -j DROP) >/tmp/restore-network 2>&1 </dev/null &", "");
+                    dropped_at_ms = now_ms() + 20_000;
+                    server.exec_as("root", "(sleep 20; iptables -I OUTPUT -p tcp --sport 22 -j DROP; sleep 40; iptables -D OUTPUT -p tcp --sport 22 -j DROP) >/tmp/restore-network 2>&1 </dev/null &", "");
                 } else {
                     let processes = Command::new("ps").args(["-axo", "pid=,command="]).output().unwrap();
                     assert!(processes.status.success());
@@ -2328,6 +2338,12 @@ async fn recorded_connection_gap(drop_packets: bool) {
     assert_eq!(step.connection_gaps[0].lost_at_ms, *lost);
     assert_eq!(step.connection_gaps[0].reattached_at_ms, Some(*attached));
     if drop_packets {
+        // Within ssh's 15 s keepalive interval of the drop, though with
+        // ServerAliveCountMax 1 the loss is noticed only 15-30 s later.
+        assert!(
+            dropped_at_ms - 15_000 <= *lost && *lost <= dropped_at_ms + 2_000,
+            "gap starts at {lost}, packets dropped at about {dropped_at_ms}"
+        );
         assert_eq!(step.finished_at_ms, None);
         assert_eq!(step.result_seen_at_ms, Some(*attached));
     } else {

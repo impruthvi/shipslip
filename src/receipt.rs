@@ -96,6 +96,7 @@ impl From<StepStatus> for ReceiptStepStatus {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionGap {
+    /// When the server was last heard, not when the loss was noticed.
     pub lost_at_ms: u128,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reattached_at_ms: Option<u128>,

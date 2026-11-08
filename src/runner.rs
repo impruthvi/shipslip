@@ -6,7 +6,8 @@
 //! step ends). A step is launched at most once: nothing here ever re-sends
 //! the launch.
 
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -28,6 +29,13 @@ const MAX_REATTACHES: usize = 5;
 /// Printed by the observer before the log, so anything a login shell prints
 /// first is not taken for step output.
 pub(crate) const LOG_START: &str = "shipslip-log-start";
+
+/// Starts the line the observer prints on stderr while a step is silent, so
+/// a lost connection's gap starts when the server was last heard.
+pub(crate) const ALIVE: &str = "shipslip-alive-";
+
+/// Seconds between the observer's alive lines; below ssh's 15 s keepalive.
+const ALIVE_INTERVAL_SECS: u64 = 5;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StepResult {
@@ -61,6 +69,7 @@ pub(crate) enum Observed {
 pub(crate) struct Connection<'a> {
     reattaches: usize,
     lost: bool,
+    heard_at_ms: u128,
     pub result_seen_at_ms: Option<u128>,
     notify: &'a (dyn Fn(ConnectionChange) -> Result<(), String> + Sync),
 }
@@ -70,9 +79,14 @@ impl<'a> Connection<'a> {
         Self {
             reattaches: 0,
             lost: false,
+            heard_at_ms: now_ms(),
             result_seen_at_ms: None,
             notify,
         }
+    }
+
+    fn heard(&mut self) {
+        self.heard_at_ms = now_ms();
     }
 
     fn reattached(&mut self, probe: &Probe) -> Result<(), StepResult> {
@@ -131,22 +145,39 @@ exit 1
     )
 }
 
-/// Streams the step's log from line `skip + 1` until the step's process ends.
-/// If its process ID now belongs to another process, prints the rest and stops.
-pub(crate) fn observe_script(run_id: &str, key: &str, skip: usize) -> String {
+/// Streams the step's log from line `skip + 1` until the step's process ends,
+/// printing `alive` on stderr meanwhile. If its process ID now belongs to
+/// another process, prints the rest and stops.
+pub(crate) fn observe_script(run_id: &str, key: &str, skip: usize, alive: &str) -> String {
     format!(
         r#"d={runs}/{key}
 echo {LOG_START}
 {ident}
 {same_process}
 same_process || exec tail -n +{from} "$d/log" 2>/dev/null
-exec tail -n +{from} -s 0.2 --pid="$(cat "$d/pid")" -f "$d/log" 2>/dev/null
+(while sleep {ALIVE_INTERVAL_SECS} </dev/null >/dev/null 2>&1; do echo {alive} >&2 || exit; done) </dev/null >/dev/null &
+alive=$!
+tail -n +{from} -s 0.2 --pid="$(cat "$d/pid")" -f "$d/log" 2>/dev/null
+status=$?
+kill "$alive" 2>/dev/null
+exit "$status"
 "#,
         runs = run_dir(run_id),
         from = skip + 1,
         ident = IDENT_FN,
         same_process = SAME_PROCESS_FN,
     )
+}
+
+/// An alive line no step output is expected to match.
+fn alive_marker() -> String {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{ALIVE}{nanos:x}-{:x}-{seq:x}", std::process::id())
 }
 
 pub(crate) fn probe_script(run_id: &str, key: &str) -> String {
@@ -196,6 +227,9 @@ pub(crate) async fn launch_step<T: Transport>(
     connection: &mut Connection<'_>,
 ) -> Result<(), StepResult> {
     let (launch, launch_output) = run_collect(transport, &launch_script(run_id, key, script)).await;
+    if launch.is_ok() {
+        connection.heard();
+    }
     if let Err(e @ TransportError::Connect(_)) = &launch {
         return Err(StepResult::NotStarted(e.to_string()));
     }
@@ -290,7 +324,7 @@ pub(crate) async fn follow_existing<T: Transport>(
                 return result;
             }
         }
-        let observed = observe(transport, run_id, key, &mut seen, output).await;
+        let observed = observe(transport, run_id, key, &mut seen, output, connection).await;
         if let Err(reason) = reconnect_if_lost(transport, &observed, connection, Some(output)).await
         {
             return StepResult::Interrupted(reason);
@@ -361,12 +395,18 @@ async fn observe<T: Transport>(
     key: &str,
     seen: &mut usize,
     output: &mpsc::Sender<Observed>,
+    connection: &mut Connection<'_>,
 ) -> Result<i32, TransportError> {
-    let script = observe_script(run_id, key, *seen);
+    let alive = alive_marker();
+    let script = observe_script(run_id, key, *seen, &alive);
     let (tx, mut rx) = mpsc::channel(LINE_QUEUE);
     let forward = async {
         let mut started = false;
         while let Some(line) = rx.recv().await {
+            connection.heard();
+            if line == alive {
+                continue;
+            }
             if !started {
                 started = line == LOG_START;
                 continue;
@@ -388,10 +428,11 @@ async fn reconnect_if_lost<T: Transport>(
     output: Option<&mpsc::Sender<Observed>>,
 ) -> Result<(), String> {
     let Err(err) = result else {
+        connection.heard();
         return Ok(());
     };
     if !connection.lost {
-        let at_ms = now_ms();
+        let at_ms = connection.heard_at_ms;
         if let Some(output) = output {
             let (acknowledge, drained) = oneshot::channel();
             let _ = output.send(Observed::Drained(acknowledge)).await;
@@ -440,8 +481,8 @@ mod tests {
 
     #[test]
     fn observe_resumes_after_seen_lines() {
-        assert!(observe_script("r1", "step-1", 0).contains("tail -n +1 "));
-        assert!(observe_script("r1", "step-1", 7).contains("tail -n +8 "));
+        assert!(observe_script("r1", "step-1", 0, "x").contains("tail -n +1 "));
+        assert!(observe_script("r1", "step-1", 7, "x").contains("tail -n +8 "));
     }
 
     #[test]
@@ -497,7 +538,7 @@ mod tests {
         std::fs::write(dir.join("ident"), "another-boot 1\n").unwrap();
         assert_eq!(probe(), Some(Probe::Gone));
         let started = Instant::now();
-        let observed = run(&observe_script("r1", "step-1", 0));
+        let observed = run(&observe_script("r1", "step-1", 0, &alive_marker()));
         assert!(started.elapsed() < Duration::from_secs(10));
         assert_eq!(observed.last().map(String::as_str), Some("hi"));
 

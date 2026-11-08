@@ -2625,6 +2625,10 @@ mod tests {
         launch: Launch,
         /// The next observe drops the connection after this many lines.
         drop_after: Mutex<Option<usize>>,
+        /// Before that drop, sends one alive line and then stays silent.
+        silent_before_drop: Option<Duration>,
+        /// When the last line before the drop was sent.
+        last_sent_ms: Mutex<Option<u128>>,
         running_at_reattach: AtomicBool,
         vanishes: bool,
         gate: Option<Arc<Notify>>,
@@ -2644,6 +2648,13 @@ mod tests {
 
     fn lost() -> TransportError {
         TransportError::ConnectionLost("reset".into())
+    }
+
+    /// Waits until the runner has read every line sent so far.
+    async fn wait_until_read(output: &mpsc::Sender<String>) {
+        while output.capacity() < output.max_capacity() {
+            tokio::task::yield_now().await;
+        }
     }
 
     fn number_after(script: &str, prefix: &str) -> usize {
@@ -2911,6 +2922,16 @@ mod tests {
             let end = drop_after.map_or(rule.lines.len(), |n| skip + n);
             for line in &rule.lines[skip..end] {
                 let _ = output.send(line.to_string()).await;
+            }
+            if let (Some(_), Some(silence)) = (drop_after, rule.silent_before_drop) {
+                wait_until_read(output).await;
+                std::thread::sleep(silence);
+                let marker = &script[script.find(runner::ALIVE).unwrap()..];
+                let marker = marker.split_whitespace().next().unwrap();
+                let _ = output.send(marker.to_string()).await;
+                wait_until_read(output).await;
+                *rule.last_sent_ms.lock().unwrap() = Some(now_ms());
+                std::thread::sleep(silence);
             }
             match drop_after {
                 Some(_) => Err(lost()),
@@ -6668,6 +6689,45 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn gap_starts_when_the_server_was_last_heard_not_when_the_loss_was_noticed() {
+        let mut fake =
+            preflight()
+                .on("git merge --ff-only", &[], 0)
+                .drops("migrate", &["a", "b", "c"], 0, 1);
+        fake.last().silent_before_drop = Some(Duration::from_millis(150));
+        let fake = Arc::new(fake);
+        let (receipt, events) = timed_run(
+            fake.clone(),
+            &["php artisan migrate --force"],
+            RunPlan::Deploy,
+        )
+        .await;
+        let heard = fake
+            .rules
+            .last()
+            .unwrap()
+            .last_sent_ms
+            .lock()
+            .unwrap()
+            .unwrap();
+        let gap = &receipt.steps[1].connection_gaps[0];
+        assert!(
+            heard - 50 <= gap.lost_at_ms && gap.lost_at_ms <= heard,
+            "gap starts at {} but the server was last heard at {heard}",
+            gap.lost_at_ms
+        );
+        assert!(gap.reattached_at_ms.unwrap() >= heard + 150);
+        let output: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                DeployEvent::Output { index: 1, line } => Some(line.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(output, ["a", "b", "c"]);
     }
 
     #[tokio::test(start_paused = true)]
