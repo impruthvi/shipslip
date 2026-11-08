@@ -83,7 +83,6 @@ describe("receipt slips", () => {
   test("a succeeded run shows its outcome in ink, without the summary sentence", () => {
     const receipt = receiptOf(slipOf(cellAt("/Users/you/code/shop", "staging").receipt));
     show(receipt);
-    // Success is quiet ink, like the map: no status colour at all.
     expect(screen.getByText("Succeeded")).toHaveAttribute("class", "slip-outcome");
     expect(screen.queryByText(receipt.summary ?? "")).not.toBeInTheDocument();
   });

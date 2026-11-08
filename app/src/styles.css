@@ -1164,7 +1164,9 @@ button.side-item:hover {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  filter: drop-shadow(0 0 0.5px var(--color-slip-edge))
+  /* Four 1px hard shadows draw a crisp outline that follows the torn edges. */
+  filter: drop-shadow(1px 0 0 var(--color-slip-edge)) drop-shadow(-1px 0 0 var(--color-slip-edge))
+    drop-shadow(0 1px 0 var(--color-slip-edge)) drop-shadow(0 -1px 0 var(--color-slip-edge))
     drop-shadow(0 1px 1px color-mix(in srgb, var(--color-text) 6%, transparent))
     drop-shadow(0 8px 24px color-mix(in srgb, var(--color-text) 7%, transparent));
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { quit } from "./api";
 import type { QuitRun } from "./types";
 
@@ -14,6 +14,7 @@ export default function QuitDialog() {
   const [leaving, setLeaving] = useState(false);
   const leavingRef = useRef(false);
   const keep = useRef<HTMLButtonElement>(null);
+  const noteId = useId();
 
   useEffect(() => {
     let gone = false;
@@ -96,12 +97,12 @@ export default function QuitDialog() {
             <button
               type="button"
               className="toolbar-button"
-              aria-describedby="quit-now-note"
+              aria-describedby={noteId}
               onClick={() => void quit.quitNow()}
             >
               Quit now
             </button>
-            <p id="quit-now-note" className="muted quit-now-note">
+            <p id={noteId} className="muted quit-now-note">
               {[...new Set(runs.map((run) => run.quitNow))].join(" ")}
             </p>
           </div>
