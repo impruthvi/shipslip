@@ -160,24 +160,23 @@ impl Flag {
 impl Receipt {
     pub fn badge(&self) -> Badge {
         let mut flags = Vec::new();
-        // Only deploys require observation fields: Up runs never watch
-        // logs, and older Up receipts have no smoke result.
+        // An unfinished run has not reached its checks. Only deploys
+        // require observation fields: Up runs never watch logs, and older
+        // Up receipts have no smoke result.
+        let unfinished = self.status == ReceiptStatus::InProgress;
         let checks_apply = self.kind == ReceiptKind::Deploy
+            && !unfinished
             && !matches!(
-                (self.status, &self.outcome),
-                (
-                    ReceiptStatus::Final,
-                    Some(
-                        DeployOutcome::CancelledBeforeChanges
-                            | DeployOutcome::AbortedBeforeChanges(_)
-                            | DeployOutcome::StoppedInMaintenance(_)
-                    )
+                &self.outcome,
+                Some(
+                    DeployOutcome::CancelledBeforeChanges
+                        | DeployOutcome::AbortedBeforeChanges(_)
+                        | DeployOutcome::StoppedInMaintenance(_)
                 )
             );
         match &self.watch {
             None if checks_apply => flags.push(Flag::LogNotRecorded),
-            None => {}
-            Some(watch) => {
+            Some(watch) if !unfinished => {
                 let groups = self.new_error_groups();
                 if groups > 0 {
                     flags.push(Flag::NewErrors { groups });
@@ -186,16 +185,14 @@ impl Receipt {
                     flags.push(flag);
                 }
             }
+            _ => {}
         }
         match &self.smoke {
             None if checks_apply => flags.push(Flag::SmokeNotRecorded),
-            None => {}
-            Some(SmokeResult::Failed { status, .. }) => {
+            Some(SmokeResult::Failed { status, .. }) if !unfinished => {
                 flags.push(Flag::SmokeFailed { status: *status })
             }
-            Some(
-                SmokeResult::Passed { .. } | SmokeResult::NotConfigured | SmokeResult::Skipped,
-            ) => {}
+            _ => {}
         }
         if self.app_left_down {
             flags.push(Flag::AppLeftDown);
@@ -203,7 +200,7 @@ impl Receipt {
         Badge {
             outcome: Outcome {
                 kind: self.outcome.as_ref().into(),
-                unfinished: self.status == ReceiptStatus::InProgress,
+                unfinished,
             },
             flags,
         }

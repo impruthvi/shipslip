@@ -1265,7 +1265,10 @@ async fn run_steps<T: Transport>(
         }
         let _ = events.send(DeployEvent::OutcomeKnown(outcome.clone()));
     }
-    let skip_reason = app_down.then_some(CheckSkipReason::AppLeftInMaintenance);
+    // A detached or interrupted run has not reached its checks yet; it
+    // records none, so attaching later runs them.
+    let finished = matches!(end, End::Finished(_));
+    let skip_reason = (app_down && finished).then_some(CheckSkipReason::AppLeftInMaintenance);
     let saved_checks = saved_checks.filter(|_| !app_down);
     let using_saved_checks = saved_checks.is_some();
     if let Some(reason) = skip_reason {
@@ -1292,7 +1295,7 @@ async fn run_steps<T: Transport>(
             match observer {
                 Some(observer) if app_down => {
                     observer.abort();
-                    WatchResult::not_run()
+                    finished.then(WatchResult::not_run)
                 }
                 Some(observer) => {
                     if watch_status == WatchStatus::Complete {
@@ -1300,12 +1303,15 @@ async fn run_steps<T: Transport>(
                             window: post_window(),
                         });
                     }
-                    observer.finish(watch_status, post_window()).await
+                    Some(observer.finish(watch_status, post_window()).await)
                 }
-                None => WatchResult::not_run(),
+                None => finished.then(WatchResult::not_run),
             }
         };
         let smoke = async {
+            if !finished {
+                return None;
+            }
             let result = if post_checks {
                 observation::smoke_check(preview.target.smoke_url.as_deref()).await
             } else if preview.target.smoke_url.is_some() {
@@ -1316,12 +1322,12 @@ async fn run_steps<T: Transport>(
             if preview.target.smoke_url.is_some() {
                 let _ = events.send(DeployEvent::SmokeFinished(result.clone()));
             }
-            result
+            Some(result)
         };
         tokio::join!(watch, smoke)
     };
-    let (mut watch_result, smoke_result) = if let Some(saved) = saved_checks {
-        saved
+    let (mut watch_result, smoke_result) = if let Some((watch, smoke)) = saved_checks {
+        (Some(watch), Some(smoke))
     } else {
         tokio::select! {
             results = checks => results,
@@ -1333,16 +1339,19 @@ async fn run_steps<T: Transport>(
     let watch_was_underway = resume
         .as_ref()
         .is_some_and(|receipt| receipt.outcome.is_some());
-    if watch_was_underway && !using_saved_checks && watch_result.status == WatchStatus::Complete {
-        watch_result.status = WatchStatus::Partial;
-        watch_result.warnings.push(
-            "Log watch restarted after attach; entries during the interruption may be missing"
-                .into(),
-        );
-    }
-    if let Some(previous) = resume.as_ref().and_then(|receipt| receipt.watch.as_ref()) {
-        if !app_down && !watch_was_underway {
-            merge_previous_watch(&mut watch_result, previous);
+    if let Some(watch_result) = &mut watch_result {
+        if watch_was_underway && !using_saved_checks && watch_result.status == WatchStatus::Complete
+        {
+            watch_result.status = WatchStatus::Partial;
+            watch_result.warnings.push(
+                "Log watch restarted after attach; entries during the interruption may be missing"
+                    .into(),
+            );
+        }
+        if let Some(previous) = resume.as_ref().and_then(|receipt| receipt.watch.as_ref()) {
+            if !app_down && !watch_was_underway {
+                merge_previous_watch(watch_result, previous);
+            }
         }
     }
     let saved = journal.as_ref().map(|journal| {
@@ -1357,10 +1366,14 @@ async fn run_steps<T: Transport>(
         return;
     }
     if preview.target.watch_log {
-        let _ = events.send(DeployEvent::WatchFinished(watch_result));
+        if let Some(watch_result) = watch_result {
+            let _ = events.send(DeployEvent::WatchFinished(watch_result));
+        }
     }
     if using_saved_checks && preview.target.smoke_url.is_some() {
-        let _ = events.send(DeployEvent::SmokeFinished(smoke_result));
+        if let Some(smoke_result) = smoke_result {
+            let _ = events.send(DeployEvent::SmokeFinished(smoke_result));
+        }
     }
     let event = match end {
         End::Finished(outcome) => {
@@ -5126,11 +5139,11 @@ mod tests {
         previous.status = WatchStatus::Partial;
         journal
             .observation(
-                previous,
-                SmokeResult::Failed {
+                Some(previous),
+                Some(SmokeResult::Failed {
                     status: Some(503),
                     reason: "HTTP 503".into(),
-                },
+                }),
                 None,
             )
             .unwrap();
@@ -5157,6 +5170,119 @@ mod tests {
             receipt.checks_skip_reason,
             Some(CheckSkipReason::AppLeftInMaintenance)
         );
+    }
+
+    #[tokio::test]
+    async fn detach_in_maintenance_records_no_checks_until_attach_brings_the_app_up() {
+        let (url, requests, server) = smoke_endpoint().await;
+        let gate = Arc::new(Notify::new());
+        let fake = Arc::new(
+            preflight()
+                .on("artisan down", &[], 0)
+                .on("git merge --ff-only", &[], 0)
+                .gated("migrate", gate.clone())
+                .on("artisan up", &[], 0),
+        );
+        let mut target = maintenance_target(false, &["migrate"]);
+        target.watch_log = true;
+        target.smoke_url = Some(url);
+        let preview = prepare(&trusted(target), &*fake).await.unwrap();
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let path = journal.path().to_path_buf();
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (mut rx, handle) =
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
+        while !matches!(
+            rx.recv().await,
+            Some(DeployEvent::StepStarted { index: 1, .. })
+        ) {}
+        handle.detach();
+        let events = collect(rx).await;
+        assert_eq!(events.last(), Some(&DeployEvent::Detached { index: 1 }));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            DeployEvent::ChecksSkipped { .. }
+                | DeployEvent::SmokeFinished(_)
+                | DeployEvent::WatchFinished(_)
+        )));
+        let detached = crate::receipt::read(&path).unwrap();
+        assert_eq!(detached.status, ReceiptStatus::InProgress);
+        assert_eq!(detached.checks_skip_reason, None);
+        assert_eq!(detached.smoke, None);
+        assert_eq!(detached.watch, None);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while Arc::strong_count(&journal) != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached run kept the receipt claim");
+        drop(journal);
+
+        let resumed = Arc::new(ReceiptJournal::load(&path).unwrap());
+        let (rx, _handle) = attach(
+            &trusted(resumed.snapshot().target),
+            resumed.clone(),
+            fake.clone(),
+        )
+        .unwrap();
+        gate.notify_one();
+        let events = collect(rx).await;
+        server.abort();
+        assert_eq!(
+            events.last(),
+            Some(&DeployEvent::Finished(DeployOutcome::Succeeded))
+        );
+        assert_eq!(fake.launched("migrate"), 1);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(watch_started(&events), 1);
+        let receipt = crate::receipt::read(&path).unwrap();
+        assert!(!receipt.app_left_down);
+        assert_eq!(receipt.checks_skip_reason, None);
+        assert!(matches!(receipt.smoke, Some(SmokeResult::Passed { .. })));
+        assert_ne!(receipt.watch.as_ref().unwrap().status, WatchStatus::NotRun);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connection_lost_in_maintenance_records_no_checks() {
+        let fake = Arc::new(
+            preflight()
+                .on("artisan down", &[], 0)
+                .on("git merge --ff-only", &[], 0)
+                .drops("migrate", &["a"], 0, 0)
+                .unreachable_after_drop(),
+        );
+        let mut target = maintenance_target(false, &["migrate"]);
+        target.watch_log = true;
+        target.smoke_url = Some("http://127.0.0.1:9/".into());
+        let preview = prepare(&trusted(target), &*fake).await.unwrap();
+        let dir = TempReceipts::new();
+        let journal =
+            Arc::new(ReceiptJournal::create(&dir.0, "app", Path::new("/repo"), &preview).unwrap());
+        let confirmation = Confirmation::from(&preview, None).unwrap();
+        let (rx, _handle) =
+            execute_recorded(preview, confirmation, fake.clone(), journal.clone()).unwrap();
+        let events = collect(rx).await;
+        assert!(
+            matches!(
+                events.last(),
+                Some(DeployEvent::Interrupted { index: 1, .. })
+            ),
+            "{events:?}"
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            DeployEvent::ChecksSkipped { .. }
+                | DeployEvent::SmokeFinished(_)
+                | DeployEvent::WatchFinished(_)
+        )));
+        let receipt = journal.snapshot();
+        assert_eq!(receipt.status, ReceiptStatus::InProgress);
+        assert_eq!(receipt.checks_skip_reason, None);
+        assert_eq!(receipt.smoke, None);
+        assert_eq!(receipt.watch, None);
     }
 
     #[tokio::test(start_paused = true)]
@@ -5336,7 +5462,7 @@ mod tests {
         let mut watch = WatchResult::not_run();
         watch.status = WatchStatus::Complete;
         journal
-            .observation(watch, SmokeResult::NotConfigured, None)
+            .observation(Some(watch), Some(SmokeResult::NotConfigured), None)
             .unwrap();
         let path = journal.path().to_path_buf();
         drop(journal);
@@ -5395,7 +5521,7 @@ mod tests {
                 .warnings
                 .push("Lost the connection for 5s; log lines from that time may be missing".into());
             journal
-                .observation(during, SmokeResult::NotConfigured, None)
+                .observation(Some(during), Some(SmokeResult::NotConfigured), None)
                 .unwrap();
             journal
                 .detached("detached while observing step 0".into())

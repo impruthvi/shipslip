@@ -854,13 +854,18 @@ impl ReceiptJournal {
 
     pub fn observation(
         &self,
-        watch: WatchResult,
-        smoke: SmokeResult,
+        watch: Option<WatchResult>,
+        smoke: Option<SmokeResult>,
         skip_reason: Option<crate::observation::CheckSkipReason>,
     ) -> Result<(), ReceiptError> {
+        // `None` keeps what an earlier attach recorded.
         self.update(|receipt| {
-            receipt.watch = Some(watch);
-            receipt.smoke = Some(smoke);
+            if watch.is_some() {
+                receipt.watch = watch;
+            }
+            if smoke.is_some() {
+                receipt.smoke = smoke;
+            }
             receipt.checks_skip_reason = skip_reason;
         })
     }
