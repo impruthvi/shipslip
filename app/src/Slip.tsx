@@ -14,12 +14,9 @@ import type {
   OutcomeView,
   ReceiptView,
   StepView,
-  Tone,
   WatchView,
 } from "./types";
 import type { Opened } from "./useReceipt";
-
-const toneClass: Record<Tone, string> = { good: "tone-good", bad: "tone-bad", neutral: "" };
 
 const COMMITS_SHOWN = 5;
 
@@ -37,10 +34,11 @@ function flagClass(kind: FlagKind | null): string {
   }
 }
 
-/** Red only for a step that failed; a stop or a lost result is amber. */
+/** Red only for a step that failed; a stop or a lost result is amber.
+ * Success stays ink, as on the map. */
 function outcomeClass(outcome: OutcomeView): string {
-  if (outcome.tone === "bad" && outcome.kind !== "failed") return "tone-attention";
-  return toneClass[outcome.tone];
+  if (outcome.tone !== "bad") return "";
+  return outcome.kind === "failed" ? "tone-bad" : "tone-attention";
 }
 
 
@@ -237,7 +235,7 @@ function Facts({ receipt }: { receipt: ReceiptView }) {
     <section className="slip-section">
       <dl className="facts">
         <Fact name="Outcome">
-          <span className={`slip-outcome ${outcomeClass(receipt.outcome)}`}>
+          <span className={["slip-outcome", outcomeClass(receipt.outcome)].filter(Boolean).join(" ")}>
             {receipt.outcome.text}
           </span>
         </Fact>

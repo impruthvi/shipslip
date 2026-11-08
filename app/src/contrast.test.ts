@@ -72,6 +72,15 @@ test.each(slipPairs)("dark receipt: %s on %s is at least 4.5:1", (text, backgrou
   expect(ratio(text, background, "darkSlip")).toBeGreaterThanOrEqual(4.5);
 });
 
+// Light paper on a light panel: the slip's outline keeps its edge visible.
+test.each(["surface-alt", "surface-raised"])("light: the slip edge stands out from %s", (background) => {
+  expect(ratio("slip-edge", background)).toBeGreaterThanOrEqual(1.5);
+});
+
+test("the slip draws its outline in the slip-edge token", () => {
+  expect(css).toMatch(/\.slip \{[^}]*filter:[^}]*var\(--color-slip-edge\)/);
+});
+
 test("the ratio is computed the WCAG way", () => {
   expect(ratio("text", "text")).toBeCloseTo(1);
   expect(luminance("#ffffff")).toBeCloseTo(1);

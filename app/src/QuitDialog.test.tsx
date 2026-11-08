@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
+import css from "./styles.css?raw";
 import QuitDialog from "./QuitDialog";
 import { quitRuns } from "./fixtures.gen";
 import type { QuitRun } from "./types";
@@ -75,4 +76,20 @@ test("names every run when more than one would be cut short", async () => {
   await ask();
   expect(screen.getByRole("alertdialog", { name: "Quit while 2 runs are going?" }));
   for (const run of quitRuns) expect(screen.getByText(run.detach));
+});
+
+test("quit now is a plain secondary button with its consequence underneath", async () => {
+  render(<QuitDialog />);
+  await ask();
+  const button = screen.getByRole("button", { name: "Quit now" });
+  expect(button).toHaveAttribute("class", "toolbar-button");
+  expect(button).toHaveAccessibleDescription(deploying.quitNow);
+  const note = document.getElementById(button.getAttribute("aria-describedby")!)!;
+  expect(button.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test("no quit dialog rule draws in red", () => {
+  const rules = css.match(/[^{}]*\.quit[^{}]*\{[^}]*\}/g) ?? [];
+  expect(rules.length).toBeGreaterThan(0);
+  for (const rule of rules) expect(rule).not.toContain("--color-status-bad");
 });
