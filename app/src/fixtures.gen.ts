@@ -51,6 +51,7 @@ export const map: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/api",
             "targetMoved": "approved config now deploys to production2:/var/www/api, not this target",
@@ -64,6 +65,7 @@ export const map: LoadResult = {
                 "tone": "bad",
                 "kind": "stoppedInMaintenance"
               },
+              "stepsRun": null,
               "flags": [
                 {
                   "text": "app may be in maintenance mode",
@@ -96,6 +98,7 @@ export const map: LoadResult = {
               "tone": "bad",
               "kind": "failed"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/api",
             "targetMoved": null,
@@ -129,6 +132,7 @@ export const map: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/billing",
             "targetMoved": null,
@@ -155,6 +159,7 @@ export const map: LoadResult = {
               "tone": "bad",
               "kind": "failed"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/billing",
             "targetMoved": null,
@@ -189,6 +194,7 @@ export const map: LoadResult = {
               "tone": "bad",
               "kind": "failed"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/blog",
             "targetMoved": null,
@@ -211,6 +217,7 @@ export const map: LoadResult = {
               "approved before"
             ],
             "outcome": null,
+            "stepsRun": null,
             "flags": [],
             "target": null,
             "targetMoved": null,
@@ -247,6 +254,7 @@ export const map: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/shop",
             "targetMoved": null,
@@ -278,6 +286,7 @@ export const map: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/shop",
             "targetMoved": null,
@@ -291,6 +300,7 @@ export const map: LoadResult = {
                 "tone": "neutral",
                 "kind": "cancelled"
               },
+              "stepsRun": null,
               "flags": [],
               "atMs": 1791792300000,
               "age": "45m ago"
@@ -312,6 +322,7 @@ export const map: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [
               {
                 "text": "2 new error groups after this run",
@@ -381,6 +392,7 @@ export const wideMap: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/shop",
             "targetMoved": null,
@@ -405,6 +417,7 @@ export const wideMap: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/shop",
             "targetMoved": null,
@@ -429,6 +442,7 @@ export const wideMap: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "demo1:/var/www/shop",
             "targetMoved": null,
@@ -453,6 +467,7 @@ export const wideMap: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "qa1:/var/www/shop",
             "targetMoved": null,
@@ -477,6 +492,7 @@ export const wideMap: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "sandbox1:/var/www/shop",
             "targetMoved": null,
@@ -501,6 +517,7 @@ export const wideMap: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "uat1:/var/www/shop",
             "targetMoved": null,
@@ -551,6 +568,7 @@ export const terminalMap: LoadResult = {
               "tone": "bad",
               "kind": "unfinished"
             },
+            "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/shop",
             "targetMoved": null,
@@ -596,7 +614,8 @@ export const smokeCells: Record<string, CellView> = {
         "text": "Succeeded",
         "tone": "good"
       },
-      "receipt": 1
+      "receipt": 1,
+      "stepsRun": null
     },
     "mark": "recorded",
     "needsAttention": true,
@@ -610,6 +629,7 @@ export const smokeCells: Record<string, CellView> = {
     "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "shortSha": "aaaaaaa",
     "staleReceipt": null,
+    "stepsRun": null,
     "target": "staging1:/var/www/shop",
     "targetMoved": null,
     "terminalRun": null,
@@ -630,7 +650,8 @@ export const smokeCells: Record<string, CellView> = {
         "text": "Succeeded",
         "tone": "good"
       },
-      "receipt": 1
+      "receipt": 1,
+      "stepsRun": null
     },
     "mark": "recorded",
     "needsAttention": false,
@@ -644,6 +665,7 @@ export const smokeCells: Record<string, CellView> = {
     "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "shortSha": "aaaaaaa",
     "staleReceipt": null,
+    "stepsRun": null,
     "target": "staging1:/var/www/shop",
     "targetMoved": null,
     "terminalRun": null,
@@ -675,11 +697,40 @@ export const smokeCells: Record<string, CellView> = {
     "sha": null,
     "shortSha": null,
     "staleReceipt": null,
+    "stepsRun": null,
     "target": "staging1:/var/www/shop",
     "targetMoved": null,
     "terminalRun": null,
     "words": "no code change in the last run"
   }
+};
+
+export const fromStepCell: CellView = {
+  "age": "3m ago",
+  "atMs": 1791794795000,
+  "evidence": [
+    "checked out at start"
+  ],
+  "flags": [],
+  "kind": "present",
+  "lastAttempt": null,
+  "mark": "recorded",
+  "needsAttention": false,
+  "outcome": {
+    "kind": "succeeded",
+    "text": "Succeeded",
+    "tone": "good"
+  },
+  "qualifiers": [],
+  "receipt": 0,
+  "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "shortSha": "aaaaaaa",
+  "staleReceipt": null,
+  "stepsRun": "steps 2–3 only",
+  "target": "staging1:/var/www/shop",
+  "targetMoved": null,
+  "terminalRun": null,
+  "words": ""
 };
 
 export const compares: Record<string, CompareResult> = {
@@ -817,6 +868,7 @@ export const receipts: Record<string, ReceiptResult> = {
       "target": "production1:/var/www/api",
       "branch": "main",
       "plan": "deploy",
+      "stepsRun": null,
       "startedAtMs": 1791705000000,
       "finishedAtMs": 1791705095000,
       "duration": "1m 35s",
@@ -828,7 +880,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "steps": [
         {
           "index": "0",
-          "command": "git merge --ff-only",
+          "command": "git fast-forward to fffffff",
+          "detail": "git merge --ff-only",
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -844,6 +897,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "1",
           "command": "php artisan migrate --force",
+          "detail": null,
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -908,6 +962,7 @@ export const receipts: Record<string, ReceiptResult> = {
       "target": "production1:/var/www/api",
       "branch": "main",
       "plan": "deploy",
+      "stepsRun": null,
       "startedAtMs": 1791793800000,
       "finishedAtMs": 1791793895000,
       "duration": "1m 35s",
@@ -920,6 +975,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "on",
           "command": "Maintenance on: php artisan down",
+          "detail": null,
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -934,7 +990,8 @@ export const receipts: Record<string, ReceiptResult> = {
         },
         {
           "index": "0",
-          "command": "git merge --ff-only",
+          "command": "git fast-forward to fffffff",
+          "detail": "git merge --ff-only",
           "status": "notRun",
           "label": "– not run",
           "exitCode": null,
@@ -946,6 +1003,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "1",
           "command": "php artisan migrate --force",
+          "detail": null,
           "status": "notRun",
           "label": "– not run",
           "exitCode": null,
@@ -1029,6 +1087,7 @@ export const receipts: Record<string, ReceiptResult> = {
       "target": "staging1:/var/www/shop",
       "branch": "main",
       "plan": "deploy",
+      "stepsRun": null,
       "startedAtMs": 1791791280000,
       "finishedAtMs": 1791791375000,
       "duration": "1m 35s",
@@ -1040,7 +1099,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "steps": [
         {
           "index": "0",
-          "command": "git merge --ff-only",
+          "command": "git fast-forward to aaaaaaa",
+          "detail": "git merge --ff-only",
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -1056,6 +1116,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "1",
           "command": "php artisan migrate --force",
+          "detail": null,
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -1157,6 +1218,7 @@ export const receipts: Record<string, ReceiptResult> = {
       "target": "staging1:/var/www/api",
       "branch": "main",
       "plan": "deploy",
+      "stepsRun": null,
       "startedAtMs": 1791780600000,
       "finishedAtMs": 1791780695000,
       "duration": "1m 35s",
@@ -1171,7 +1233,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "steps": [
         {
           "index": "0",
-          "command": "git merge --ff-only",
+          "command": "git fast-forward to 7777777",
+          "detail": "git merge --ff-only",
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -1187,6 +1250,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "1",
           "command": "php artisan migrate --force",
+          "detail": null,
           "status": "failed",
           "label": "✗ failed",
           "exitCode": 255,
@@ -1283,6 +1347,7 @@ export const receipts: Record<string, ReceiptResult> = {
       "target": "production1:/var/www/billing",
       "branch": "main",
       "plan": "deploy",
+      "stepsRun": null,
       "startedAtMs": 1791276600000,
       "finishedAtMs": 1791276695000,
       "duration": "1m 35s",
@@ -1294,7 +1359,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "steps": [
         {
           "index": "0",
-          "command": "git merge --ff-only",
+          "command": "git fast-forward to ddddddd",
+          "detail": "git merge --ff-only",
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -1310,6 +1376,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "1",
           "command": "php artisan migrate --force",
+          "detail": null,
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -1376,6 +1443,7 @@ export const receipts: Record<string, ReceiptResult> = {
       "target": "staging1:/var/www/billing",
       "branch": "main",
       "plan": "deploy",
+      "stepsRun": null,
       "startedAtMs": 1791787800000,
       "finishedAtMs": 1791787895000,
       "duration": "1m 35s",
@@ -1390,7 +1458,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "steps": [
         {
           "index": "0",
-          "command": "git merge --ff-only",
+          "command": "git fast-forward to ccccccc",
+          "detail": "git merge --ff-only",
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -1406,6 +1475,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "1",
           "command": "php artisan migrate --force",
+          "detail": null,
           "status": "failed",
           "label": "✗ failed",
           "exitCode": 1,
@@ -1507,6 +1577,7 @@ export const receipts: Record<string, ReceiptResult> = {
       "target": "production1:/var/www/blog",
       "branch": "main",
       "plan": "deploy",
+      "stepsRun": null,
       "startedAtMs": 1791793200000,
       "finishedAtMs": 1791793295000,
       "duration": "1m 35s",
@@ -1521,7 +1592,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "steps": [
         {
           "index": "0",
-          "command": "git merge --ff-only",
+          "command": "git fast-forward to eeeeeee",
+          "detail": "git merge --ff-only",
           "status": "failed",
           "label": "✗ failed",
           "exitCode": 128,
@@ -1537,6 +1609,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "1",
           "command": "php artisan migrate --force",
+          "detail": null,
           "status": "notRun",
           "label": "– not run",
           "exitCode": null,
@@ -1597,6 +1670,7 @@ export const receipts: Record<string, ReceiptResult> = {
       "target": "staging1:/var/www/shop",
       "branch": "main",
       "plan": "deploy",
+      "stepsRun": null,
       "startedAtMs": 1791449400000,
       "finishedAtMs": 1791449495000,
       "duration": "1m 35s",
@@ -1608,7 +1682,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "steps": [
         {
           "index": "0",
-          "command": "git merge --ff-only",
+          "command": "git fast-forward to 9999999",
+          "detail": "git merge --ff-only",
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -1624,6 +1699,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "1",
           "command": "php artisan migrate --force",
+          "detail": null,
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -1681,6 +1757,7 @@ export const receipts: Record<string, ReceiptResult> = {
       "target": "production1:/var/www/shop",
       "branch": "main",
       "plan": "deploy",
+      "stepsRun": null,
       "startedAtMs": 1791535800000,
       "finishedAtMs": 1791535895000,
       "duration": "1m 35s",
@@ -1692,7 +1769,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "steps": [
         {
           "index": "0",
-          "command": "git merge --ff-only",
+          "command": "git fast-forward to bbbbbbb",
+          "detail": "git merge --ff-only",
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -1708,6 +1786,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "1",
           "command": "php artisan migrate --force",
+          "detail": null,
           "status": "ok",
           "label": "✓ ok",
           "exitCode": 0,
@@ -1765,6 +1844,7 @@ export const receipts: Record<string, ReceiptResult> = {
       "target": "production1:/var/www/shop",
       "branch": "main",
       "plan": "deploy",
+      "stepsRun": null,
       "startedAtMs": 1791792300000,
       "finishedAtMs": 1791792395000,
       "duration": "1m 35s",
@@ -1776,7 +1856,8 @@ export const receipts: Record<string, ReceiptResult> = {
       "steps": [
         {
           "index": "0",
-          "command": "git merge --ff-only",
+          "command": "git fast-forward to aaaaaaa",
+          "detail": "git merge --ff-only",
           "status": "notRun",
           "label": "– not run",
           "exitCode": null,
@@ -1788,6 +1869,7 @@ export const receipts: Record<string, ReceiptResult> = {
         {
           "index": "1",
           "command": "php artisan migrate --force",
+          "detail": null,
           "status": "notRun",
           "label": "– not run",
           "exitCode": null,
@@ -1878,6 +1960,7 @@ export const watchResults: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [
               {
                 "text": "log watch interrupted · entries may be missing",
@@ -1916,6 +1999,7 @@ export const watchResults: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [
               {
                 "text": "no log file yet",
@@ -1954,6 +2038,7 @@ export const watchResults: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [
               {
                 "text": "log watch skipped · app left in maintenance",
@@ -1992,6 +2077,7 @@ export const watchResults: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [
               {
                 "text": "log watch stopped early",
@@ -2030,6 +2116,7 @@ export const watchResults: LoadResult = {
               "tone": "good",
               "kind": "succeeded"
             },
+            "stepsRun": null,
             "flags": [
               {
                 "text": "log could not be read",
@@ -2124,8 +2211,9 @@ export const slips: Record<string, SlipView> = {
     "startedBy": null,
     "steps": [
       {
-        "command": "git merge --ff-only",
+        "command": "git fast-forward to aaaaaaa",
         "connectionGaps": [],
+        "detail": "git merge --ff-only",
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
@@ -2150,6 +2238,7 @@ export const slips: Record<string, SlipView> = {
             "reattachedAtMs": 1791794940000
           }
         ],
+        "detail": null,
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
@@ -2169,6 +2258,7 @@ export const slips: Record<string, SlipView> = {
             "reattachedAtMs": null
           }
         ],
+        "detail": null,
         "exitCode": null,
         "index": "off",
         "label": "? unknown",
@@ -2181,6 +2271,7 @@ export const slips: Record<string, SlipView> = {
         }
       }
     ],
+    "stepsRun": null,
     "summary": null,
     "target": "staging1:/var/www/shop",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2252,8 +2343,9 @@ export const slips: Record<string, SlipView> = {
     "startedBy": null,
     "steps": [
       {
-        "command": "git merge --ff-only",
+        "command": "git fast-forward to aaaaaaa",
         "connectionGaps": [],
+        "detail": "git merge --ff-only",
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
@@ -2269,6 +2361,7 @@ export const slips: Record<string, SlipView> = {
       {
         "command": "php artisan migrate --force",
         "connectionGaps": [],
+        "detail": null,
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
@@ -2282,8 +2375,103 @@ export const slips: Record<string, SlipView> = {
         }
       }
     ],
+    "stepsRun": null,
     "summary": "Deploy run succeeded.",
     "target": "qa1:/var/www/shop",
+    "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "watch": {
+      "baseline": [
+        14,
+        37
+      ],
+      "duration": "2m 0s",
+      "groups": [],
+      "kind": null,
+      "linesRead": 412,
+      "logPath": "storage/logs/laravel.log",
+      "moreGroups": 0,
+      "status": "complete",
+      "warnings": []
+    }
+  },
+  "fromStep": {
+    "branch": "main",
+    "commits": [],
+    "duration": "1m 35s",
+    "env": "staging",
+    "finishedAtMs": 1791794855000,
+    "flags": [],
+    "fromSha": "1111111111111111111111111111111111111111",
+    "kind": "receipt",
+    "nextSteps": {
+      "attachLine": null,
+      "copyWithheld": false,
+      "lines": []
+    },
+    "notes": [],
+    "outcome": {
+      "kind": "succeeded",
+      "text": "Succeeded",
+      "tone": "good"
+    },
+    "plan": "from step 2 on the deployed commit",
+    "production": false,
+    "project": "shop",
+    "repoRoot": "/Users/you/code/shop",
+    "runId": "00000068-0",
+    "serverHead": null,
+    "smoke": "passed, HTTP 200 in 380 ms",
+    "startedAtMs": 1791794760000,
+    "startedBy": null,
+    "steps": [
+      {
+        "command": "composer install --no-dev",
+        "connectionGaps": [],
+        "detail": null,
+        "exitCode": null,
+        "index": "1",
+        "label": "↷ skipped",
+        "output": [],
+        "resultSeenAtMs": null,
+        "status": "skipped",
+        "timing": null
+      },
+      {
+        "command": "php artisan migrate --force",
+        "connectionGaps": [],
+        "detail": null,
+        "exitCode": 0,
+        "index": "2",
+        "label": "✓ ok",
+        "output": [],
+        "resultSeenAtMs": null,
+        "status": "ok",
+        "timing": {
+          "duration": "9s",
+          "durationMs": 9000,
+          "kind": "took"
+        }
+      },
+      {
+        "command": "php artisan optimize",
+        "connectionGaps": [],
+        "detail": null,
+        "exitCode": 0,
+        "index": "3",
+        "label": "✓ ok",
+        "output": [],
+        "resultSeenAtMs": null,
+        "status": "ok",
+        "timing": {
+          "duration": "2s",
+          "durationMs": 2500,
+          "kind": "took"
+        }
+      }
+    ],
+    "stepsRun": "steps 2–3 only",
+    "summary": "Deploy run succeeded.",
+    "target": "staging1:/var/www/shop",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "watch": {
       "baseline": [
@@ -2354,8 +2542,9 @@ export const slips: Record<string, SlipView> = {
     "startedBy": null,
     "steps": [
       {
-        "command": "git merge --ff-only",
+        "command": "git fast-forward to aaaaaaa",
         "connectionGaps": [],
+        "detail": "git merge --ff-only",
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
@@ -2371,6 +2560,7 @@ export const slips: Record<string, SlipView> = {
       {
         "command": "php artisan migrate --force",
         "connectionGaps": [],
+        "detail": null,
         "exitCode": null,
         "index": "1",
         "label": "? running when saved",
@@ -2383,6 +2573,7 @@ export const slips: Record<string, SlipView> = {
         }
       }
     ],
+    "stepsRun": null,
     "summary": null,
     "target": "staging1:/var/www/shop",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2439,8 +2630,9 @@ export const slips: Record<string, SlipView> = {
     "startedBy": null,
     "steps": [
       {
-        "command": "git merge --ff-only",
+        "command": "git fast-forward to aaaaaaa",
         "connectionGaps": [],
+        "detail": "git merge --ff-only",
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
@@ -2456,6 +2648,7 @@ export const slips: Record<string, SlipView> = {
       {
         "command": "php artisan migrate --force",
         "connectionGaps": [],
+        "detail": null,
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
@@ -2469,6 +2662,7 @@ export const slips: Record<string, SlipView> = {
         }
       }
     ],
+    "stepsRun": null,
     "summary": "Deploy run succeeded.",
     "target": "staging1:/var/www/watchInterrupted",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2525,8 +2719,9 @@ export const slips: Record<string, SlipView> = {
     "startedBy": null,
     "steps": [
       {
-        "command": "git merge --ff-only",
+        "command": "git fast-forward to aaaaaaa",
         "connectionGaps": [],
+        "detail": "git merge --ff-only",
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
@@ -2542,6 +2737,7 @@ export const slips: Record<string, SlipView> = {
       {
         "command": "php artisan migrate --force",
         "connectionGaps": [],
+        "detail": null,
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
@@ -2555,6 +2751,7 @@ export const slips: Record<string, SlipView> = {
         }
       }
     ],
+    "stepsRun": null,
     "summary": "Deploy run succeeded.",
     "target": "staging1:/var/www/watchNoFile",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2611,8 +2808,9 @@ export const slips: Record<string, SlipView> = {
     "startedBy": null,
     "steps": [
       {
-        "command": "git merge --ff-only",
+        "command": "git fast-forward to aaaaaaa",
         "connectionGaps": [],
+        "detail": "git merge --ff-only",
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
@@ -2628,6 +2826,7 @@ export const slips: Record<string, SlipView> = {
       {
         "command": "php artisan migrate --force",
         "connectionGaps": [],
+        "detail": null,
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
@@ -2641,6 +2840,7 @@ export const slips: Record<string, SlipView> = {
         }
       }
     ],
+    "stepsRun": null,
     "summary": "Deploy run succeeded.",
     "target": "staging1:/var/www/watchSkipped",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2694,8 +2894,9 @@ export const slips: Record<string, SlipView> = {
     "startedBy": null,
     "steps": [
       {
-        "command": "git merge --ff-only",
+        "command": "git fast-forward to aaaaaaa",
         "connectionGaps": [],
+        "detail": "git merge --ff-only",
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
@@ -2711,6 +2912,7 @@ export const slips: Record<string, SlipView> = {
       {
         "command": "php artisan migrate --force",
         "connectionGaps": [],
+        "detail": null,
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
@@ -2724,6 +2926,7 @@ export const slips: Record<string, SlipView> = {
         }
       }
     ],
+    "stepsRun": null,
     "summary": "Deploy run succeeded.",
     "target": "staging1:/var/www/watchStopped",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2780,8 +2983,9 @@ export const slips: Record<string, SlipView> = {
     "startedBy": null,
     "steps": [
       {
-        "command": "git merge --ff-only",
+        "command": "git fast-forward to aaaaaaa",
         "connectionGaps": [],
+        "detail": "git merge --ff-only",
         "exitCode": 0,
         "index": "0",
         "label": "✓ ok",
@@ -2797,6 +3001,7 @@ export const slips: Record<string, SlipView> = {
       {
         "command": "php artisan migrate --force",
         "connectionGaps": [],
+        "detail": null,
         "exitCode": 0,
         "index": "1",
         "label": "✓ ok",
@@ -2810,6 +3015,7 @@ export const slips: Record<string, SlipView> = {
         }
       }
     ],
+    "stepsRun": null,
     "summary": "Deploy run succeeded.",
     "target": "staging1:/var/www/watchUnreadable",
     "targetSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -2876,6 +3082,10 @@ export const deployReview: DeployReview = {
   "runPlan": "Deploy",
   "smokeConfigured": false,
   "sshAlias": "shop-prod",
+  "stepZero": {
+    "command": "git merge --ff-only bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "label": "git fast-forward to bbbbbbb"
+  },
   "steps": [
     "composer install --no-dev",
     "php artisan migrate --force",
@@ -2905,6 +3115,10 @@ export const runInfo: RunInfo = {
   "sshAlias": "shop-prod",
   "stage": "starting",
   "startedAtMs": 1791795000000,
+  "stepZero": {
+    "command": "git merge --ff-only bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "label": "git fast-forward to bbbbbbb"
+  },
   "steps": [
     "composer install --no-dev",
     "php artisan migrate --force",
@@ -2912,6 +3126,27 @@ export const runInfo: RunInfo = {
   ],
   "targetSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   "watchMs": 120000
+};
+
+export const pickerEntry: DeployEntry = {
+  "kind": "ready",
+  "needsTrust": false,
+  "production": true,
+  "recovery": null,
+  "steps": [
+    {
+      "command": "composer install --no-dev",
+      "ranOkLastRun": true
+    },
+    {
+      "command": "php artisan migrate --force",
+      "ranOkLastRun": false
+    },
+    {
+      "command": "php artisan optimize",
+      "ranOkLastRun": false
+    }
+  ]
 };
 
 export const gapRunInfo: RunInfo = {
@@ -2935,6 +3170,10 @@ export const gapRunInfo: RunInfo = {
   "sshAlias": "shop-prod",
   "stage": "step 1",
   "startedAtMs": 1791795000000,
+  "stepZero": {
+    "command": "git merge --ff-only bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "label": "git fast-forward to bbbbbbb"
+  },
   "steps": [
     "composer install --no-dev",
     "php artisan migrate --force",
@@ -2959,6 +3198,10 @@ export const attachedRunInfo: RunInfo = {
   "sshAlias": "shop-prod",
   "stage": "starting",
   "startedAtMs": 1791795000000,
+  "stepZero": {
+    "command": "git merge --ff-only bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "label": "git fast-forward to bbbbbbb"
+  },
   "steps": [
     "composer install --no-dev",
     "php artisan migrate --force",
@@ -3125,7 +3368,7 @@ export const runBatches: Record<string, RunBatch> = {
           "index": 0,
           "kind": "step"
         },
-        "text": "git fast-forward: working"
+        "text": "git fast-forward to bbbbbbb: working"
       },
       {
         "sequence": 7,
@@ -3160,7 +3403,7 @@ export const runBatches: Record<string, RunBatch> = {
       "steps": {
         "0": {
           "exitCode": 0,
-          "name": "git fast-forward",
+          "name": "git fast-forward to bbbbbbb",
           "reattachedAtMs": null,
           "status": "Ok",
           "timing": {
@@ -3205,7 +3448,7 @@ export const runBatches: Record<string, RunBatch> = {
           "index": 0,
           "kind": "step"
         },
-        "text": "git fast-forward: working"
+        "text": "git fast-forward to bbbbbbb: working"
       },
       {
         "sequence": 7,
@@ -3240,7 +3483,7 @@ export const runBatches: Record<string, RunBatch> = {
       "steps": {
         "0": {
           "exitCode": 0,
-          "name": "git fast-forward",
+          "name": "git fast-forward to bbbbbbb",
           "reattachedAtMs": null,
           "status": "Ok",
           "timing": {
@@ -3359,7 +3602,7 @@ export const runBatches: Record<string, RunBatch> = {
           "index": 0,
           "kind": "step"
         },
-        "text": "git fast-forward: working"
+        "text": "git fast-forward to bbbbbbb: working"
       },
       {
         "sequence": 7,
@@ -3389,7 +3632,7 @@ export const runBatches: Record<string, RunBatch> = {
       "steps": {
         "0": {
           "exitCode": 0,
-          "name": "git fast-forward",
+          "name": "git fast-forward to bbbbbbb",
           "reattachedAtMs": null,
           "status": "Ok",
           "timing": {
@@ -3427,7 +3670,7 @@ export const runBatches: Record<string, RunBatch> = {
           "index": 0,
           "kind": "step"
         },
-        "text": "git fast-forward: working"
+        "text": "git fast-forward to bbbbbbb: working"
       },
       {
         "sequence": 7,
@@ -3463,7 +3706,7 @@ export const runBatches: Record<string, RunBatch> = {
       "steps": {
         "0": {
           "exitCode": 0,
-          "name": "git fast-forward",
+          "name": "git fast-forward to bbbbbbb",
           "reattachedAtMs": null,
           "status": "Ok",
           "timing": {
@@ -3501,7 +3744,7 @@ export const runBatches: Record<string, RunBatch> = {
           "index": 0,
           "kind": "step"
         },
-        "text": "git fast-forward: working"
+        "text": "git fast-forward to bbbbbbb: working"
       },
       {
         "sequence": 7,
@@ -3531,7 +3774,7 @@ export const runBatches: Record<string, RunBatch> = {
       "steps": {
         "0": {
           "exitCode": 0,
-          "name": "git fast-forward",
+          "name": "git fast-forward to bbbbbbb",
           "reattachedAtMs": null,
           "status": "Ok",
           "timing": {
@@ -3670,7 +3913,7 @@ export const runBatches: Record<string, RunBatch> = {
       "steps": {
         "0": {
           "exitCode": 0,
-          "name": "git fast-forward",
+          "name": "git fast-forward to bbbbbbb",
           "reattachedAtMs": null,
           "status": "Ok",
           "timing": null
@@ -3733,7 +3976,7 @@ export const runBatches: Record<string, RunBatch> = {
       "steps": {
         "0": {
           "exitCode": 0,
-          "name": "git fast-forward",
+          "name": "git fast-forward to bbbbbbb",
           "reattachedAtMs": null,
           "status": "Ok",
           "timing": null
@@ -3782,7 +4025,7 @@ export const runBatches: Record<string, RunBatch> = {
       "steps": {
         "0": {
           "exitCode": 0,
-          "name": "git fast-forward",
+          "name": "git fast-forward to bbbbbbb",
           "reattachedAtMs": null,
           "status": "Ok",
           "timing": null
@@ -3826,7 +4069,7 @@ export const runBatches: Record<string, RunBatch> = {
       "steps": {
         "0": {
           "exitCode": 0,
-          "name": "git fast-forward",
+          "name": "git fast-forward to bbbbbbb",
           "reattachedAtMs": null,
           "status": "Ok",
           "timing": null
@@ -3870,7 +4113,7 @@ export const runBatches: Record<string, RunBatch> = {
       "steps": {
         "0": {
           "exitCode": 0,
-          "name": "git fast-forward",
+          "name": "git fast-forward to bbbbbbb",
           "reattachedAtMs": null,
           "status": "Ok",
           "timing": null
@@ -3906,9 +4149,18 @@ export const deployEntries: DeployEntry[] = [
     "production": true,
     "recovery": null,
     "steps": [
-      "composer install --no-dev",
-      "php artisan migrate --force",
-      "php artisan optimize"
+      {
+        "command": "composer install --no-dev",
+        "ranOkLastRun": true
+      },
+      {
+        "command": "php artisan migrate --force",
+        "ranOkLastRun": false
+      },
+      {
+        "command": "php artisan optimize",
+        "ranOkLastRun": false
+      }
     ]
   }
 ];
@@ -4200,6 +4452,10 @@ export const liveRuns: LiveRuns = {
       "sshAlias": "shop-prod",
       "stage": "starting",
       "startedAtMs": 1791795000000,
+      "stepZero": {
+        "command": "git merge --ff-only bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "label": "git fast-forward to bbbbbbb"
+      },
       "steps": [
         "composer install --no-dev",
         "php artisan migrate --force",

@@ -41,6 +41,8 @@ export interface RunRow {
   /** Matches the receipt's step index: "on", "0", "1"…, "off". */
   index: string;
   command: string;
+  /** The exact command, when `command` is step 0's label. */
+  detail: string | null;
   progress: Progress | null;
   owns: (source: OutputSource) => boolean;
 }
@@ -59,27 +61,30 @@ export function runRows(info: RunInfo, state: RunState): RunRow[] {
   const on: RunRow = {
     index: "on",
     command: "php artisan down",
+    detail: null,
     progress: state.maintenanceDown,
     owns: (s) => s.kind === "maintenance" && s.phase === "Down",
   };
   const off: RunRow = {
     index: "off",
     command: "php artisan up",
+    detail: null,
     progress: state.maintenanceUp,
     owns: (s) => s.kind === "maintenance" && s.phase === "Up",
   };
   if (info.runPlan === null) return [off];
   const first = firstStep(info.runPlan);
-  const step = (index: number, command: string): RunRow => ({
+  const step = (index: number, command: string, detail: string | null = null): RunRow => ({
     index: String(index),
-    command: state.steps[index]?.name ?? command,
+    command: detail === null ? (state.steps[index]?.name ?? command) : command,
+    detail,
     progress:
       state.steps[index] ??
       (index > 0 && index < first ? { name: null, status: "Skipped", exitCode: null, timing: null, reattachedAtMs: null } : null),
     owns: (s) => s.kind === "step" && s.index === index,
   });
   if (info.maintenance) rows.push(on);
-  if (first === 0) rows.push(step(0, `git fast-forward to ${(info.targetSha ?? "").slice(0, 7)}`));
+  if (first === 0 && info.stepZero) rows.push(step(0, info.stepZero.label, info.stepZero.command));
   info.steps.forEach((command, i) => rows.push(step(i + 1, command)));
   if (info.maintenance) rows.push(off);
   return rows;

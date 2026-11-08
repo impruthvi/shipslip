@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import type { PickStep } from "./types";
 
 /** Where a run on the deployed commit starts. Picked before Prepare, so the
  * server lock is taken for exactly the run that is shown. */
@@ -9,7 +10,7 @@ export function StepPicker({
   onPick,
 }: {
   /** Recipe steps 1..N. */
-  steps: string[];
+  steps: PickStep[];
   initial: number;
   onBack: () => void;
   onPick: (step: number) => void;
@@ -28,11 +29,11 @@ export function StepPicker({
           <legend className="caps">Steps</legend>
           <p className="muted">Runs the chosen step and every later one on the deployed commit.</p>
           <ol className="recipe mono">
-            {steps.map((command, i) => {
+            {steps.map(({ command, ranOkLastRun }, i) => {
               const index = i + 1;
-              const skipped = index < step;
+              const notRun = index < step;
               return (
-                <li key={index} className={skipped ? "step-skipped" : undefined}>
+                <li key={index} className={notRun ? "step-not-run" : undefined}>
                   <label className="step-choice">
                     <input
                       type="radio"
@@ -43,7 +44,11 @@ export function StepPicker({
                     />
                     <span className="recipe-index muted">{index}</span>
                     <code>{command}</code>
-                    {skipped && <span className="muted step-skip-note">skipped</span>}
+                    {notRun && (
+                      <span className="muted step-skip-note">
+                        not run this time{ranOkLastRun && " · ran OK in the last run"}
+                      </span>
+                    )}
                   </label>
                 </li>
               );

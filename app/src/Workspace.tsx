@@ -13,6 +13,7 @@ import { TrustReview, type TrustBusy } from "./TrustReview";
 import { elapsed } from "./time";
 import type {
   CommandError,
+  PickStep,
   DeployReview,
   PrepareProgress,
   RecoveryReview,
@@ -37,7 +38,7 @@ export interface DeployTarget {
 export type Start =
   | { kind: "deploy"; plan: RunPlan }
   /** Run from step: pick where, then prepare. */
-  | { kind: "pick"; steps: string[]; step: number }
+  | { kind: "pick"; steps: PickStep[]; step: number }
   /** Review the config for approval first; approving goes on to `then`, or back to the map. */
   | { kind: "trust"; then: Next | null }
   | { kind: "up" }
@@ -62,7 +63,7 @@ type Screen =
   | { kind: "running"; info: RunInfo }
   | { kind: "loading" }
   | { kind: "trust"; review: TrustReviewData; busy: TrustBusy; changedAgain: boolean }
-  | { kind: "pick"; steps: string[]; step: number }
+  | { kind: "pick"; steps: PickStep[]; step: number }
   | { kind: "recovery"; review: RecoveryReview; busy: RecoveryBusy }
   | { kind: "taken"; plan: RunPlan };
 

@@ -89,7 +89,7 @@ function ready(over: Partial<Extract<DeployEntry, { kind: "ready" }>> = {}): Dep
     kind: "ready",
     production: true,
     needsTrust: false,
-    steps: fixtures.deployReview.steps,
+    steps: fixtures.deployReview.steps.map((command) => ({ command, ranOkLastRun: false })),
     recovery: null,
     ...over,
   };
@@ -266,7 +266,7 @@ test("preview shows what ships; production deploys only once its name is typed",
   const steps = within(screen.getByRole("region", { name: "Steps" })).getAllByRole("listitem");
   expect(steps.map((s) => s.textContent)).toEqual([
     "onphp artisan down",
-    "0git merge --ff-only bbbbbbb",
+    "0git fast-forward to bbbbbbbgit merge --ff-only bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "1composer install --no-dev",
     "2php artisan migrate --force",
     "3php artisan optimize",
@@ -369,7 +369,7 @@ test("running lists every step with its mark and follows the running step's outp
   const heads = steps.getAllByRole("button").map((b) => b.textContent);
   expect(heads).toEqual([
     "onphp artisan down",
-    "0git fast-forward1s",
+    "0git fast-forward to bbbbbbbgit merge --ff-only bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1s",
     "1composer install --no-dev",
     "2php artisan migrate --force",
     "3php artisan optimize",
@@ -1086,7 +1086,7 @@ test("an attached run starts with what its journal recorded and reads like a nor
   const steps = within(screen.getByRole("region", { name: "Steps" }));
   expect(steps.getAllByRole("button").map((b) => b.textContent)).toEqual([
     "onphp artisan down800 ms",
-    "0git fast-forward to bbbbbbb1s",
+    "0git fast-forward to bbbbbbbgit merge --ff-only bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1s",
     "1composer install --no-dev2m 44s",
     "2php artisan migrate --force",
     "3php artisan optimize",
@@ -1152,7 +1152,7 @@ test("an unknown result says to check the server and offers no action", async ()
   expect(pane.queryByRole("button", { name: /Attach|Run from step|maintenance/ })).toBeNull();
 });
 
-test("run from step: pick first, then the preview strikes skipped steps", async () => {
+test("run from step: pick first, earlier steps not run this time, then the preview strikes skipped steps", async () => {
   entry.mockResolvedValue(
     ready({
       recovery: {
@@ -1165,9 +1165,9 @@ test("run from step: pick first, then the preview strikes skipped steps", async 
   fireEvent.click(screen.getByRole("button", { name: "Run from step 2…" }));
   expect(prepare).not.toHaveBeenCalled();
   expect(screen.getByRole("radio", { name: /2\s*php artisan migrate/ })).toBeChecked();
-  expect(screen.getByRole("radio", { name: /1\s*composer install/ }).closest("li")).toHaveClass(
-    "step-skipped",
-  );
+  const first = screen.getByRole("radio", { name: /1\s*composer install/ }).closest("li");
+  expect(first).toHaveTextContent("not run this time");
+  expect(first).not.toHaveClass("step-skipped");
   fireEvent.click(screen.getByRole("radio", { name: /3\s*php artisan optimize/ }));
   const pending = later<DeployReview>();
   prepare.mockReturnValue(pending.promise);

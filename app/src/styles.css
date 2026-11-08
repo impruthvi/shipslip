@@ -1994,6 +1994,25 @@ button.side-item:hover {
   text-decoration: line-through 1px;
 }
 
+/* Not run this time is a choice, not a mistake: muted, never struck. */
+.step-not-run code {
+  color: var(--color-text-muted);
+}
+
+/* A labelled step (step 0): its name, then the exact command beneath. */
+.step-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.mono-detail {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+  overflow-wrap: anywhere;
+}
+
 .step-skip-note {
   flex-shrink: 0;
   margin-left: auto;

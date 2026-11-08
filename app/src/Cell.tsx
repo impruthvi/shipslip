@@ -61,7 +61,8 @@ export function reason(cell: EnvCellView, live?: string): { text: string; classN
   if (cell.terminalRun) return { text: "Running from the terminal", className: "muted" };
   const last = cell.lastAttempt;
   if (last && last.outcome.tone === "bad") {
-    return { text: `Last: ${lowerFirst(last.outcome.text)} · ${last.age}`, className: "" };
+    const text = [`Last: ${lowerFirst(last.outcome.text)}`, last.stepsRun, last.age].filter(Boolean).join(" · ");
+    return { text, className: "" };
   }
   if (cell.qualifiers.length > 0) return { text: cell.qualifiers[0], className: "tone-attention sentence" };
   if (cell.targetMoved) return { text: cell.targetMoved, className: "tone-attention sentence" };
@@ -98,7 +99,7 @@ export function Flap({ status }: { status: Status }) {
 
 /** How the code got there, in the run's own words. */
 export function stateLine(cell: EnvCellView): { text: string; className: string } | null {
-  const outcome = cell.outcome?.text;
+  const outcome = [cell.outcome?.text, cell.stepsRun].filter(Boolean).join(" · ");
   switch (cell.mark) {
     case "recorded":
     case "incomplete":
@@ -173,7 +174,7 @@ export function cellName(
   if (cell.targetMoved) parts.push(cell.targetMoved);
   const last = cell.lastAttempt;
   if (last) {
-    parts.push(`last attempt: ${lowerFirst(last.outcome.text)}, ${last.age}`);
+    parts.push([`last attempt: ${lowerFirst(last.outcome.text)}`, last.stepsRun, last.age].filter(Boolean).join(", "));
     parts.push(...last.flags.filter((flag) => flag.bad).map((flag) => flag.text));
   }
   return parts.join(", ");

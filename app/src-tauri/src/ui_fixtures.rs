@@ -191,6 +191,39 @@ fn release_map(fx: &Fixture) {
     b.save(&gone);
 }
 
+/// A successful run from step 2 of 3 on the deployed commit.
+fn from_step(b: &mut Builder, ago: u128) -> Value {
+    let mut receipt = b.deploy("shop", "staging", ago, &sha('a'));
+    receipt["run_plan"] = json!({"FromStep": 2});
+    receipt["target"]["steps"] = json!([
+        "composer install --no-dev",
+        "php artisan migrate --force",
+        "php artisan optimize"
+    ]);
+    let started = receipt["started_at_ms"].as_u64().unwrap();
+    receipt["steps"] = json!([
+        {"index": 1, "command": "composer install --no-dev", "status": "Skipped", "exit_code": null, "output": []},
+        {"index": 2, "command": "php artisan migrate --force", "status": "Ok", "exit_code": 0, "output": [],
+         "started_at_ms": started + 400, "finished_at_ms": started + 9_400},
+        {"index": 3, "command": "php artisan optimize", "status": "Ok", "exit_code": 0, "output": [],
+         "started_at_ms": started + 9_500, "finished_at_ms": started + 12_000}
+    ]);
+    receipt
+}
+
+/// The map cell after a run-from-step that followed a full deploy.
+fn from_step_cell() -> Value {
+    let fx = Fixture::new();
+    let mut b = Builder { fx: &fx, next: 400 };
+    let deploy = b.deploy("shop", "staging", 30, &sha('a'));
+    b.save(&deploy);
+    let partial = from_step(&mut b, 5);
+    b.save(&partial);
+    let overview = overview(&fx.receipts(), &fx.trust()).unwrap();
+    let view = crate::view::map(&overview, NOW, &mut crate::view::Locators::default());
+    serde_json::to_value(&view.rows[0].cells[0]).unwrap()
+}
+
 fn smoke_cells() -> BTreeMap<&'static str, Value> {
     let mut cells = BTreeMap::new();
     for (name, smoke, prior_deploy) in [
@@ -249,6 +282,7 @@ struct Fixtures {
     quit_runs: Vec<crate::deploy_session::QuitRun>,
     deploy: BTreeMap<&'static str, Value>,
     smoke_cells: BTreeMap<&'static str, Value>,
+    from_step_cell: Value,
 }
 
 fn build() -> (Fixtures, Vec<String>) {
@@ -351,6 +385,7 @@ fn build() -> (Fixtures, Vec<String>) {
     withheld["target"]["env"] = json!("qa;eu");
     withheld["app_left_down"] = json!(true);
     slips.insert("copyWithheld", withheld);
+    slips.insert("fromStep", from_step(&mut b, 4));
     let mut slips: BTreeMap<&str, Value> = slips
         .into_iter()
         .map(|(name, receipt)| {
@@ -432,6 +467,7 @@ fn build() -> (Fixtures, Vec<String>) {
             quit_runs: crate::deploy_session::sample_quit_runs(),
             deploy: crate::deploy_session::sample_deploy_views(),
             smoke_cells: smoke_cells(),
+            from_step_cell: from_step_cell(),
         },
         homes,
     )
@@ -466,6 +502,12 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
         "smokeCells",
         "Record<string, CellView>",
         &fixtures.smoke_cells,
+    );
+    item(
+        &mut out,
+        "fromStepCell",
+        "CellView",
+        &fixtures.from_step_cell,
     );
     item(
         &mut out,
@@ -510,6 +552,12 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
         deploy("terminalEntry"),
     );
     item(&mut out, "runInfo", "RunInfo", deploy("runInfo"));
+    item(
+        &mut out,
+        "pickerEntry",
+        "DeployEntry",
+        deploy("pickerEntry"),
+    );
     item(&mut out, "gapRunInfo", "RunInfo", deploy("gapRunInfo"));
     item(
         &mut out,

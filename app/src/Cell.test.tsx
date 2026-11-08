@@ -1,7 +1,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, test } from "vitest";
 import * as fixtures from "./fixtures.gen";
-import { Flap, status } from "./Cell";
+import { Cell, cellName, Flap, reason, status } from "./Cell";
 import { ReleaseMap } from "./ReleaseMap";
 import type { FlagView, MapView, OutcomeKind } from "./types";
 
@@ -27,6 +27,29 @@ function find(repoRoot: string, env: string) {
 }
 
 describe("cells", () => {
+  test("a run from step says which steps it ran, so it does not read as a full deploy", () => {
+    const cell = fixtures.fromStepCell;
+    if (cell.kind !== "present") throw new Error("fixture");
+    expect(status(cell).word).toBe("Succeeded");
+    expect(reason(cell)?.text).toBe("Steps 2–3 only · checked out at start");
+    expect(cellName("shop", "staging", cell)).toContain("Succeeded · steps 2–3 only");
+    render(<Cell cell={cell} expanded />);
+    expect(screen.getByText("Steps 2–3 only · checked out at start")).toHaveClass("cell-reason");
+    const lastFailed = {
+      ...cell,
+      lastAttempt: {
+        receipt: 1,
+        outcome: { text: "Failed at step 3", tone: "bad" as const, kind: "failed" as const },
+        stepsRun: "step 3 only",
+        flags: [],
+        atMs: cell.atMs ?? 0,
+        age: "1m ago",
+      },
+    };
+    expect(reason(lastFailed)?.text).toBe("Last: failed at step 3 · step 3 only · 1m ago");
+    expect(cellName("shop", "staging", lastFailed)).toContain("last attempt: failed at step 3, step 3 only, 1m ago");
+  });
+
   test("a terminal-driven run shows Running and where to follow it", () => {
     if (fixtures.terminalMap.kind !== "loaded") throw new Error("fixture");
     const map = fixtures.terminalMap.map;

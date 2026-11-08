@@ -115,10 +115,30 @@ describe("receipt slips", () => {
     expect(screen.queryByText(/slip attach/)).toBeNull();
   });
 
+  test("step 0 has its label, with the exact command as mono detail", () => {
+    show(slipOf(cellAt("/Users/you/code/shop", "staging").receipt));
+    const zero = within(screen.getByRole("list")).getAllByRole("listitem")[0];
+    expect(within(zero).getByText("git fast-forward to aaaaaaa")).toBeInTheDocument();
+    expect(within(zero).getByText("git merge --ff-only", { selector: "code" })).toHaveClass("mono-detail");
+  });
+
+  test("a run from step says in the header which steps it ran", () => {
+    show(fixtures.slips.fromStep);
+    const header = screen.getByRole("heading", { name: "shop · staging" }).parentElement!;
+    expect(within(header).getByText("steps 2–3 only")).toBeInTheDocument();
+    const steps = within(screen.getByRole("list")).getAllByRole("listitem");
+    expect(steps.map((s) => s.querySelector(".step-index")?.textContent)).toEqual(["1", "2", "3"]);
+  });
+
+  test("a full deploy's header names no step range", () => {
+    show(slipOf(cellAt("/Users/you/code/shop", "staging").receipt));
+    expect(screen.queryByText(/^steps? \d.* only$/)).toBeNull();
+  });
+
   test("a finished step shows how long it took", () => {
     show(slipOf(cellAt("/Users/you/code/shop", "staging").receipt));
     const steps = within(screen.getByRole("list")).getAllByRole("listitem");
-    expect(steps[0]).toHaveTextContent("0git merge --ff-only · 1s");
+    expect(steps[0]).toHaveTextContent("0git fast-forward to aaaaaaagit merge --ff-only · 1s");
     expect(steps[1]).toHaveTextContent(/migrate --force · 48s$/);
   });
 

@@ -4,11 +4,12 @@
 use serde::Serialize;
 use shipslip::logs::escape_field;
 use shipslip::observation::CheckSkipReason;
+use shipslip::receipt::ReceiptKind;
 use shipslip::receipt::{format_duration, strip_color};
 use shipslip::records::{
     Flag, ReceiptQueryError, ReceiptRecord, StepKind, StepRow, StepState, Watch,
 };
-use shipslip::{StepTimes, WatchResult, WatchStatus};
+use shipslip::{step_zero_label, StepTimes, WatchResult, WatchStatus};
 
 use crate::receipt_words::{smoke_text, step_label};
 use crate::view::{flags, guidance, outcome, FlagKind, FlagView, Guidance, OutcomeView};
@@ -50,6 +51,8 @@ pub struct ReceiptView {
     pub target: String,
     pub branch: String,
     pub plan: String,
+    /// The steps a run-from-step ran, e.g. "steps 4–5 only".
+    pub steps_run: Option<String>,
     pub started_at_ms: u64,
     pub finished_at_ms: Option<u64>,
     pub duration: Option<String>,
@@ -78,7 +81,10 @@ pub struct ServerHead {
 pub struct StepView {
     /// `on` and `off` for maintenance mode, else the step number.
     pub index: String,
+    /// What the step is called: the command, or step 0's label.
     pub command: String,
+    /// The exact command, when `command` is a label (step 0).
+    pub detail: Option<String>,
     pub status: StepStatusView,
     /// The library's label, e.g. "✗ failed".
     pub label: String,
@@ -186,7 +192,13 @@ pub fn slip(result: Result<ReceiptRecord, ReceiptQueryError>) -> SlipView {
 fn receipt_view(receipt: &ReceiptRecord) -> ReceiptView {
     let badge = receipt.badge();
     let target = &receipt.target;
-    let steps = receipt.steps.iter().map(step).collect();
+    let step_zero = (receipt.kind == ReceiptKind::Deploy)
+        .then(|| escape_field(&step_zero_label(receipt.target_sha.raw())));
+    let steps = receipt
+        .steps
+        .iter()
+        .map(|row| step(row, step_zero.as_deref()))
+        .collect();
     ReceiptView {
         run_id: receipt.run_id.field(),
         outcome: outcome(&badge),
@@ -203,6 +215,7 @@ fn receipt_view(receipt: &ReceiptRecord) -> ReceiptView {
         target: escape_field(&format!("{}:{}", target.ssh_alias.raw(), target.path.raw())),
         branch: target.branch.field(),
         plan: receipt.plan_text(),
+        steps_run: receipt.steps_run.clone(),
         started_at_ms: millis(receipt.started_at_ms),
         finished_at_ms: receipt.finished_at_ms.map(millis),
         duration: receipt
@@ -226,21 +239,30 @@ fn receipt_view(receipt: &ReceiptRecord) -> ReceiptView {
     }
 }
 
-fn step(row: &StepRow) -> StepView {
-    let (index, command) = match row.kind {
-        StepKind::MaintenanceDown => (
+/// `step_zero` is step 0's label on a deploy receipt.
+fn step(row: &StepRow, step_zero: Option<&str>) -> StepView {
+    let (index, command, detail) = match (row.kind, step_zero) {
+        (StepKind::MaintenanceDown, _) => (
             "on".to_string(),
             format!("Maintenance on: {}", row.command.field()),
+            None,
         ),
-        StepKind::Step { index } => (index.to_string(), row.command.field()),
-        StepKind::MaintenanceUp => (
+        (StepKind::Step { index: 0 }, Some(label)) => (
+            "0".to_string(),
+            label.to_string(),
+            Some(row.command.field()),
+        ),
+        (StepKind::Step { index }, _) => (index.to_string(), row.command.field(), None),
+        (StepKind::MaintenanceUp, _) => (
             "off".to_string(),
             format!("Maintenance off: {}", row.command.field()),
+            None,
         ),
     };
     StepView {
         index,
         command,
+        detail,
         status: match row.status {
             StepState::Ok => StepStatusView::Ok,
             StepState::Failed => StepStatusView::Failed,
@@ -383,6 +405,33 @@ mod tests {
     }
 
     #[test]
+    fn step_zero_is_named_by_its_target_with_the_command_as_detail() {
+        let fx = Fixture::new();
+        let mut receipt = run(1, "staging");
+        receipt["target_sha"] = json!("abcdef0123456789abcdef0123456789abcdef01");
+        receipt["steps"][0]["command"] =
+            json!("git merge --ff-only abcdef0123456789abcdef0123456789abcdef01");
+        let view = open(&fx, &receipt);
+        assert_eq!(view.steps[0].command, "git fast-forward to abcdef0");
+        assert_eq!(
+            view.steps[0].detail.as_deref(),
+            Some("git merge --ff-only abcdef0123456789abcdef0123456789abcdef01")
+        );
+        assert_eq!(view.steps[1].detail, None);
+        assert_eq!(view.steps_run, None);
+    }
+
+    #[test]
+    fn a_run_from_step_says_which_steps_it_ran() {
+        let fx = Fixture::new();
+        let mut receipt = run(1, "staging");
+        receipt["run_plan"] = json!({"FromStep": 2});
+        receipt["target"]["steps"] = json!(["a", "b", "c"]);
+        let view = open(&fx, &receipt);
+        assert_eq!(view.steps_run.as_deref(), Some("steps 2–3 only"));
+    }
+
+    #[test]
     fn failed_step_shows_later_steps_not_run_and_the_server_head() {
         let fx = Fixture::new();
         let mut failed = run(1, "staging");
@@ -429,6 +478,8 @@ mod tests {
         assert_eq!(view.steps.len(), 1);
         assert_eq!(view.steps[0].status, StepStatusView::Failed);
         assert_eq!(view.steps[0].output, ["up failed\\x1b[2J"]);
+        assert_eq!(view.steps[0].command, "php artisan up");
+        assert_eq!(view.steps[0].detail, None);
     }
 
     #[test]
