@@ -21,13 +21,23 @@ test("a replay starts over; later batches add only newer lines", () => {
   expect(again.dropped).toBe(4);
 });
 
-test("the window keeps the newest lines and counts the ones it let go", () => {
+test("the window keeps the newest lines", () => {
   const many = Array.from({ length: OUTPUT_LINES }, (_, i) => line(i + 1));
   const full = applyBatch(null, batch({ replay: true, output: many, droppedOutput: 3 }));
-  const more = applyBatch(full, batch({ replay: false, after: OUTPUT_LINES, output: [line(OUTPUT_LINES + 1)] }));
+  const more = applyBatch(full, batch({ replay: false, after: OUTPUT_LINES, output: [line(OUTPUT_LINES + 1)], droppedOutput: 4 }));
   expect(more.output).toHaveLength(OUTPUT_LINES);
   expect(more.output.at(-1)?.sequence).toBe(OUTPUT_LINES + 1);
-  expect(more.dropped).toBe(4);
+});
+
+test("lines Rust let go between batches count as dropped", () => {
+  const first = Array.from({ length: OUTPUT_LINES }, (_, i) => line(i + 1));
+  const seen = applyBatch(null, batch({ replay: true, after: 0, through: OUTPUT_LINES, output: first, droppedOutput: 0 }));
+  const total = 20_000;
+  const newest = Array.from({ length: OUTPUT_LINES }, (_, i) => line(total - OUTPUT_LINES + i + 1));
+  const next = applyBatch(seen, batch({ replay: false, after: OUTPUT_LINES, through: total, output: newest, droppedOutput: total - OUTPUT_LINES }));
+  expect(next.output[0].sequence).toBe(total - OUTPUT_LINES + 1);
+  expect(next.output).toHaveLength(OUTPUT_LINES);
+  expect(next.dropped).toBe(18_000);
 });
 
 test("rows run maintenance on, step 0, the recipe, then maintenance off", () => {

@@ -18,21 +18,20 @@ export const OUTPUT_LINES = 2000;
 export interface RunLog {
   state: RunState;
   output: OutputLine[];
-  /** Lines Rust dropped before this view saw them. */
+  /** Lines Rust received but no longer keeps, including ones this view never saw. */
   dropped: number;
   through: number;
 }
 
-/** Folds one batch in. A replay starts over; otherwise only newer lines are added. */
+/** Folds one batch in. A replay starts over; otherwise only newer lines are added.
+ * The window then matches Rust's, so Rust's dropped count is exact. */
 export function applyBatch(prev: RunLog | null, batch: RunBatch): RunLog {
   const kept = batch.replay || !prev ? [] : prev.output;
   const fresh = batch.output.filter((line) => line.sequence > (batch.replay ? 0 : batch.after));
-  const output = [...kept, ...fresh].slice(-OUTPUT_LINES);
-  const lost = kept.length + fresh.length - output.length;
   return {
     state: batch.state,
-    output,
-    dropped: batch.replay || !prev ? batch.droppedOutput + lost : prev.dropped + lost,
+    output: [...kept, ...fresh].slice(-OUTPUT_LINES),
+    dropped: batch.droppedOutput,
     through: batch.through,
   };
 }
