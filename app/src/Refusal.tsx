@@ -42,12 +42,12 @@ export function refusalWording(error: CommandError): Wording {
     case "untrusted":
       return {
         title: "These settings need approval",
-        body: "The settings for this env changed since they were approved. Review them before deploying.",
+        body: "The settings for this environment changed since they were approved. Review them before deploying.",
       };
     case "changed":
       return { title: "The config changed" };
     case "busy":
-      return { title: "This env already has a deploy session" };
+      return { title: "This environment already has a deploy session" };
     case "confirmation":
       return { title: "The typed name didn't match" };
     case "stale":

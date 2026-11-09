@@ -177,7 +177,7 @@ test("review deploy shows only for envs with a config, and says why it is off", 
 
   for (const [answer, reason] of [
     [{ kind: "unavailable", reason: "Checkout folder is missing" }, "Checkout folder is missing"],
-    [{ kind: "running", handle: "run-1" }, "A deploy is running for this env"],
+    [{ kind: "running", handle: "run-1" }, "A deploy is running for this environment"],
   ] as const) {
     entry.mockResolvedValue(answer);
     const view = render(<App />);
@@ -965,13 +965,25 @@ test("settings that changed after the map was read lead to their review, not a C
   const main = within(screen.getByRole("main"));
   expect(main.getByRole("heading", { level: 2, name: "These settings need approval" })).toBeInTheDocument();
   expect(
-    main.getByText("The settings for this env changed since they were approved. Review them before deploying."),
+    main.getByText("The settings for this environment changed since they were approved. Review them before deploying."),
   ).toBeInTheDocument();
   reviewTrust.mockResolvedValue(fixtures.trustReview);
   fireEvent.click(main.getByRole("button", { name: "Review configuration" }));
   await settle();
   expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(/^Review configuration · /);
   expect(screen.getByRole("button", { name: "Approve configuration" })).toBeInTheDocument();
+});
+
+test("a second deploy session for the same environment is refused with a heading that names the environment", async () => {
+  const { pending } = await openWorkspace();
+  await act(async () => pending.reject({ code: "busy", message: "a deploy session is already open" } as CommandError));
+  expect(
+    within(screen.getByRole("main")).getByRole("heading", {
+      level: 2,
+      name: "This environment already has a deploy session",
+    }),
+  ).toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 1 })).toHaveFocus();
 });
 
 test("commands in library sentences show as code, never as markup", async () => {

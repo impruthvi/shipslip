@@ -175,7 +175,7 @@ export function DeployEntryBar({
     entry.kind === "unavailable"
       ? entry.reason
       : entry.kind === "running"
-        ? "A deploy is running for this env"
+        ? "A deploy is running for this environment"
         : null;
   const ready = entry.kind === "ready" ? entry : null;
   const recovery = ready?.recovery ?? null;

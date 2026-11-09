@@ -413,7 +413,7 @@ function NextSteps({ guidance }: { guidance: Guidance }) {
         );
       })}
       {guidance.copyWithheld && (
-        <p className="muted guidance-note">Env name has shell characters; copy by hand</p>
+        <p className="muted guidance-note">Environment name has shell characters; copy by hand</p>
       )}
     </section>
   );
