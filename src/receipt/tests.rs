@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use serde_json::{json, Value};
 
 use super::*;
-use crate::records::{Flag, Untrusted};
+use crate::records::{Flag, StepKind, Untrusted};
 use crate::{AbortReason, WatchStatus};
 
 pub(crate) struct TempRoot(pub(crate) PathBuf);
@@ -268,6 +268,21 @@ pub(crate) fn up_json(run_id: &str, started_at_ms: u64) -> Value {
     value["watch"] = Value::Null;
     value["smoke"] = Value::Null;
     value
+}
+
+#[test]
+fn a_successful_up_receipt_labels_its_row_maintenance_off() {
+    let mut value = up_json("bbbb0002-0", 2000);
+    value["steps"] = json!([{
+        "index": 0, "command": "php artisan up", "status": "Ok", "exit_code": 0, "output": [],
+        "started_at_ms": 3000, "finished_at_ms": 5000
+    }]);
+    let text = markdown(&parse(value), false);
+    assert!(
+        text.contains("| Maintenance off | `php artisan up` | ✓ ok in 2s | 0 |"),
+        "{text}"
+    );
+    assert!(!text.contains("| 0 | `php artisan up` |"), "{text}");
 }
 
 #[test]
@@ -929,7 +944,18 @@ fn up_output_is_bounded_durable_and_only_exported_with_details() {
     assert_eq!(step.exit_code, Some(7));
     assert_eq!(step.times().duration_ms(), Some(3000));
     assert_eq!(receipt.maintenance_up_times(), step.times());
-    assert!(markdown(&receipt, true).contains("diagnostic-204"));
+    assert_eq!(receipt.step_rows()[0].kind, StepKind::MaintenanceUp);
+    let text = markdown(&receipt, true);
+    assert!(
+        text.contains("| Maintenance off | `php artisan up` | ✗ failed in 3s | 7 |"),
+        "{text}"
+    );
+    assert!(!text.contains("| 0 | `php artisan up` |"), "{text}");
+    assert!(
+        text.contains(&format!("\nMaintenance off (last {OUTPUT_LINES} lines):\n")),
+        "{text}"
+    );
+    assert!(text.contains("diagnostic-204"));
     assert!(!markdown(&receipt, false).contains("diagnostic-204"));
     assert_eq!(
         markdown(&receipt, true).matches("`php artisan up`").count(),

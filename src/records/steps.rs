@@ -131,8 +131,12 @@ impl From<ReceiptStepStatus> for StepState {
 
 impl Receipt {
     /// Maintenance down, each step, then maintenance up. An Up run's only
-    /// step is `php artisan up`, so it has no maintenance-up row.
+    /// step is `php artisan up`, so that step is its maintenance-up row.
     pub fn step_rows(&self) -> Vec<StepRow> {
+        let step_kind = |index| match self.kind {
+            ReceiptKind::Deploy => StepKind::Step { index },
+            ReceiptKind::Up => StepKind::MaintenanceUp,
+        };
         let mut rows = Vec::new();
         if let Some(status) = &self.maintenance_down_status {
             rows.push(StepRow::maintenance(
@@ -146,7 +150,7 @@ impl Receipt {
         }
         rows.extend(self.steps.iter().map(|step| {
             StepRow::new(
-                StepKind::Step { index: step.index },
+                step_kind(step.index),
                 &step.command,
                 step.status,
                 step.exit_code,

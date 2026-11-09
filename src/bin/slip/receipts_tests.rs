@@ -735,7 +735,12 @@ fn standalone_up_shows_its_saved_output_once() {
     });
     let text = render_show(&up);
     assert!(text.contains("up failed\\x1b[2J"), "{text}");
-    assert!(!text.contains("Maintenance off:"), "{text}");
+    assert_eq!(
+        text.matches("off  Maintenance off: php artisan up (exit 7)")
+            .count(),
+        1,
+        "{text}"
+    );
     assert_eq!(text.matches("✓ ok").count(), 0, "{text}");
 }
 
