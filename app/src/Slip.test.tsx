@@ -165,7 +165,7 @@ describe("receipt slips", () => {
   test("an env with shell characters gets no command box, only the copy-by-hand note", () => {
     show(fixtures.slips.copyWithheld);
     expect(screen.queryByRole("button", { name: /^Copy/ })).not.toBeInTheDocument();
-    expect(screen.getByText("Env name has shell characters; copy by hand")).toBeInTheDocument();
+    expect(screen.getByText("Environment name has shell characters; copy by hand")).toBeInTheDocument();
     expect(screen.getByText(/`slip up qa;eu`/)).toBeInTheDocument();
   });
 
