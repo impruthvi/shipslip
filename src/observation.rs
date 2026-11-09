@@ -146,7 +146,7 @@ pub enum SmokeResult {
 enum Mode {
     Idle,
     During,
-    After(Instant),
+    After { started: Instant, deadline: Instant },
     Stop(WatchStatus),
 }
 
@@ -233,7 +233,11 @@ impl LogObserver {
 
     pub(crate) async fn finish(self, status: WatchStatus, post_window: Duration) -> WatchResult {
         if status == WatchStatus::Complete {
-            let _ = self.control.send(Mode::After(Instant::now() + post_window));
+            let started = Instant::now();
+            let _ = self.control.send(Mode::After {
+                started,
+                deadline: started + post_window,
+            });
         } else {
             let _ = self.control.send(Mode::Stop(status));
         }
@@ -412,6 +416,7 @@ struct LogState {
     /// The last read stopped before the end of the file.
     behind: bool,
     started: Instant,
+    after_steps_started: Option<Instant>,
 }
 
 impl LogState {
@@ -448,6 +453,7 @@ impl LogState {
             missing_during_disconnect: None,
             behind: false,
             started: Instant::now(),
+            after_steps_started: None,
         }
     }
 
@@ -619,7 +625,9 @@ impl LogState {
             self.partial = true;
             self.warn("Log grew faster than it could be read; later entries were not checked");
         }
-        self.result.duration_ms = self.started.elapsed().as_millis() as u64;
+        self.result.duration_ms = self
+            .after_steps_started
+            .map_or(0, |since| since.elapsed().as_millis() as u64);
         self.result.baseline_signatures = self.baseline.len();
         self.result.status = match requested {
             WatchStatus::NotRun => WatchStatus::NotRun,
@@ -836,7 +844,6 @@ async fn watch_loop<T: Transport>(
     mut control: watch::Receiver<Mode>,
     cancel: Arc<AtomicBool>,
 ) -> WatchResult {
-    let mut after_caught_up = false;
     loop {
         if cancel.load(Ordering::Relaxed) {
             return finalize_watch(
@@ -856,8 +863,9 @@ async fn watch_loop<T: Transport>(
         if let Mode::Stop(status) = mode {
             return finalize_watch(state, status, &events, history_path.as_ref());
         }
-        let catch_up = if let Mode::After(deadline) = mode {
-            if after_caught_up && Instant::now() >= deadline {
+        let catch_up = if let Mode::After { started, deadline } = mode {
+            let caught_up = state.after_steps_started.is_some();
+            if caught_up && Instant::now() >= deadline {
                 return finalize_watch(
                     state,
                     WatchStatus::Complete,
@@ -865,9 +873,8 @@ async fn watch_loop<T: Transport>(
                     history_path.as_ref(),
                 );
             }
-            let needs_catch_up = !after_caught_up;
-            after_caught_up = true;
-            needs_catch_up
+            state.after_steps_started = Some(started);
+            !caught_up
         } else {
             false
         };
@@ -884,7 +891,7 @@ async fn watch_loop<T: Transport>(
         }
         let phase = if catch_up {
             LogPhase::During
-        } else if matches!(*control.borrow(), Mode::After(_)) {
+        } else if matches!(*control.borrow(), Mode::After { .. }) {
             LogPhase::After
         } else {
             LogPhase::During
@@ -1243,10 +1250,9 @@ mod tests {
         }
     }
 
-    async fn observe(
+    async fn start_observer(
         transport: &Arc<LogTransport>,
-        post_window: Duration,
-    ) -> (WatchResult, Vec<DeployEvent>) {
+    ) -> (LogObserver, mpsc::UnboundedReceiver<DeployEvent>) {
         let target = DeployTarget {
             env: "staging".into(),
             production: false,
@@ -1262,7 +1268,7 @@ mod tests {
             timezone: None,
             logs: Default::default(),
         };
-        let (events, mut receiver) = mpsc::unbounded_channel();
+        let (events, receiver) = mpsc::unbounded_channel();
         let observer = LogObserver::start(
             transport.clone(),
             &target,
@@ -1272,6 +1278,14 @@ mod tests {
         )
         .await;
         observer.begin();
+        (observer, receiver)
+    }
+
+    async fn observe(
+        transport: &Arc<LogTransport>,
+        post_window: Duration,
+    ) -> (WatchResult, Vec<DeployEvent>) {
+        let (observer, mut receiver) = start_observer(transport).await;
         let result = observer.finish(WatchStatus::Complete, post_window).await;
         let mut emitted = Vec::new();
         while let Ok(event) = receiver.try_recv() {
@@ -1287,12 +1301,50 @@ mod tests {
             .count()
     }
 
+    fn caught_up(bytes: &'static [u8]) -> Read {
+        Read::File {
+            size: bytes.len(),
+            start: bytes.len(),
+            bytes: b"",
+        }
+    }
+
     fn whole(bytes: &'static [u8]) -> Read {
         Read::File {
             size: bytes.len(),
             start: 0,
             bytes,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_duration_covers_only_the_window_after_the_steps() {
+        let transport = LogTransport::new(vec![whole(OLD_ERROR), caught_up(OLD_ERROR)]);
+        let (observer, _receiver) = start_observer(&transport).await;
+        tokio::time::sleep(Duration::from_secs(150)).await;
+        let result = observer
+            .finish(WatchStatus::Complete, Duration::from_secs(120))
+            .await;
+
+        assert_eq!(result.status, WatchStatus::Complete);
+        assert!(
+            (120_000..125_000).contains(&result.duration_ms),
+            "duration_ms = {}",
+            result.duration_ms
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn watch_stopped_during_the_steps_has_no_post_deploy_duration() {
+        let transport = LogTransport::new(vec![whole(OLD_ERROR), caught_up(OLD_ERROR)]);
+        let (observer, _receiver) = start_observer(&transport).await;
+        tokio::time::sleep(Duration::from_secs(150)).await;
+        let result = observer
+            .finish(WatchStatus::Partial, Duration::from_secs(120))
+            .await;
+
+        assert_eq!(result.status, WatchStatus::Partial);
+        assert_eq!(result.duration_ms, 0);
     }
 
     #[tokio::test(start_paused = true)]
