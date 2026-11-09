@@ -50,6 +50,16 @@ test("the running row replaces its animation and run timer with the recorded con
   expect(runs.querySelector(".mark-spin")).not.toBeNull();
 });
 
+test("only the run timer is set in mono; the connection gap sentence is interface prose", () => {
+  const current = props(false);
+  const run = fixtures.gapRunInfo;
+  const { rerender } = render(<Sidebar {...current} runs={[run]} now={run.connectionGap!.lostAtMs + 6_000} />);
+  const runs = screen.getByRole("region", { name: "Deploys running" });
+  expect(runs.querySelector(".side-meta")).toBeNull();
+  rerender(<Sidebar {...current} runs={[fixtures.runInfo]} now={fixtures.runInfo.startedAtMs + 6_000} />);
+  expect(runs.querySelector(".side-meta")).toHaveTextContent(/^6s$/);
+});
+
 test("a terminal run is listed only under Deploys running and opens its environment", () => {
   if (fixtures.terminalMap.kind !== "loaded") throw new Error("fixture");
   const current = props(false);
