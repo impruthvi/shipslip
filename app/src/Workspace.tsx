@@ -26,6 +26,8 @@ import type {
 export interface DeployTarget {
   generation: number;
   row: number;
+  /** Finds the row again after a map read moves it. */
+  checkout: string;
   env: string;
   /** The app's name on the map. */
   label: string;

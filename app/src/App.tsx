@@ -19,12 +19,18 @@ import { Workspace, type DeployTarget, type Leave, type Next, type Start } from 
 import { notify } from "./notify";
 import { twinFolder } from "./text";
 import { deploy } from "./deployApi";
-import type { RunInfo } from "./types";
+import type { Loaded, RunInfo } from "./types";
 
 const cellKey = (repoRoot: string, env: string) => `${repoRoot}\n${env}`;
 
 function focusCell(row: number, col: number) {
   document.querySelector<HTMLElement>(`[role="gridcell"][data-row="${row}"][data-col="${col}"]`)?.focus();
+}
+
+/** A map read while the workspace is open moves the target to the newer map. */
+function targetOnMap(target: DeployTarget, loaded: Loaded | null): DeployTarget {
+  const row = loaded?.map.rows.findIndex((r) => r.repoRoot === target.checkout) ?? -1;
+  return loaded && row >= 0 ? { ...target, generation: loaded.generation, row } : target;
 }
 
 export default function App() {
@@ -117,6 +123,7 @@ export default function App() {
     const target = {
       generation: loaded.generation,
       row: selected.row,
+      checkout: row.repoRoot,
       env: selected.env,
       label: row.label,
       folder: map ? twinFolder(map.rows.map((x) => x.label), row.label, row.repoRoot) : null,
@@ -141,6 +148,7 @@ export default function App() {
       target: {
         generation: loaded?.generation ?? 0,
         row: r,
+        checkout: run.checkout,
         env: run.env,
         label: r >= 0 && map ? map.rows[r].label : run.project,
         folder: map ? twinFolder(map.rows.map((x) => x.label), run.project, run.checkout) : null,
@@ -269,7 +277,7 @@ export default function App() {
         )}
         {workspace ? (
           <Workspace
-            target={workspace.target}
+            target={targetOnMap(workspace.target, loaded)}
             start={workspace.start}
             onLeave={onLeave}
             onRunEnded={forget}

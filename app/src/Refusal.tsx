@@ -51,7 +51,7 @@ export function refusalWording(error: CommandError): Wording {
     case "confirmation":
       return { title: "The typed name didn't match" };
     case "stale":
-      return { title: "The map changed" };
+      return { title: "The map changed", body: "Go back and select the environment again." };
     case "notFound":
       return { title: "Nothing to continue" };
     default:
