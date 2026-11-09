@@ -111,11 +111,9 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
                           run.checkout,
                         )} />
                       {" · "}
-                      <span className="side-meta">
-                        {run.connectionGap
-                          ? <ConnectionGap gap={run.connectionGap} now={now} />
-                          : elapsed(now - run.startedAtMs)}
-                      </span>
+                      {run.connectionGap
+                        ? <ConnectionGap gap={run.connectionGap} now={now} />
+                        : <span className="side-meta">{elapsed(now - run.startedAtMs)}</span>}
                     </span>
                   </span>
                 </Item>
