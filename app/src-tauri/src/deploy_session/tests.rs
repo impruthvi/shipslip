@@ -1647,6 +1647,25 @@ fn display_feed() -> Arc<RunFeed> {
 }
 
 #[test]
+fn run_feed_output_drops_colour_codes_and_escapes_other_controls() {
+    let feed = display_feed();
+    feed.record(DeployEvent::Output {
+        index: 1,
+        line: "  - Installing laravel/tinker \x1b[90m.\x1b[39m\x1b[90m.\x1b[39m \x1b[32;1mDONE\x1b[39;22m".into(),
+    });
+    feed.record(DeployEvent::MaintenanceOutput {
+        phase: shipslip::MaintenancePhase::Down,
+        line: "\x1b[37;44m INFO \x1b[39;49m down \x1b]0;x\x07<b>".into(),
+    });
+    let view = serde_json::to_value(feed.snapshot()).unwrap();
+    assert_eq!(
+        view["output"][0]["text"],
+        "  - Installing laravel/tinker .. DONE"
+    );
+    assert_eq!(view["output"][1]["text"], " INFO  down \\x1b]0;x\\x07<b>");
+}
+
+#[test]
 fn event_replay_preserves_step_results_and_untrusted_text_as_display_data() {
     let feed = display_feed();
     feed.record(DeployEvent::StepStarted {

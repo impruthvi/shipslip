@@ -8,7 +8,7 @@ use serde::Serialize;
 use shipslip::interrupt::{next_stage, Stage};
 use shipslip::logs::escape_field;
 use shipslip::observation::CheckSkipReason;
-use shipslip::receipt::{Receipt, ReceiptKind, ReceiptPhase, ReceiptStepStatus};
+use shipslip::receipt::{strip_color, Receipt, ReceiptKind, ReceiptPhase, ReceiptStepStatus};
 use shipslip::{
     ConnectionTarget, DeployEvent, DeployOutcome, LogPhase, MaintenancePhase, SmokeResult,
     StepTimes,
@@ -626,7 +626,7 @@ impl RunFeed {
             history.total_output += 1;
             let line = Arc::new(OutputLine {
                 sequence: history.sequence,
-                text: escape_field(&text),
+                text: escape_field(&strip_color(&text)),
                 source,
             });
             if history.output.len() == OUTPUT_LINES {
