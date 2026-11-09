@@ -507,7 +507,8 @@ mod tests {
         assert_eq!(view.steps.len(), 1);
         assert_eq!(view.steps[0].status, StepStatusView::Failed);
         assert_eq!(view.steps[0].output, ["up failed\\x1b[2J"]);
-        assert_eq!(view.steps[0].command, "php artisan up");
+        assert_eq!(view.steps[0].index, "off");
+        assert_eq!(view.steps[0].command, "Maintenance off: php artisan up");
         assert_eq!(view.steps[0].detail, None);
     }
 

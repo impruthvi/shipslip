@@ -255,11 +255,8 @@ pub fn render(receipt: &ReceiptRecord, details: bool) -> String {
             for step in with_output {
                 let _ = writeln!(
                     out,
-                    "\nStep {} (last {} lines):\n{}",
-                    match step.kind {
-                        StepKind::Step { index } => index,
-                        _ => continue,
-                    },
+                    "\n{} (last {} lines):\n{}",
+                    step_name(step.kind),
                     step.output.len(),
                     fence(&strip_color(
                         &step
@@ -301,14 +298,18 @@ fn row(out: &mut String, label: &str, value: &str) {
     let _ = writeln!(out, "| {label} | {value} |");
 }
 
+fn step_name(kind: StepKind) -> String {
+    match kind {
+        StepKind::Step { index } => format!("Step {index}"),
+        StepKind::MaintenanceDown => "Maintenance on".into(),
+        StepKind::MaintenanceUp => "Maintenance off".into(),
+    }
+}
+
 fn render_connection_gaps(out: &mut String, receipt: &ReceiptRecord, details: bool) {
     let mut heading = false;
     for step in &receipt.steps {
-        let label = match step.kind {
-            StepKind::Step { index } => format!("Step {index}"),
-            StepKind::MaintenanceDown => "Maintenance on".into(),
-            StepKind::MaintenanceUp => "Maintenance off".into(),
-        };
+        let label = step_name(step.kind);
         for gap in &step.connection_gaps {
             if !heading {
                 out.push_str("\n## Connection gaps\n\n");

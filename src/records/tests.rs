@@ -352,7 +352,7 @@ fn rerun_with_maintenance_and_deploy_without_it() {
 }
 
 #[test]
-fn up_runs_have_no_maintenance_up_row() {
+fn an_up_run_has_one_maintenance_up_row_that_keeps_its_output() {
     let mut value = up_json("bbbb0002-0", 2000);
     value["steps"] = json!([{
         "index": 0, "command": "php artisan up", "status": "Failed",
@@ -361,7 +361,7 @@ fn up_runs_have_no_maintenance_up_row() {
     value["maintenance_up_status"] = json!("Failed");
     value["maintenance_up_exit_code"] = json!(7);
     let mut expected = row(
-        json!({"kind": "step", "index": 0}),
+        json!({"kind": "maintenance_up"}),
         "php artisan up",
         "failed",
         json!(7),
