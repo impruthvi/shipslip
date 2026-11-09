@@ -78,7 +78,7 @@ impl App {
             .map_err(|error| match error {
                 SelectionError::Stale => CommandError::new(
                     ErrorCode::Stale,
-                    "The map changed. Refresh it and select the environment again.",
+                    "The map was read again since this was selected.",
                 ),
                 SelectionError::NotFound => CommandError::new(
                     ErrorCode::NotFound,

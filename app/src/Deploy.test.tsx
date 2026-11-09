@@ -719,6 +719,61 @@ test("approving from a refused prepare goes on to that same plan's preview", asy
   expect(confirm).not.toHaveBeenCalled();
 });
 
+test("a map read during the review keeps the approval and goes on to the preview", async () => {
+  const { cell, pending } = await openWorkspace();
+  await act(async () => pending.reject({ code: "untrusted", message: "Review and approve these settings first." }));
+  reviewTrust.mockResolvedValue(fixtures.trustReview);
+  fireEvent.click(screen.getByRole("button", { name: "Review configuration" }));
+  await settle();
+  // A run ends elsewhere: the map is read again and its rows move.
+  if (fixtures.map.kind !== "loaded") throw new Error("fixture");
+  const first = fixtures.map;
+  const rows = [...first.map.rows].reverse();
+  expect(rows.length).toBeGreaterThan(1);
+  loadMap.mockResolvedValue({ ...first, generation: 2, map: { ...first.map, rows } });
+  fireEvent.keyDown(window, { key: "r", metaKey: true });
+  await settle();
+  fireEvent.change(screen.getByLabelText("Type production to approve"), { target: { value: "production" } });
+  approveTrust.mockResolvedValue(undefined);
+  prepare.mockResolvedValue(production);
+  fireEvent.click(screen.getByRole("button", { name: "Approve configuration" }));
+  await settle();
+  const moved = rows.findIndex((r) => r.repoRoot === first.map.rows[cell.row].repoRoot);
+  expect(prepare).toHaveBeenLastCalledWith(2, moved, cell.env, "Deploy", expect.any(Function));
+  expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(`Deploy ${cell.label} → ${cell.env}`);
+  expect(screen.getByRole("button", { name: "Deploy to production" })).toBeDisabled();
+});
+
+test("a map read that drops the checkout leaves the target on the map it was chosen from", async () => {
+  const { cell, pending } = await openWorkspace();
+  await act(async () => pending.reject({ code: "untrusted", message: "Review and approve these settings first." }));
+  reviewTrust.mockResolvedValue(fixtures.trustReview);
+  fireEvent.click(screen.getByRole("button", { name: "Review configuration" }));
+  await settle();
+  if (fixtures.map.kind !== "loaded") throw new Error("fixture");
+  const first = fixtures.map;
+  const rows = first.map.rows.filter((_, i) => i !== cell.row);
+  loadMap.mockResolvedValue({ ...first, generation: 2, map: { ...first.map, rows } });
+  fireEvent.keyDown(window, { key: "r", metaKey: true });
+  await settle();
+  fireEvent.change(screen.getByLabelText("Type production to approve"), { target: { value: "production" } });
+  approveTrust.mockResolvedValue(undefined);
+  prepare.mockRejectedValue({ code: "stale", message: "The map was read again since this was selected." });
+  fireEvent.click(screen.getByRole("button", { name: "Approve configuration" }));
+  await settle();
+  expect(prepare).toHaveBeenLastCalledWith(1, cell.row, cell.env, "Deploy", expect.any(Function));
+  expect(screen.getByRole("heading", { name: "The map changed" })).toBeInTheDocument();
+});
+
+test("a stale refusal says what to do without repeating its heading", async () => {
+  const { pending } = await openWorkspace();
+  await act(async () => pending.reject({ code: "stale", message: "The map was read again since this was selected." }));
+  const main = within(screen.getByRole("main"));
+  expect(main.getByRole("heading", { name: "The map changed" })).toBeInTheDocument();
+  const body = main.getByText("Go back and select the environment again.");
+  expect(body).not.toHaveTextContent("The map changed");
+});
+
 test("a config that changed during the review must be reviewed again; escape goes back", async () => {
   entry.mockResolvedValue(ready({ needsTrust: true }));
   reviewTrust.mockResolvedValue(fixtures.trustReview);
