@@ -6,6 +6,101 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-12
+
+### Added
+
+- Connection gaps are recorded. When the connection drops while Shipslip is
+  watching a step, maintenance or the log watch, the receipt lists when this
+  Mac last heard from the server and when it re-attached. A step that ended
+  during a gap has no end time or duration, only the time this Mac saw its
+  result. `slip` prints a line when the connection is lost and when it
+  re-attaches. The desktop app shows the gap in amber on the run screen and
+  the "Deploys running" sidebar row, and lists gaps in the receipt. Raw ssh
+  error text stays out of receipt warnings.
+- Receipts record why this Mac stopped watching a run that is still open:
+  detached, app closed or connection lost. The desktop app's reopened panel
+  says that cause, or only that the run did not finish when nothing was
+  recorded. Receipt JSON rows gain the optional `unfinished_cause` field.
+- A bring-up (`slip up` and the app's "bring the app up") makes the
+  configured smoke check after `php artisan up` succeeds. A newer smoke
+  result replaces an older one on the release map for the same target.
+- Desktop app: the run screen leads with the outcome as soon as it is known.
+  A failed step's number, exit code and command show in red at once, with
+  its output expanded; a failed or stopped run stays on its outcome until
+  the receipt is opened. A stop request is acknowledged on the disabled
+  button.
+- Desktop app: the deploy lock screen tells another run that is deploying
+  (holder, short target SHA, heartbeat age, Check again) apart from a stale
+  lock, and only offers the break-lock command for a stale lock.
+- Desktop app: the attach review names the command that was running (to be
+  watched, never run again) apart from the steps after it. The attached run
+  screen shows maintenance and earlier steps with their recorded status and
+  times.
+- Desktop app: the bring-up review lists the recipe steps the run never
+  sent and offers that run's run-from-step instead.
+- Desktop app: the release map re-reads receipts when the local receipt
+  directories change, and shows runs that a `slip` command on this Mac is
+  driving, with Deploy and Attach unavailable while they run. The footer
+  shows when receipts were last read.
+- Desktop app: one typed confirmation for production deploys, configuration
+  approval and recovery: exact, case-sensitive match, with a hint when the
+  text does not match. Approving settings from the deploy flow continues to
+  the review instead of returning to the map.
+- Step 0 has one label everywhere, with the exact command as detail. A
+  run-from-step shows its step range ("steps 4–5 only") on the release map
+  and the receipt header.
+- Library: `DeployEvent::ConnectionLost`, `Reattached`, `ChecksSkipped` and
+  `OutcomeKnown`, with `ConnectionTarget`; `ExecutionHandle::closing_hard()`;
+  `step_zero_label()` and `step_zero_command()`; `CheckSkipReason`,
+  `UnfinishedCause` and `ConnectionGap` on receipts and records;
+  `ReceiptJournal::is_claimed()` and `connection_event()`;
+  `records::env_order()` and `describe_steps_run()`;
+  `ErrorGroup::normalized_message`.
+
+### Changed
+
+- A run that leaves the app in maintenance mode skips the smoke check and
+  the log watch, says why, and releases its deploy lock at once. Receipts
+  store the optional `checks_skip_reason` without changing their version. A
+  run that has not finished records no check results.
+- Each log watch result has its own wording and flag. Receipt JSON
+  `receipt.flag.kind` replaces `log_not_fully_observed` with
+  `log_watch_interrupted` and `log_unreadable` (attention) and
+  `no_log_file_yet`, `log_watch_stopped_early` and
+  `log_watch_skipped_in_maintenance` (information).
+- The release map and `slip status` list production first, staging second,
+  then the other environments by name. With a compare active, the map
+  scrolls the compared columns into view.
+- Desktop app: success is shown in ink on the receipt slip, and "Quit now"
+  is no longer red.
+- Library: `StepTimes` gains `result_seen_at_ms`; receipt steps gain
+  `result_seen_at_ms` and `connection_gaps`. `Flag::LogNotFullyObserved` is
+  replaced by one variant per log watch result.
+  `ReceiptJournal::observation()` takes optional watch and smoke results
+  and a skip reason.
+
+### Fixed
+
+- The log watch recovers after an SSH interruption: reconnect waits are
+  bounded at 15 seconds, and a watch that recovers every line from its saved
+  position stays complete. Only observation is retried; steps are never run
+  again.
+- Errors with no exception class and no app file are grouped by their
+  message, so several unrelated errors no longer count as one group. The
+  Markdown receipt shows each group's message with `--details`.
+- A log watch that starts after re-attach is no longer marked partial or
+  given restart warnings.
+- The receipt's log watch time is measured from the end of the steps, not
+  from the start of the run.
+- A bring-up receipt's row is labelled "Maintenance off" instead of step 0.
+- Desktop app: colour codes are stripped from step output while a run is
+  going, and the count of dropped output lines includes lines dropped
+  between batches.
+- Desktop app: approving configuration is no longer refused with "The map
+  changed" when the map refreshes in the background.
+- Desktop app: UI text says "environment" instead of "env".
+
 ## [0.12.0] - 2026-11-01
 
 ### Added
@@ -615,6 +710,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.13.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.13.0
 [0.12.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.12.0
 [0.11.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.11.0
 [0.10.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.10.0
