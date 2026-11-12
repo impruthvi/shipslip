@@ -10,6 +10,7 @@ function summary(problems: ProblemView[]): string {
   if (receipts) parts.push(receipts === 1 ? "1 receipt" : `${receipts} receipts`);
   if (dirs) parts.push(dirs === 1 ? "1 project folder" : `${dirs} project folders`);
   if (count("trust")) parts.push("the approvals file");
+  if (count("projects")) parts.push("the projects list");
   const what = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts.at(-1)}` : parts[0];
   return `${what} could not be read`;
 }

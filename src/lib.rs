@@ -24,6 +24,7 @@ mod marker;
 pub mod observation;
 mod preflight;
 mod private_file;
+pub mod projects;
 pub mod publish;
 pub mod read_only;
 pub mod receipt;

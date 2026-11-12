@@ -12,6 +12,7 @@ use shipslip::records::status;
 use tauri::async_runtime::spawn_blocking;
 use tauri::Manager;
 
+use crate::add_project::{self, FolderView};
 use crate::deploy_session::{
     CommandError, CurrentRuns, DeployEntry, DeployReview, Ending, ErrorCode, LiveRuns, OpenSsh,
     PrepareProgress, QuitRun, RecoveryReview, RunBatch, RunInfo, RunStop, Sessions, TrustReview,
@@ -45,6 +46,8 @@ pub struct App {
     git: Option<Git>,
     sessions: Option<Arc<Sessions<OpenSsh>>>,
     unseen: Unseen,
+    /// The folder last picked in the Add project sheet; only it can be added.
+    picked: Mutex<Option<PathBuf>>,
 }
 
 impl App {
@@ -71,6 +74,7 @@ impl App {
             paths,
             git,
             unseen: Unseen::default(),
+            picked: Mutex::new(None),
         }
     }
 
@@ -168,6 +172,40 @@ impl App {
         self.state.load_receipt(generation, id)
     }
 
+    fn trust_path(&self) -> Result<&Path, CommandError> {
+        self.paths
+            .as_ref()
+            .map(|(_, trust)| trust.as_path())
+            .map_err(|reason| CommandError::new(ErrorCode::Local, reason.as_str()))
+    }
+
+    /// Reads a folder picked in the Add project sheet and keeps it for
+    /// [`Self::add_picked`]. `None` is a panel closed without a pick, which
+    /// keeps the folder picked before, as the sheet does.
+    fn inspect_picked(&self, folder: Option<PathBuf>) -> Result<FolderView, CommandError> {
+        let trust = self.trust_path()?;
+        let Some(folder) = folder else {
+            return Ok(FolderView::Cancelled);
+        };
+        let view = add_project::inspect(&folder, trust);
+        *self.picked.lock().unwrap_or_else(PoisonError::into_inner) = Some(folder);
+        Ok(view)
+    }
+
+    fn add_picked(&self) -> Result<String, CommandError> {
+        let trust = self.trust_path()?;
+        let picked = self
+            .picked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        let folder = picked.ok_or_else(|| {
+            CommandError::new(ErrorCode::NotFound, "Choose the project's folder first.")
+        })?;
+        add_project::add(&folder, trust, now_ms())
+            .map_err(|message| CommandError::new(ErrorCode::Local, message))
+    }
+
     fn checkout_receipts(&self, generation: u64, row: usize) -> Result<CheckoutReceipts, String> {
         let (root, _) = self.paths.as_ref().map_err(Clone::clone)?;
         Ok(self
@@ -213,6 +251,37 @@ pub async fn checkout_receipts(
     row: usize,
 ) -> Result<CheckoutReceipts, String> {
     off_thread(&app, move |app| app.checkout_receipts(generation, row)).await?
+}
+
+/// Opens the macOS folder panel and reads the folder picked.
+#[tauri::command]
+pub async fn pick_folder(
+    app: tauri::State<'_, Arc<App>>,
+    handle: tauri::AppHandle,
+) -> Result<FolderView, CommandError> {
+    use tauri_plugin_dialog::DialogExt;
+    let app = Arc::clone(&app);
+    spawn_blocking(move || {
+        let picked = handle
+            .dialog()
+            .file()
+            .set_title("Choose the project's folder")
+            .blocking_pick_folder()
+            .and_then(|path| path.into_path().ok());
+        app.inspect_picked(picked)
+    })
+    .await
+    .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
+}
+
+/// Adds the picked folder's checkout to the projects list. Returns the
+/// checkout's path as the map spells it.
+#[tauri::command]
+pub async fn add_checkout(app: tauri::State<'_, Arc<App>>) -> Result<String, CommandError> {
+    let app = Arc::clone(&app);
+    spawn_blocking(move || app.add_picked())
+        .await
+        .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
 }
 
 /// Shows the checkout's folder in Finder.
@@ -434,6 +503,48 @@ mod tests {
     fn checkout_receipts_need_the_receipts_folder() {
         let app = App::new(Err("no home folder".into()), None);
         assert_eq!(app.checkout_receipts(1, 0).unwrap_err(), "no home folder");
+    }
+
+    #[test]
+    fn only_the_folder_picked_last_is_added_and_a_closed_panel_keeps_it() {
+        let fx = Fixture::new();
+        let app = app(&fx, None);
+        let error = app.add_picked().unwrap_err();
+        assert_eq!(error.message, "Choose the project's folder first.");
+
+        let crm = fx.checkout(
+            "crm",
+            "[project]\nname = \"crm\"\nstack = \"laravel\"\n\
+             [env.staging]\nssh = \"web1\"\npath = \"/srv/crm\"\nbranch = \"main\"\nproduction = false\n",
+        );
+        assert!(matches!(
+            app.inspect_picked(Some(crm.clone())).unwrap(),
+            FolderView::Config { .. }
+        ));
+        assert!(matches!(
+            app.inspect_picked(None).unwrap(),
+            FolderView::Cancelled
+        ));
+        assert_eq!(app.add_picked().unwrap(), crm.to_string_lossy());
+
+        let loose = fx.dir().join("loose");
+        std::fs::create_dir_all(&loose).unwrap();
+        app.inspect_picked(Some(loose)).unwrap();
+        assert!(app
+            .add_picked()
+            .unwrap_err()
+            .message
+            .contains("not inside a git repository"));
+    }
+
+    #[test]
+    fn add_project_needs_app_storage() {
+        let app = App::new(Err("no home folder".into()), None);
+        assert_eq!(
+            app.inspect_picked(None).unwrap_err().message,
+            "no home folder"
+        );
+        assert_eq!(app.add_picked().unwrap_err().message, "no home folder");
     }
 
     #[test]

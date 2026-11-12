@@ -8,6 +8,7 @@ import type {
   CompareResult,
   DeployEntry,
   DeployReview,
+  FolderView,
   LiveRuns,
   LoadResult,
   PrepareProgress,
@@ -687,6 +688,121 @@ export const approvalMap: LoadResult = {
       }
     ],
     "problems": []
+  }
+};
+
+export const addedMap: LoadResult = {
+  "kind": "loaded",
+  "generation": 1,
+  "map": {
+    "screen": "map",
+    "envs": [
+      "production",
+      "staging"
+    ],
+    "rows": [
+      {
+        "label": "crm",
+        "repoRoot": "/Users/you/code/crm",
+        "pathMissing": false,
+        "needsApproval": true,
+        "cells": [
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "noCode",
+            "sha": null,
+            "shortSha": null,
+            "atMs": null,
+            "age": null,
+            "qualifiers": [],
+            "words": "no deploy receipt on this Mac",
+            "evidence": [],
+            "outcome": null,
+            "stepsRun": null,
+            "flags": [],
+            "target": null,
+            "approved": false,
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": null,
+            "staleReceipt": null,
+            "lastAttempt": null
+          },
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "noCode",
+            "sha": null,
+            "shortSha": null,
+            "atMs": null,
+            "age": null,
+            "qualifiers": [],
+            "words": "no deploy receipt on this Mac",
+            "evidence": [
+              "approved before"
+            ],
+            "outcome": null,
+            "stepsRun": null,
+            "flags": [],
+            "target": "staging1:/var/www/crm",
+            "approved": true,
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": null,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      }
+    ],
+    "problems": []
+  }
+};
+
+export const folders: Record<string, FolderView> = {
+  "cancelled": {
+    "kind": "cancelled"
+  },
+  "config": {
+    "kind": "config",
+    "checkout": "/Users/you/code/crm",
+    "project": "crm",
+    "envs": [
+      {
+        "name": "production",
+        "target": "production1:/var/www/crm",
+        "branch": "main",
+        "production": true,
+        "approved": false
+      },
+      {
+        "name": "staging",
+        "target": "staging1:/var/www/crm",
+        "branch": "main",
+        "production": false,
+        "approved": true
+      }
+    ]
+  },
+  "noConfig": {
+    "kind": "noConfig",
+    "checkout": "/Users/you/code/api"
+  },
+  "notGit": {
+    "kind": "notGit",
+    "folder": "/Users/you/Downloads"
+  },
+  "unreadable": {
+    "kind": "unreadable",
+    "checkout": "/Users/you/code/billing",
+    "message": [
+      "invalid `/Users/you/code/billing/.shipslip.toml`: TOML parse error at line 1, column 1",
+      "  |",
+      "1 | [project]",
+      "  | ^^^^^^^^^",
+      "missing field `stack`"
+    ]
   }
 };
 

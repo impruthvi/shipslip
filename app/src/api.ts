@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import type { CheckoutReceipts, CompareResult, LoadResult, QuitRun, ReceiptResult } from "./types";
+import type { CheckoutReceipts, CompareResult, FolderView, LoadResult, QuitRun, ReceiptResult } from "./types";
 
 export interface Backend {
   loadMap(): Promise<LoadResult>;
@@ -19,6 +19,11 @@ export interface Backend {
   /** The pane shows this run's receipt. Rust counts it as seen only while
    * the window is focused, which clears the run's Dock badge. */
   receiptSeen(runId: string): Promise<void>;
+  /** Opens the macOS folder panel and reads the folder picked. */
+  pickFolder(): Promise<FolderView>;
+  /** Adds the picked folder's checkout to the projects list; resolves to its
+   * path as the map spells it. Rejects with a `CommandError`. */
+  addCheckout(): Promise<string>;
 }
 
 const tauri: Backend = {
@@ -33,6 +38,8 @@ const tauri: Backend = {
       if (focused) handler();
     }),
   receiptSeen: (runId) => invoke("receipt_seen", { runId }),
+  pickFolder: () => invoke<FolderView>("pick_folder"),
+  addCheckout: () => invoke<string>("add_checkout"),
 };
 
 let backend: Promise<Backend> | undefined;
@@ -57,6 +64,8 @@ export const api: Backend = {
   copyText: async (text) => (await getBackend()).copyText(text),
   onFocus: async (handler) => (await getBackend()).onFocus(handler),
   receiptSeen: async (runId) => (await getBackend()).receiptSeen(runId),
+  pickFolder: async () => (await getBackend()).pickFolder(),
+  addCheckout: async () => (await getBackend()).addCheckout(),
 };
 
 /** Quitting while a run is live. Separate from `Backend` so screens need not mock it. */

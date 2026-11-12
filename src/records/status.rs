@@ -198,6 +198,8 @@ pub struct Problem {
 #[serde(rename_all = "snake_case")]
 pub enum ProblemKind {
     Trust,
+    /// The list of checkouts added in the app.
+    Projects,
     ProjectDir,
     Receipt,
 }

@@ -204,7 +204,7 @@ including `anchor.plan`, `server_marker_outcome`, and `check.reason`.
   "status.code.reason.kind": ["step_zero", "no_step_zero", "unreadable"],
   "status.code.reason.status": ["Pending", "Running", "Ok", "Failed", "Unknown", "NotStarted", "Skipped"],
   "status.stale_hint.kind": ["newest_unreadable", "unattributed_newer"],
-  "status.problem.kind": ["trust", "project_dir", "receipt"]
+  "status.problem.kind": ["trust", "projects", "project_dir", "receipt"]
 }
 ```
 

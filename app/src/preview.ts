@@ -2,7 +2,8 @@
 // src/fixtures.gen.ts. `?screen=firstRun|noneReadable|failed` picks the
 // first load; `?slow=ms` delays every answer. `?deploy=failed` ends a
 // deploy at its failed step instead of succeeding; `?recovery=failed` shows
-// the recovery actions a failed run leaves.
+// the recovery actions a failed run leaves; `?folder=` picks what Add
+// project's folder panel returns.
 
 import type { Backend } from "./api";
 import type { DeployBackend } from "./deployApi";
@@ -43,6 +44,9 @@ export const backend: Backend = {
     return () => window.removeEventListener("focus", handler);
   },
   receiptSeen: async () => {},
+  // `?folder=notGit|noConfig|unreadable` picks what the folder panel returns.
+  pickFolder: () => later(fixtures.folders[params.get("folder") ?? "config"] ?? fixtures.folders.config),
+  addCheckout: () => later("/Users/you/code/crm"),
 };
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

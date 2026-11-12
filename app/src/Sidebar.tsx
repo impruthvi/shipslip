@@ -32,6 +32,9 @@ interface Props {
   current: string | null;
   onAllProjects: () => void;
   onCheckout: (repoRoot: string) => void;
+  onAddProject: () => void;
+  /** Focus comes back here when the Add project sheet closes. */
+  addButton?: Ref<HTMLButtonElement>;
 }
 
 /** Which checkout a same-named app is, kept whole so it never breaks mid-name. */
@@ -105,6 +108,8 @@ export function Sidebar({
   current,
   onAllProjects,
   onCheckout,
+  onAddProject,
+  addButton,
 }: Props) {
   const [allAttention, setAllAttention] = useState(false);
   const map = state.phase === "shown" && state.loaded.map.screen !== "firstRun" ? state.loaded.map : null;
@@ -136,8 +141,7 @@ export function Sidebar({
     <nav className="sidebar" aria-label="Sidebar">
       <div className="titlebar-drag" data-tauri-drag-region />
       <div className="side-top">
-        {/* Opens the setup sheet once Add project lands. */}
-        <button type="button" className="button side-add" disabled>
+        <button type="button" className="button side-add" ref={addButton} disabled={busy} onClick={onAddProject}>
           Add project
         </button>
         <Item busy={busy} className="side-all" current={current === null} onClick={onAllProjects}>

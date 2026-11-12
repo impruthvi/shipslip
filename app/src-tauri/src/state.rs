@@ -426,8 +426,9 @@ impl From<Overview> for MapRead {
 }
 
 /// Adds each checkout's configured environments that have no cell yet, as
-/// never deployed, so "Review deploy…" can reach them, and notes the checkouts
-/// that need approval. A config that can't be read adds nothing and is not
+/// never deployed, so "Review deploy…" can reach them, names checkouts no
+/// receipt names after their config's project, and notes the checkouts that
+/// need approval. A config that can't be read adds nothing and is not
 /// judged; the environment's entry explains why when there is a cell.
 pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRead {
     let mut needs_approval = BTreeSet::new();
@@ -437,6 +438,10 @@ pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRe
         };
         if config.repo_root() != Path::new(repo.repo_root.raw()) {
             continue;
+        }
+        // Known only from the projects list or approvals: no receipt names it.
+        if repo.project.is_none() {
+            repo.label = config.project_name().into();
         }
         for env in config.environment_names() {
             if repo.envs.iter().any(|cell| cell.env.raw() == env) {
@@ -460,6 +465,11 @@ pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRe
             needs_approval.insert(repo.repo_root.raw().to_string());
         }
     }
+    overview.repos.sort_by(|a, b| {
+        a.label
+            .cmp(&b.label)
+            .then_with(|| a.repo_root.cmp(&b.repo_root))
+    });
     MapRead {
         overview,
         needs_approval,
@@ -598,6 +608,28 @@ mod tests {
         let root = fx.checkout("shop", TWO_ENVS);
         fx.approve_at(&root.to_string_lossy(), "staging", "web2", "/srv/app");
         assert!(needs_approval(&fx));
+    }
+
+    #[test]
+    fn a_checkout_added_in_the_app_shows_its_config_and_needs_approval() {
+        let fx = Fixture::new();
+        let root = fx.checkout("shop-checkout", TWO_ENVS);
+        crate::add_project::add(&root, &fx.trust(), NOW).unwrap();
+        assert!(needs_approval(&fx));
+
+        let shown =
+            with_checkout_configs(overview(&fx.receipts(), &fx.trust()).unwrap(), &fx.trust())
+                .overview;
+        let [repo] = shown.repos.as_slice() else {
+            panic!("{:?}", shown.repos);
+        };
+        assert_eq!(
+            repo.label.raw(),
+            "app",
+            "named by its config, not its folder"
+        );
+        let envs: Vec<_> = repo.envs.iter().map(|c| c.env.raw()).collect();
+        assert_eq!(envs, ["production", "staging"]);
     }
 
     #[test]

@@ -582,6 +582,7 @@ fn serialized_fixed_values_match_the_json_reference() {
         "status.problem.kind",
         every!(ProblemKind {
             Trust,
+            Projects,
             ProjectDir,
             Receipt
         }),

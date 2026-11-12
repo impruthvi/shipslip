@@ -1305,3 +1305,55 @@ fn environments_run_production_then_staging_then_by_name() {
         .collect();
     assert_eq!(envs, ["production", "staging", "demo", "qa", "zeta"]);
 }
+
+#[test]
+fn a_listed_checkout_without_receipts_is_a_row_with_no_cells() {
+    let fixture = Fixture::new();
+    let shop = fixture.0.join("shop");
+    fs::create_dir_all(shop.join(".git")).unwrap();
+    let shop = fs::canonicalize(shop).unwrap();
+    crate::projects::add(&crate::projects::path_beside(&fixture.trust()), &shop, 1).unwrap();
+
+    let overview = fixture.overview();
+    assert!(overview.problems.is_empty(), "{:?}", overview.problems);
+    let [row] = overview.repos.as_slice() else {
+        panic!("{:?}", overview.repos);
+    };
+    assert_eq!(row.repo_root.raw(), shop.to_string_lossy());
+    assert_eq!(row.label.raw(), "shop");
+    assert_eq!(row.project, None);
+    assert!(!row.path_missing);
+    assert!(row.envs.is_empty());
+}
+
+#[test]
+fn a_listed_checkout_with_receipts_is_one_row() {
+    let fixture = Fixture::new();
+    fixture.save(&run(1, "staging"));
+    let list = crate::projects::path_beside(&fixture.trust());
+    fs::write(
+        &list,
+        r#"{"version":1,"checkouts":[{"path":"/work/app","added_at_ms":1}]}"#,
+    )
+    .unwrap();
+
+    let overview = fixture.overview();
+    assert_eq!(overview.repos.len(), 1, "{:?}", overview.repos);
+    assert_eq!(overview.repos[0].envs.len(), 1);
+}
+
+#[test]
+fn an_unreadable_projects_list_is_a_problem() {
+    let fixture = Fixture::new();
+    fixture.save(&run(1, "staging"));
+    fs::write(
+        crate::projects::path_beside(&fixture.trust()),
+        b"{ not json",
+    )
+    .unwrap();
+
+    let overview = fixture.overview();
+    assert_eq!(overview.repos.len(), 1);
+    let kinds: Vec<ProblemKind> = overview.problems.iter().map(|p| p.kind).collect();
+    assert_eq!(kinds, [ProblemKind::Projects]);
+}

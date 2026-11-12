@@ -683,27 +683,18 @@ button.side-item:hover {
 .first-run {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: var(--space-12);
+  max-width: 480px;
   padding-top: var(--space-8);
+  line-height: var(--leading-body);
 }
 
 .first-run-title {
+  margin: 0;
   font-size: 15px;
   line-height: var(--leading-body);
   font-weight: var(--font-weight-medium);
-}
-
-.first-run-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 0;
-  list-style: none;
-  line-height: var(--leading-body);
-}
-
-.first-run-steps .muted {
-  margin-right: var(--space-8);
 }
 
 .grid-scroll {
@@ -2293,4 +2284,184 @@ button.side-item:hover {
 .tab[aria-selected="true"] {
   border-bottom-color: var(--color-text);
   color: var(--color-text);
+}
+
+/* Add project: a sheet over the app with a step rail. */
+
+.sheet-backdrop {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-24);
+  background: color-mix(in srgb, var(--color-text) 24%, transparent);
+}
+
+.sheet {
+  display: flex;
+  width: min(880px, 100%);
+  height: min(600px, 100%);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  overflow: hidden;
+  font-size: var(--text-13);
+  line-height: var(--leading-body);
+}
+
+.sheet-rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  flex: 0 0 200px;
+  padding: var(--space-24) var(--space-16);
+  border-right: 1px solid var(--color-rule);
+  background: var(--color-surface-alt);
+}
+
+.sheet-title {
+  margin: 0;
+  font-size: var(--text-16);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-tight);
+}
+
+.sheet-path {
+  font-size: var(--text-12);
+  overflow-wrap: anywhere;
+}
+
+.sheet-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: var(--space-8);
+  padding: 0;
+  list-style: none;
+}
+
+.sheet-step {
+  display: flex;
+  align-items: center;
+  gap: var(--space-8);
+  width: 100%;
+  padding: 6px var(--space-8);
+  border-radius: var(--radius-sm);
+  text-align: left;
+}
+
+.sheet-step[aria-current="step"] {
+  background: var(--color-selection);
+  font-weight: var(--font-weight-medium);
+}
+
+button.sheet-step:hover {
+  background: var(--color-hatch);
+}
+
+.sheet-step-icon {
+  display: inline-flex;
+  justify-content: center;
+  width: 16px;
+  font-size: var(--text-12);
+}
+
+.sheet-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.sheet-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-12);
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-24);
+}
+
+.sheet-heading {
+  margin: 0;
+  font-size: var(--text-14);
+  font-weight: var(--font-weight-semibold);
+}
+
+.sheet-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.sheet-section > h3 {
+  margin: 0;
+}
+
+.sheet-envs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--color-rule);
+}
+
+.sheet-env {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-12);
+  padding: var(--space-8) 0;
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.sheet-env-name {
+  flex: 0 0 120px;
+  overflow-wrap: anywhere;
+}
+
+.sheet-env-target {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A folder Shipslip can't add: attention, never red. */
+.sheet-refusal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-12);
+  border: 1px solid var(--color-status-attention);
+  border-radius: var(--radius-sm);
+  background: var(--color-status-attention-soft);
+  overflow-wrap: anywhere;
+}
+
+p.sheet-refusal {
+  display: block;
+}
+
+.sheet-detail {
+  margin: 0;
+  font-size: var(--text-12);
+  white-space: pre-wrap;
+}
+
+.sheet-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  min-height: 64px;
+  padding: var(--space-12) var(--space-24);
+  border-top: 1px solid var(--color-rule);
+  flex-shrink: 0;
+}
+
+.sheet-footer-end {
+  display: flex;
+  align-items: center;
+  gap: var(--space-12);
+  margin-left: auto;
 }
