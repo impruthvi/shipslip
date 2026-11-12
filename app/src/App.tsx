@@ -53,6 +53,7 @@ export default function App() {
   const [focusEntry, setFocusEntry] = useState<"entry" | "runs" | null>(null);
   const entryButton = useRef<HTMLButtonElement>(null);
   const runsButton = useRef<HTMLButtonElement>(null);
+  const heading = useRef<HTMLHeadingElement>(null);
   /** Asks for the deploy entry again after approvals and runs. */
   const [entryVersion, setEntryVersion] = useState(0);
   const [approved, setApproved] = useState<{ key: string; env: string } | null>(null);
@@ -250,12 +251,13 @@ export default function App() {
         runsButton={runsButton}
         onProblem={onProblem}
         live={liveLines}
+        onAllProjects={() => heading.current?.focus()}
       />
       <main className="main">
         {!workspace && (
           <header className="toolbar" data-tauri-drag-region>
-            <h1 className="toolbar-title" data-tauri-drag-region>
-              Release map
+            <h1 className="toolbar-title" ref={heading} tabIndex={-1} data-tauri-drag-region>
+              All projects
             </h1>
             <p className="toolbar-subtitle muted" data-tauri-drag-region>
               What this Mac recorded for each app and environment

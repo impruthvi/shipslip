@@ -15,6 +15,8 @@ export interface RowView {
   label: string;
   repoRoot: string;
   pathMissing: boolean;
+  /** Its `.shipslip.toml` has an environment without a current approval. */
+  needsApproval: boolean;
   cells: CellView[];
 }
 

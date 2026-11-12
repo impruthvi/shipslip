@@ -220,7 +220,12 @@ fn from_step_cell() -> Value {
     let partial = from_step(&mut b, 5);
     b.save(&partial);
     let overview = overview(&fx.receipts(), &fx.trust()).unwrap();
-    let view = crate::view::map(&overview, NOW, &mut crate::view::Locators::default());
+    let view = crate::view::map(
+        &overview,
+        &Default::default(),
+        NOW,
+        &mut crate::view::Locators::default(),
+    );
     serde_json::to_value(&view.rows[0].cells[0]).unwrap()
 }
 
@@ -260,7 +265,12 @@ fn smoke_cells() -> BTreeMap<&'static str, Value> {
         up["smoke"] = smoke;
         b.save(&up);
         let overview = overview(&fx.receipts(), &fx.trust()).unwrap();
-        let view = crate::view::map(&overview, NOW, &mut crate::view::Locators::default());
+        let view = crate::view::map(
+            &overview,
+            &Default::default(),
+            NOW,
+            &mut crate::view::Locators::default(),
+        );
         cells.insert(name, serde_json::to_value(&view.rows[0].cells[0]).unwrap());
     }
     cells
@@ -271,6 +281,7 @@ struct Fixtures {
     terminal_map: LoadResult,
     map: LoadResult,
     wide_map: LoadResult,
+    approval_map: LoadResult,
     watch_results: LoadResult,
     compares: BTreeMap<String, Value>,
     receipts: BTreeMap<String, ReceiptResult>,
@@ -336,7 +347,7 @@ fn build() -> (Fixtures, Vec<String>) {
     let none_readable =
         AppState::default().load_map(|| NOW, || overview(&broken.receipts(), &broken.trust()));
     let unreadable_root = || {
-        Err(ReceiptError::Invalid(format!(
+        Err::<shipslip::records::Status, _>(ReceiptError::Invalid(format!(
             "receipts root `{HOME}/Library/Application Support/Shipslip/receipts`: Permission denied (os error 13)"
         )).into())
     };
@@ -441,7 +452,53 @@ fn build() -> (Fixtures, Vec<String>) {
     let wide_map =
         AppState::default().load_map(|| NOW, || overview(&wide_fx.receipts(), &wide_fx.trust()));
 
+    // shop: both environments approved as configured. docs: approved for
+    // an older path, so its config changed since.
+    let approval_fx = Fixture::new();
+    let mut b = Builder {
+        fx: &approval_fx,
+        next: 500,
+    };
+    let config = |name: &str| {
+        format!(
+            "[project]\nname = \"{name}\"\nstack = \"laravel\"\n\
+             [env.production]\nssh = \"production1\"\npath = \"/var/www/{name}\"\nbranch = \"main\"\nproduction = true\n\
+             [env.staging]\nssh = \"staging1\"\npath = \"/var/www/{name}\"\nbranch = \"main\"\nproduction = false\n"
+        )
+    };
+    for (app, approve) in [("shop", true), ("docs", false)] {
+        let root = approval_fx.checkout(app, &config(app));
+        for env in ["staging", "production"] {
+            let mut deploy = b.deploy(app, env, 30, &sha('a'));
+            deploy["repo_root"] = json!(root.to_string_lossy());
+            b.save(&deploy);
+            if approve {
+                approval_fx.approve_config(&root, env);
+            } else {
+                approval_fx.approve_at(
+                    &root.to_string_lossy(),
+                    env,
+                    &format!("{env}1"),
+                    "/var/www/old",
+                );
+            }
+        }
+    }
+    let approval_trust = approval_fx.trust();
+    let approval_map = AppState::default().load_map(
+        || NOW,
+        || {
+            Ok(crate::state::with_checkout_configs(
+                overview(&approval_fx.receipts(), &approval_trust)?,
+                &approval_trust,
+            ))
+        },
+    );
+
+    let approval_home = fs::canonicalize(approval_fx.dir()).unwrap();
     let homes = [
+        approval_home.as_path(),
+        approval_fx.dir(),
         fx.dir(),
         empty.dir(),
         broken.dir(),
@@ -456,6 +513,7 @@ fn build() -> (Fixtures, Vec<String>) {
             terminal_map,
             map,
             wide_map,
+            approval_map,
             watch_results,
             compares,
             receipts,
@@ -491,6 +549,12 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
     };
     item(&mut out, "map", "LoadResult", &fixtures.map);
     item(&mut out, "wideMap", "LoadResult", &fixtures.wide_map);
+    item(
+        &mut out,
+        "approvalMap",
+        "LoadResult",
+        &fixtures.approval_map,
+    );
     item(
         &mut out,
         "terminalMap",

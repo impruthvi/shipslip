@@ -232,3 +232,16 @@ test("launch selects the first cell that needs attention; clicks and problems se
   expect(selected()[0]).toHaveAccessibleName(/^blog, production/);
   expect(absent).not.toHaveAttribute("aria-selected");
 });
+
+test("the app opens on All projects, and choosing it again moves focus to its heading", async () => {
+  loadMap.mockResolvedValue(fixtures.map);
+  render(<App />);
+  await settle();
+  const all = screen.getByRole("button", { name: "All projects" });
+  expect(all).toHaveAttribute("aria-current", "page");
+  expect(screen.getByRole("grid", { name: "Release map" })).toBeInTheDocument();
+  const heading = screen.getByRole("heading", { level: 1, name: "All projects" });
+  expect(heading).not.toHaveFocus();
+  fireEvent.click(all);
+  expect(heading).toHaveFocus();
+});

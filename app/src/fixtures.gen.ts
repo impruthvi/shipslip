@@ -34,6 +34,7 @@ export const map: LoadResult = {
         "label": "api",
         "repoRoot": "/Users/you/code/api",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
@@ -113,6 +114,7 @@ export const map: LoadResult = {
         "label": "billing",
         "repoRoot": "/Users/you/code/billing",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
@@ -174,6 +176,7 @@ export const map: LoadResult = {
         "label": "blog",
         "repoRoot": "/Users/you/code/blog",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
@@ -232,6 +235,7 @@ export const map: LoadResult = {
         "label": "shop",
         "repoRoot": "/Users/you/tmp/shop-copy",
         "pathMissing": true,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "absent"
@@ -269,6 +273,7 @@ export const map: LoadResult = {
         "label": "shop",
         "repoRoot": "/Users/you/code/shop",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
@@ -375,6 +380,7 @@ export const wideMap: LoadResult = {
         "label": "shop",
         "repoRoot": "/Users/you/code/shop",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
@@ -533,6 +539,137 @@ export const wideMap: LoadResult = {
   }
 };
 
+export const approvalMap: LoadResult = {
+  "kind": "loaded",
+  "generation": 1,
+  "map": {
+    "screen": "map",
+    "envs": [
+      "production",
+      "staging"
+    ],
+    "rows": [
+      {
+        "label": "docs",
+        "repoRoot": "/Users/you/code/docs",
+        "pathMissing": false,
+        "needsApproval": true,
+        "cells": [
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791793295000,
+            "age": "28m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "stepsRun": null,
+            "flags": [],
+            "target": "production1:/var/www/docs",
+            "targetMoved": "approved config now deploys to production1:/var/www/old, not this target",
+            "needsAttention": true,
+            "receipt": 0,
+            "staleReceipt": null,
+            "lastAttempt": null
+          },
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791793295000,
+            "age": "28m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "stepsRun": null,
+            "flags": [],
+            "target": "staging1:/var/www/docs",
+            "targetMoved": "approved config now deploys to staging1:/var/www/old, not this target",
+            "needsAttention": true,
+            "receipt": 1,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      },
+      {
+        "label": "shop",
+        "repoRoot": "/Users/you/code/shop",
+        "pathMissing": false,
+        "needsApproval": false,
+        "cells": [
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791793295000,
+            "age": "28m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "stepsRun": null,
+            "flags": [],
+            "target": "production1:/var/www/shop",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 2,
+            "staleReceipt": null,
+            "lastAttempt": null
+          },
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "recorded",
+            "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "shortSha": "aaaaaaa",
+            "atMs": 1791793295000,
+            "age": "28m ago",
+            "qualifiers": [],
+            "words": "",
+            "evidence": [],
+            "outcome": {
+              "text": "Succeeded",
+              "tone": "good",
+              "kind": "succeeded"
+            },
+            "stepsRun": null,
+            "flags": [],
+            "target": "staging1:/var/www/shop",
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": 3,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      }
+    ],
+    "problems": []
+  }
+};
+
 export const terminalMap: LoadResult = {
   "kind": "loaded",
   "generation": 1,
@@ -546,6 +683,7 @@ export const terminalMap: LoadResult = {
         "label": "shop",
         "repoRoot": "/Users/you/code/shop",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
@@ -1943,6 +2081,7 @@ export const watchResults: LoadResult = {
         "label": "watchInterrupted",
         "repoRoot": "/Users/you/code/watchInterrupted",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
@@ -1982,6 +2121,7 @@ export const watchResults: LoadResult = {
         "label": "watchNoFile",
         "repoRoot": "/Users/you/code/watchNoFile",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
@@ -2021,6 +2161,7 @@ export const watchResults: LoadResult = {
         "label": "watchSkipped",
         "repoRoot": "/Users/you/code/watchSkipped",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
@@ -2060,6 +2201,7 @@ export const watchResults: LoadResult = {
         "label": "watchStopped",
         "repoRoot": "/Users/you/code/watchStopped",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
@@ -2099,6 +2241,7 @@ export const watchResults: LoadResult = {
         "label": "watchUnreadable",
         "repoRoot": "/Users/you/code/watchUnreadable",
         "pathMissing": false,
+        "needsApproval": false,
         "cells": [
           {
             "kind": "present",
