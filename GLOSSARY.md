@@ -2,6 +2,16 @@
 
 Deploys a Laravel app to a server the developer manages, over their own `ssh`, and keeps a receipt of what happened. The language below is shared by the library, the `slip` CLI and the app.
 
+## Projects
+
+**Project**:
+A Laravel app Shipslip deploys, named in its `.shipslip.toml`. One project can have several checkouts.
+_Avoid_: App (for the record), repo
+
+**Checkout**:
+One folder of a project on this Mac, where runs start from. The app's "Add project" adds a checkout.
+_Avoid_: Repo, workspace, folder (for the recorded thing)
+
 ## Runs
 
 **Environment**:
