@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{ConfigError, LoadedConfig};
+use crate::config::{approve_trust, ConfigError, InitAnswers, InitPlan, LoadedConfig};
 use crate::private_file::write_atomic;
 
 const VERSION: u32 = 1;
@@ -116,8 +116,9 @@ pub fn add(path: &Path, folder: &Path, now_ms: u128) -> Result<PathBuf, Projects
 pub enum Folder {
     /// Not inside a git repository, so nothing can be deployed from it.
     NotGit,
-    /// A git checkout without a `.shipslip.toml` at its root.
-    NoConfig { checkout: PathBuf },
+    /// A git checkout without a `.shipslip.toml`: the config `init` would
+    /// write there.
+    NewConfig(InitPlan),
     /// A git checkout with a config.
     Config(LoadedConfig),
     /// A git checkout whose config can't be read or is invalid.
@@ -133,12 +134,55 @@ pub fn inspect(folder: &Path) -> Folder {
         return Folder::NotGit;
     };
     if !checkout.join(".shipslip.toml").exists() {
-        return Folder::NoConfig { checkout };
+        return match InitPlan::new(&checkout) {
+            Ok(plan) => Folder::NewConfig(plan),
+            Err(error) => Folder::Unreadable { checkout, error },
+        };
     }
     match LoadedConfig::load(&checkout, None) {
         Ok(config) => Folder::Config(config),
         Err(error) => Folder::Unreadable { checkout, error },
     }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AddConfigError {
+    /// Nothing was written or approved.
+    #[error(transparent)]
+    List(#[from] ProjectsError),
+    /// The checkout is listed; no config was written.
+    #[error(transparent)]
+    Write(ConfigError),
+}
+
+/// A checkout added with the config written for it.
+#[derive(Debug)]
+pub struct ConfigAdded {
+    pub checkout: PathBuf,
+    /// Approving failed after the write, so the checkout needs approval.
+    pub approval: Result<(), ConfigError>,
+}
+
+/// Lists the plan's checkout, writes the config `answers` render to (never
+/// replacing a file), then approves each environment as rendered. A later
+/// edit to the file is not approved.
+pub fn add_with_config(
+    trust_path: &Path,
+    plan: &InitPlan,
+    answers: &InitAnswers,
+    now_ms: u128,
+) -> Result<ConfigAdded, AddConfigError> {
+    let text = plan.render(answers).map_err(AddConfigError::Write)?;
+    let checkout = add(&path_beside(trust_path), plan.repo_root(), now_ms)?;
+    plan.write(answers).map_err(AddConfigError::Write)?;
+    let approval = LoadedConfig::parse(&text, plan.path().to_path_buf(), checkout.clone())
+        .and_then(|config| {
+            config
+                .environment_names()
+                .filter_map(|env| Some((env, config.trust_snapshot(env)?)))
+                .try_for_each(|(env, snapshot)| approve_trust(trust_path, &checkout, env, snapshot))
+        });
+    Ok(ConfigAdded { checkout, approval })
 }
 
 /// The git root above `folder`, spelled as the approvals and receipts spell

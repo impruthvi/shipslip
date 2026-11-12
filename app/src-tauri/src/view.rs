@@ -73,6 +73,8 @@ pub struct RowView {
     /// The checkout's `.shipslip.toml` has an environment without a current
     /// approval.
     pub needs_approval: bool,
+    /// Added in the app, and its folder has no `.shipslip.toml` yet.
+    pub setup_not_finished: bool,
     /// One per column in [`MapView::envs`].
     pub cells: Vec<CellView>,
 }
@@ -292,9 +294,18 @@ pub fn compare_view(a: &str, b: &str, comparison: &EnvComparison) -> CompareView
     }
 }
 
+/// Checkouts, as the overview spells them, that can't deploy yet.
+#[derive(Debug, Default)]
+pub struct CheckoutSetup {
+    /// An environment in `.shipslip.toml` has no current approval.
+    pub needs_approval: BTreeSet<String>,
+    /// Listed with no environments and no `.shipslip.toml`.
+    pub not_finished: BTreeSet<String>,
+}
+
 pub fn map(
     overview: &Overview,
-    needs_approval: &BTreeSet<String>,
+    setup: &CheckoutSetup,
     now_ms: u128,
     locators: &mut Locators,
 ) -> MapView {
@@ -307,10 +318,7 @@ pub fn map(
     let rows = overview
         .repos
         .iter()
-        .map(|row| {
-            let needs_approval = needs_approval.contains(row.repo_root.raw());
-            row_view(row, needs_approval, &columns, now_ms, locators)
-        })
+        .map(|row| row_view(row, setup, &columns, now_ms, locators))
         .collect();
     let problems = overview
         .problems
@@ -348,7 +356,7 @@ pub fn map(
 
 fn row_view(
     row: &RepoRow,
-    needs_approval: bool,
+    setup: &CheckoutSetup,
     columns: &[&str],
     now_ms: u128,
     locators: &mut Locators,
@@ -357,7 +365,8 @@ fn row_view(
         label: row.label.field(),
         repo_root: row.repo_root.field(),
         path_missing: row.path_missing,
-        needs_approval,
+        needs_approval: setup.needs_approval.contains(row.repo_root.raw()),
+        setup_not_finished: setup.not_finished.contains(row.repo_root.raw()),
         cells: columns
             .iter()
             .map(
@@ -678,7 +687,7 @@ mod tests {
         let overview = overview(&fx.receipts(), &fx.trust()).unwrap();
         let mut locators = Locators::default();
         (
-            map(&overview, &BTreeSet::new(), NOW, &mut locators),
+            map(&overview, &CheckoutSetup::default(), NOW, &mut locators),
             locators,
         )
     }

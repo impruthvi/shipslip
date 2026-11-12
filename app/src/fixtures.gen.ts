@@ -6,6 +6,7 @@ import type {
   CheckoutReceipts,
   CommandError,
   CompareResult,
+  ConfigText,
   DeployEntry,
   DeployReview,
   FolderView,
@@ -37,6 +38,7 @@ export const map: LoadResult = {
         "repoRoot": "/Users/you/code/api",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -119,6 +121,7 @@ export const map: LoadResult = {
         "repoRoot": "/Users/you/code/billing",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -183,6 +186,7 @@ export const map: LoadResult = {
         "repoRoot": "/Users/you/code/blog",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -244,6 +248,7 @@ export const map: LoadResult = {
         "repoRoot": "/Users/you/tmp/shop-copy",
         "pathMissing": true,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "absent"
@@ -283,6 +288,7 @@ export const map: LoadResult = {
         "repoRoot": "/Users/you/code/shop",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -392,6 +398,7 @@ export const wideMap: LoadResult = {
         "repoRoot": "/Users/you/code/shop",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -571,6 +578,7 @@ export const approvalMap: LoadResult = {
         "repoRoot": "/Users/you/code/docs",
         "pathMissing": false,
         "needsApproval": true,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -631,6 +639,7 @@ export const approvalMap: LoadResult = {
         "repoRoot": "/Users/you/code/shop",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -706,6 +715,7 @@ export const addedMap: LoadResult = {
         "repoRoot": "/Users/you/code/crm",
         "pathMissing": false,
         "needsApproval": true,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -785,9 +795,10 @@ export const folders: Record<string, FolderView> = {
       }
     ]
   },
-  "noConfig": {
-    "kind": "noConfig",
-    "checkout": "/Users/you/code/api"
+  "newConfig": {
+    "kind": "newConfig",
+    "checkout": "/Users/you/code/api",
+    "branch": null
   },
   "notGit": {
     "kind": "notGit",
@@ -806,6 +817,78 @@ export const folders: Record<string, FolderView> = {
   }
 };
 
+export const setupMap: LoadResult = {
+  "kind": "loaded",
+  "generation": 1,
+  "map": {
+    "screen": "map",
+    "envs": [],
+    "rows": [
+      {
+        "label": "api",
+        "repoRoot": "/Users/you/code/api",
+        "pathMissing": false,
+        "needsApproval": false,
+        "setupNotFinished": true,
+        "cells": []
+      }
+    ],
+    "problems": []
+  }
+};
+
+export const configTexts: Record<string, ConfigText> = {
+  "invalid": {
+    "kind": "invalid",
+    "problems": [
+      {
+        "field": "env",
+        "message": "Use only letters, digits, `-` and `_`."
+      },
+      {
+        "field": "path",
+        "message": "Use an absolute path, such as /var/www/app."
+      }
+    ]
+  },
+  "rendered": {
+    "kind": "rendered",
+    "lines": [
+      "# Shipslip deploy config. Review every value, then run `slip trust staging`.",
+      "",
+      "[project]",
+      "name = \"api\"",
+      "stack = \"laravel\"",
+      "",
+      "[env.staging]",
+      "# Host alias from your ~/.ssh/config.",
+      "ssh = \"api-staging\"",
+      "# Absolute path of the app's Git checkout on the server.",
+      "path = \"/var/www/api\"",
+      "branch = \"main\"",
+      "# Production deploys ask you to type the environment name to confirm.",
+      "production = false",
+      "# Runs `php artisan down` before the steps and `php artisan up` once they all succeed.",
+      "maintenance = true",
+      "# Requested from your computer after the steps; 2xx passes.",
+      "smoke_url = \"https://staging.api.test/up\"",
+      "",
+      "[recipe.deploy]",
+      "# Run in order on the server. Remove any step that is not safe for this app.",
+      "steps = [",
+      "  \"composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader\",",
+      "  # Runs database migrations on every deploy.",
+      "  \"php artisan migrate --force\",",
+      "  \"php artisan optimize\",",
+      "  \"php artisan queue:restart\",",
+      "]"
+    ],
+    "warnings": [
+      "Found yarn.lock; automatic frontend deploy steps support only package-lock.json. Add the appropriate install and build steps to .shipslip.toml."
+    ]
+  }
+};
+
 export const terminalMap: LoadResult = {
   "kind": "loaded",
   "generation": 1,
@@ -820,6 +903,7 @@ export const terminalMap: LoadResult = {
         "repoRoot": "/Users/you/code/shop",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -2381,6 +2465,7 @@ export const watchResults: LoadResult = {
         "repoRoot": "/Users/you/code/watchInterrupted",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -2422,6 +2507,7 @@ export const watchResults: LoadResult = {
         "repoRoot": "/Users/you/code/watchNoFile",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -2463,6 +2549,7 @@ export const watchResults: LoadResult = {
         "repoRoot": "/Users/you/code/watchSkipped",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -2504,6 +2591,7 @@ export const watchResults: LoadResult = {
         "repoRoot": "/Users/you/code/watchStopped",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",
@@ -2545,6 +2633,7 @@ export const watchResults: LoadResult = {
         "repoRoot": "/Users/you/code/watchUnreadable",
         "pathMissing": false,
         "needsApproval": false,
+        "setupNotFinished": false,
         "cells": [
           {
             "kind": "present",

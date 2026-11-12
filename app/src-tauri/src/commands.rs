@@ -12,7 +12,7 @@ use shipslip::records::status;
 use tauri::async_runtime::spawn_blocking;
 use tauri::Manager;
 
-use crate::add_project::{self, FolderView};
+use crate::add_project::{self, Answers, ConfigAdded, ConfigText, FolderView};
 use crate::deploy_session::{
     CommandError, CurrentRuns, DeployEntry, DeployReview, Ending, ErrorCode, LiveRuns, OpenSsh,
     PrepareProgress, QuitRun, RecoveryReview, RunBatch, RunInfo, RunStop, Sessions, TrustReview,
@@ -24,6 +24,7 @@ use crate::state::SelectionError;
 use crate::state::{
     with_git, AppState, CheckoutReceipts, CompareResult, LoadResult, ReceiptResult,
 };
+use shipslip::config::{InitAnswers, InitPlan};
 
 fn selection_error(error: SelectionError) -> CommandError {
     match error {
@@ -48,6 +49,8 @@ pub struct App {
     unseen: Unseen,
     /// The folder last picked in the Add project sheet; only it can be added.
     picked: Mutex<Option<PathBuf>>,
+    /// The config last shown for approval; only it can be written.
+    rendered: Mutex<Option<(InitPlan, InitAnswers)>>,
 }
 
 impl App {
@@ -75,6 +78,7 @@ impl App {
             git,
             unseen: Unseen::default(),
             picked: Mutex::new(None),
+            rendered: Mutex::new(None),
         }
     }
 
@@ -187,23 +191,66 @@ impl App {
         let Some(folder) = folder else {
             return Ok(FolderView::Cancelled);
         };
-        let view = add_project::inspect(&folder, trust);
+        let view = add_project::inspect(&folder, trust, self.git.as_ref());
         *self.picked.lock().unwrap_or_else(PoisonError::into_inner) = Some(folder);
+        *self.rendered.lock().unwrap_or_else(PoisonError::into_inner) = None;
         Ok(view)
+    }
+
+    /// A "Setup not finished" checkout from the map, picked again.
+    fn reopen_setup(&self, generation: u64, row: usize) -> Result<FolderView, CommandError> {
+        let checkout = self
+            .state
+            .resolve_checkout(generation, row)
+            .map_err(selection_error)?;
+        self.inspect_picked(Some(checkout))
+    }
+
+    fn picked(&self) -> Result<PathBuf, CommandError> {
+        self.picked
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or_else(|| {
+                CommandError::new(ErrorCode::NotFound, "Choose the project's folder first.")
+            })
     }
 
     fn add_picked(&self) -> Result<String, CommandError> {
         let trust = self.trust_path()?;
-        let picked = self
-            .picked
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        let folder = picked.ok_or_else(|| {
-            CommandError::new(ErrorCode::NotFound, "Choose the project's folder first.")
-        })?;
-        add_project::add(&folder, trust, now_ms())
+        add_project::add(&self.picked()?, trust, now_ms())
             .map_err(|message| CommandError::new(ErrorCode::Local, message))
+    }
+
+    /// Renders the config for the picked folder and keeps it for
+    /// [`Self::add_rendered`].
+    fn render_config(&self, answers: Answers) -> Result<ConfigText, CommandError> {
+        self.trust_path()?;
+        let folder = self.picked()?;
+        let answers = InitAnswers::from(answers);
+        let mut rendered = self.rendered.lock().unwrap_or_else(PoisonError::into_inner);
+        *rendered = None;
+        let (view, plan) = add_project::render(&folder, &answers)
+            .map_err(|message| CommandError::new(ErrorCode::Local, message))?;
+        *rendered = plan.map(|plan| (plan, answers));
+        Ok(view)
+    }
+
+    /// Writes the config last rendered, approves it and lists the checkout.
+    /// A config once written is spent; one not written can be tried again.
+    fn add_rendered(&self) -> Result<ConfigAdded, CommandError> {
+        let trust = self.trust_path()?;
+        let mut rendered = self.rendered.lock().unwrap_or_else(PoisonError::into_inner);
+        let (plan, answers) = rendered.as_ref().ok_or_else(|| {
+            CommandError::new(
+                ErrorCode::NotFound,
+                "Answer the environment questions first.",
+            )
+        })?;
+        let added = add_project::add_with_config(plan, answers, trust, now_ms())
+            .map_err(|message| CommandError::new(ErrorCode::Local, message))?;
+        *rendered = None;
+        Ok(added)
     }
 
     fn checkout_receipts(&self, generation: u64, row: usize) -> Result<CheckoutReceipts, String> {
@@ -280,6 +327,42 @@ pub async fn pick_folder(
 pub async fn add_checkout(app: tauri::State<'_, Arc<App>>) -> Result<String, CommandError> {
     let app = Arc::clone(&app);
     spawn_blocking(move || app.add_picked())
+        .await
+        .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
+}
+
+/// Opens the sheet on a "Setup not finished" checkout: picks its folder again.
+#[tauri::command]
+pub async fn reopen_setup(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+) -> Result<FolderView, CommandError> {
+    let app = Arc::clone(&app);
+    spawn_blocking(move || app.reopen_setup(generation, row))
+        .await
+        .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
+}
+
+/// The `.shipslip.toml` the answers would write for the picked folder, or
+/// the answers that break a rule.
+#[tauri::command]
+pub async fn render_config(
+    app: tauri::State<'_, Arc<App>>,
+    answers: Answers,
+) -> Result<ConfigText, CommandError> {
+    let app = Arc::clone(&app);
+    spawn_blocking(move || app.render_config(answers))
+        .await
+        .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
+}
+
+/// "Approve and add" for a new config: writes the config last rendered,
+/// approves it and lists the checkout.
+#[tauri::command]
+pub async fn add_with_config(app: tauri::State<'_, Arc<App>>) -> Result<ConfigAdded, CommandError> {
+    let app = Arc::clone(&app);
+    spawn_blocking(move || app.add_rendered())
         .await
         .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
 }
@@ -535,6 +618,72 @@ mod tests {
             .unwrap_err()
             .message
             .contains("not inside a git repository"));
+    }
+
+    fn answers(env: &str) -> Answers {
+        serde_json::from_value(serde_json::json!({
+            "env": env, "sshAlias": "web1", "path": "/srv/crm", "branch": "main",
+            "production": false, "maintenance": true, "smokeUrl": "",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn only_the_config_rendered_last_is_written_and_only_once() {
+        let fx = Fixture::new();
+        let app = app(&fx, None);
+        let crm = fx.dir().join("crm");
+        std::fs::create_dir_all(crm.join(".git")).unwrap();
+        let crm = std::fs::canonicalize(crm).unwrap();
+        assert_eq!(
+            app.add_rendered().unwrap_err().message,
+            "Answer the environment questions first."
+        );
+        assert!(matches!(
+            app.inspect_picked(Some(crm.clone())).unwrap(),
+            FolderView::NewConfig { .. }
+        ));
+
+        app.render_config(answers("staging")).unwrap();
+        assert!(matches!(
+            app.render_config(answers("bad name")).unwrap(),
+            ConfigText::Invalid { .. }
+        ));
+        assert!(app.add_rendered().is_err(), "invalid answers keep nothing");
+
+        app.render_config(answers("qa")).unwrap();
+        // Picking a folder again drops the config shown for the last one.
+        app.inspect_picked(Some(crm.clone())).unwrap();
+        assert!(app.add_rendered().is_err());
+
+        app.render_config(answers("qa")).unwrap();
+        let added = app.add_rendered().unwrap();
+        assert_eq!(added.checkout, crm.to_string_lossy());
+        let written = std::fs::read_to_string(crm.join(".shipslip.toml")).unwrap();
+        assert!(written.contains("[env.qa]"), "{written}");
+        assert!(app.add_rendered().is_err(), "spent");
+    }
+
+    #[test]
+    fn reopen_setup_picks_the_map_rows_checkout() {
+        let fx = Fixture::new();
+        let app = app(&fx, None);
+        let crm = fx.dir().join("crm");
+        std::fs::create_dir_all(crm.join(".git")).unwrap();
+        let crm = std::fs::canonicalize(crm).unwrap();
+        add_project::add(&crm, &fx.trust(), 1).unwrap();
+        let LoadResult::Loaded(loaded) = app.load_map() else {
+            panic!("map");
+        };
+        assert!(loaded.map.rows[0].setup_not_finished);
+
+        let view = app.reopen_setup(loaded.generation, 0).unwrap();
+        assert!(matches!(view, FolderView::NewConfig { .. }), "{view:?}");
+        assert_eq!(app.add_picked().unwrap(), crm.to_string_lossy());
+        assert_eq!(
+            app.reopen_setup(loaded.generation + 1, 0).unwrap_err().code,
+            ErrorCode::Stale
+        );
     }
 
     #[test]

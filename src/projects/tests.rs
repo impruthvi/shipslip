@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
+use crate::config::{ConfigError, InitAnswers, InitPlan};
 
 /// A temp folder for the projects list and checkouts, removed on drop.
 struct Fixture(PathBuf);
@@ -183,11 +184,158 @@ fn inspect_reads_the_config_at_the_git_root() {
 }
 
 #[test]
-fn inspect_says_when_there_is_no_config() {
+fn inspect_plans_a_new_config_when_there_is_none() {
     let fx = Fixture::new();
     let shop = fx.checkout("shop");
+    fs::write(
+        shop.join("package.json"),
+        r#"{"scripts":{"build":"vite build"}}"#,
+    )
+    .unwrap();
+    fs::write(shop.join("yarn.lock"), "").unwrap();
 
-    assert!(matches!(inspect(&shop), Folder::NoConfig { checkout } if checkout == shop));
+    let Folder::NewConfig(plan) = inspect(&shop) else {
+        panic!("expected a plan");
+    };
+    assert_eq!(plan.repo_root(), shop);
+    assert_eq!(plan.project_name(), "shop");
+    assert_eq!(plan.warnings().len(), 1, "{:?}", plan.warnings());
+}
+
+fn answers(env: &str) -> InitAnswers {
+    InitAnswers {
+        env: env.into(),
+        ssh_alias: "web1".into(),
+        path: "/srv/shop".into(),
+        branch: "main".into(),
+        production: false,
+        maintenance: true,
+        smoke_url: None,
+    }
+}
+
+impl Fixture {
+    fn trust_path(&self) -> PathBuf {
+        self.0.join("support/trust.json")
+    }
+
+    fn plan(&self, checkout: &Path) -> InitPlan {
+        match inspect(checkout) {
+            Folder::NewConfig(plan) => plan,
+            other => panic!("expected a plan, got {other:?}"),
+        }
+    }
+}
+
+fn approved(trust_path: &Path, checkout: &Path, env: &str) -> bool {
+    let config = LoadedConfig::load(checkout, None).unwrap();
+    config.trusted_target(env, trust_path).is_ok()
+}
+
+#[test]
+fn add_with_config_writes_what_was_rendered_approves_it_and_lists_the_checkout() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let plan = fx.plan(&shop);
+    let text = plan.render(&answers("staging")).unwrap();
+
+    let added = add_with_config(&fx.trust_path(), &plan, &answers("staging"), 5).unwrap();
+
+    assert_eq!(added.checkout, shop);
+    assert!(added.approval.is_ok());
+    assert_eq!(
+        fs::read_to_string(shop.join(".shipslip.toml")).unwrap(),
+        text
+    );
+    assert!(approved(&fx.trust_path(), &shop, "staging"));
+    let listed = list(&path_beside(&fx.trust_path())).unwrap();
+    assert_eq!(listed.iter().map(|c| &c.path).collect::<Vec<_>>(), [&shop]);
+}
+
+#[test]
+fn add_with_config_never_replaces_an_existing_config() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let plan = fx.plan(&shop);
+    // Written by someone else after the sheet read the folder.
+    fs::write(shop.join(".shipslip.toml"), CONFIG).unwrap();
+
+    let error = add_with_config(&fx.trust_path(), &plan, &answers("staging"), 5).unwrap_err();
+
+    assert!(
+        matches!(error, AddConfigError::Write(ConfigError::AlreadyExists(_))),
+        "{error:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(shop.join(".shipslip.toml")).unwrap(),
+        CONFIG
+    );
+    assert!(!fx.trust_path().exists(), "nothing approved");
+    // Listed before the write, as the sheet lists it on leaving the folder step.
+    let listed = list(&path_beside(&fx.trust_path())).unwrap();
+    assert_eq!(listed.iter().map(|c| &c.path).collect::<Vec<_>>(), [&shop]);
+}
+
+#[test]
+fn add_with_config_writes_nothing_when_the_list_cannot_be_written() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let plan = fx.plan(&shop);
+    fs::create_dir_all(fx.trust_path().parent().unwrap()).unwrap();
+    fs::write(path_beside(&fx.trust_path()), "not json").unwrap();
+
+    let error = add_with_config(&fx.trust_path(), &plan, &answers("staging"), 5).unwrap_err();
+
+    assert!(matches!(error, AddConfigError::List(_)), "{error:?}");
+    assert!(!shop.join(".shipslip.toml").exists());
+    assert!(!fx.trust_path().exists());
+}
+
+#[test]
+fn add_with_config_refuses_answers_that_break_a_rule_and_writes_nothing() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let plan = fx.plan(&shop);
+
+    let error = add_with_config(&fx.trust_path(), &plan, &answers("env.staging"), 5).unwrap_err();
+
+    assert!(matches!(error, AddConfigError::Write(_)), "{error:?}");
+    assert!(!shop.join(".shipslip.toml").exists());
+}
+
+#[test]
+fn a_failed_approval_after_the_write_leaves_the_checkout_listed_and_unapproved() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let plan = fx.plan(&shop);
+    fs::create_dir_all(fx.trust_path().parent().unwrap()).unwrap();
+    fs::write(fx.trust_path(), "not json").unwrap();
+
+    let added = add_with_config(&fx.trust_path(), &plan, &answers("staging"), 5).unwrap();
+
+    assert!(added.approval.is_err());
+    assert!(shop.join(".shipslip.toml").exists());
+    let listed = list(&path_beside(&fx.trust_path())).unwrap();
+    assert_eq!(listed.iter().map(|c| &c.path).collect::<Vec<_>>(), [&shop]);
+    fs::remove_file(fx.trust_path()).unwrap();
+    assert!(!approved(&fx.trust_path(), &shop, "staging"));
+}
+
+#[test]
+fn add_with_config_approves_the_rendered_text_not_a_later_edit() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let plan = fx.plan(&shop);
+    add_with_config(&fx.trust_path(), &plan, &answers("staging"), 5).unwrap();
+    let written = fs::read_to_string(shop.join(".shipslip.toml")).unwrap();
+
+    fs::write(
+        shop.join(".shipslip.toml"),
+        written.replace("\"web1\"", "\"web9\""),
+    )
+    .unwrap();
+
+    assert!(!approved(&fx.trust_path(), &shop, "staging"));
 }
 
 #[test]

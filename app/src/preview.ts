@@ -44,9 +44,13 @@ export const backend: Backend = {
     return () => window.removeEventListener("focus", handler);
   },
   receiptSeen: async () => {},
-  // `?folder=notGit|noConfig|unreadable` picks what the folder panel returns.
+  // `?folder=notGit|newConfig|unreadable` picks what the folder panel returns.
   pickFolder: () => later(fixtures.folders[params.get("folder") ?? "config"] ?? fixtures.folders.config),
   addCheckout: () => later("/Users/you/code/crm"),
+  reopenSetup: () => later(fixtures.folders.newConfig),
+  renderConfig: (answers) =>
+    later(answers.env.trim() === "" ? fixtures.configTexts.invalid : fixtures.configTexts.rendered),
+  addWithConfig: () => later({ checkout: "/Users/you/code/api", approvalError: null }),
 };
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

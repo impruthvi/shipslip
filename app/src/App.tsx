@@ -67,7 +67,8 @@ export default function App() {
   const entryButton = useRef<HTMLButtonElement>(null);
   const runsButton = useRef<HTMLButtonElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  const [adding, setAdding] = useState(false);
+  /** The Add project sheet; `reopen` opens a "Setup not finished" row. */
+  const [adding, setAdding] = useState<{ reopen: { generation: number; row: number } | null } | null>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   /** Asks for the deploy entry again after approvals and runs. */
   const [entryVersion, setEntryVersion] = useState(0);
@@ -327,8 +328,13 @@ export default function App() {
         live={liveLines}
         current={inCheckout && screenShown.kind === "checkout" ? screenShown.repoRoot : null}
         onAllProjects={() => go({ kind: "all" })}
-        onCheckout={(repoRoot) => go({ kind: "checkout", repoRoot })}
-        onAddProject={() => setAdding(true)}
+        onCheckout={(repoRoot) => {
+          const row = map?.rows.findIndex((r) => r.repoRoot === repoRoot) ?? -1;
+          if (loaded && row >= 0 && loaded.map.rows[row].setupNotFinished) {
+            setAdding({ reopen: { generation: loaded.generation, row } });
+          } else go({ kind: "checkout", repoRoot });
+        }}
+        onAddProject={() => setAdding({ reopen: null })}
         addButton={addButton}
       />
       <main className="main">
@@ -387,7 +393,7 @@ export default function App() {
                 onCellFocus={onCellFocus}
                 compare={pair ? { pair, lines } : null}
                 live={liveLines}
-                onAddProject={() => setAdding(true)}
+                onAddProject={() => setAdding({ reopen: null })}
               />
             </div>
           </>
@@ -437,13 +443,14 @@ export default function App() {
       {adding && (
         <AddProject
           loaded={loaded}
+          reopen={adding.reopen}
           onAdded={refresh}
           onClose={() => {
-            setAdding(false);
+            setAdding(null);
             addButton.current?.focus();
           }}
           onDone={(repoRoot) => {
-            setAdding(false);
+            setAdding(null);
             refresh();
             go({ kind: "checkout", repoRoot });
           }}
