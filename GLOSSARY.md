@@ -18,6 +18,10 @@ _Avoid_: Repo, workspace, folder (for the recorded thing)
 A named deploy target in `.shipslip.toml`: a server, a path and a branch.
 _Avoid_: Env (in prose), stage, server
 
+**Server**:
+The machine an environment's path lives on, reached through the ssh alias. One server can hold several environments.
+_Avoid_: Host (in prose), box, environment (for the machine)
+
 **Recipe**:
 The ordered list of commands an environment runs on the server after the code moves.
 _Avoid_: Script, pipeline, hooks
