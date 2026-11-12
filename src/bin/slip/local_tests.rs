@@ -451,7 +451,8 @@ fn prompt_interrupt_child() {
                 vec!["app"]
             };
             let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
-            new::run(new::Args::parse(&args).unwrap()).await.unwrap();
+            // The prompt never returns: Ctrl-C exits the process.
+            let _ = new::run(new::Args::parse(&args).unwrap()).await.unwrap();
         } else {
             let mut interrupts = Interrupts::listen();
             new::yes_no("Publish reviewed project?", false, &mut interrupts)
