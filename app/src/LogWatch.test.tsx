@@ -57,7 +57,7 @@ test("only interrupted and unreadable watches enter Needs attention", () => {
     state={{ phase: "shown", loaded, readAt: new Date(0), failure: null }}
     busy={false} onRetry={vi.fn()} runs={[]} now={0} onFollow={vi.fn()}
     runsButton={{ current: null }} onProblem={vi.fn()} live={{}} onAllProjects={vi.fn()}
-    current={null} onCheckout={vi.fn()}
+    current={null} onCheckout={vi.fn()} onAddProject={vi.fn()}
   />);
   const section = screen.getByRole("heading", { name: /^Needs attention/ }).closest("section")!;
   const items = within(section).getAllByRole("listitem");

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AddProject } from "./AddProject";
 import { useAnnouncer } from "./Announcer";
 import { CheckoutPane } from "./CheckoutPane";
 import { ComparePicker } from "./ComparePicker";
@@ -66,6 +67,8 @@ export default function App() {
   const entryButton = useRef<HTMLButtonElement>(null);
   const runsButton = useRef<HTMLButtonElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const [adding, setAdding] = useState(false);
+  const addButton = useRef<HTMLButtonElement>(null);
   /** Asks for the deploy entry again after approvals and runs. */
   const [entryVersion, setEntryVersion] = useState(0);
   const [approved, setApproved] = useState<{ key: string; env: string } | null>(null);
@@ -325,6 +328,8 @@ export default function App() {
         current={inCheckout && screenShown.kind === "checkout" ? screenShown.repoRoot : null}
         onAllProjects={() => go({ kind: "all" })}
         onCheckout={(repoRoot) => go({ kind: "checkout", repoRoot })}
+        onAddProject={() => setAdding(true)}
+        addButton={addButton}
       />
       <main className="main">
         {!workspace && !inCheckout && (
@@ -382,6 +387,7 @@ export default function App() {
                 onCellFocus={onCellFocus}
                 compare={pair ? { pair, lines } : null}
                 live={liveLines}
+                onAddProject={() => setAdding(true)}
               />
             </div>
           </>
@@ -426,6 +432,21 @@ export default function App() {
               buttonRef={inCheckout ? undefined : entryButton}
             />
           }
+        />
+      )}
+      {adding && (
+        <AddProject
+          loaded={loaded}
+          onAdded={refresh}
+          onClose={() => {
+            setAdding(false);
+            addButton.current?.focus();
+          }}
+          onDone={(repoRoot) => {
+            setAdding(false);
+            refresh();
+            go({ kind: "checkout", repoRoot });
+          }}
         />
       )}
       {regions}

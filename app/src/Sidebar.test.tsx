@@ -10,7 +10,7 @@ function props(busy: boolean) {
   return {
     state, busy, onRetry: vi.fn(), runs: [fixtures.runInfo], now: fixtures.runInfo.startedAtMs,
     onFollow: vi.fn(), runsButton: { current: null }, onProblem: vi.fn(), live: {}, onAllProjects: vi.fn(),
-    current: null, onCheckout: vi.fn(),
+    current: null, onCheckout: vi.fn(), onAddProject: vi.fn(),
   };
 }
 

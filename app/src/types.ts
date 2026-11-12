@@ -95,7 +95,7 @@ export interface AttemptView {
   age: string;
 }
 
-export type ProblemKind = "trust" | "projectDir" | "receipt";
+export type ProblemKind = "trust" | "projects" | "projectDir" | "receipt";
 
 export interface CellPos {
   row: number;
@@ -564,3 +564,23 @@ export interface RunBatch {
   output: OutputLine[];
   state: RunState;
 }
+
+/** One environment of a picked folder's `.shipslip.toml`, shown read only. */
+export interface FolderEnv {
+  name: string;
+  /** `ssh_alias:path`. */
+  target: string;
+  branch: string;
+  production: boolean;
+  /** Its settings as they read now are approved on this Mac. */
+  approved: boolean;
+}
+
+/** What a folder picked in the Add project sheet holds (`pick_folder`). */
+export type FolderView =
+  | { kind: "cancelled" }
+  | { kind: "notGit"; folder: string }
+  | { kind: "noConfig"; checkout: string }
+  /** `message` is the config error, one entry per line. */
+  | { kind: "unreadable"; checkout: string; message: string[] }
+  | { kind: "config"; checkout: string; project: string; envs: FolderEnv[] };

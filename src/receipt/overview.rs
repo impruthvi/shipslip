@@ -71,8 +71,9 @@ struct CellBuild {
     owns: Vec<Own>,
 }
 
-/// Builds the release map. Only an existing receipts root that cannot be
-/// read is an error; anything else unreadable becomes a [`Problem`].
+/// Builds the release map from the receipts, the approvals and the projects
+/// list beside them. Only an existing receipts root that cannot be read is an
+/// error; anything else unreadable becomes a [`Problem`].
 pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, ReceiptError> {
     let mut problems: Vec<(Problem, Option<Scope>)> = Vec::new();
     let mut rows: BTreeMap<String, RowBuild> = BTreeMap::new();
@@ -154,6 +155,26 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
                 path: trust_path.to_path_buf(),
                 message: error.to_string().into(),
                 kind: ProblemKind::Trust,
+                cells: Vec::new(),
+            },
+            None,
+        )),
+    }
+
+    // Checkouts added in the app show even before anything is recorded.
+    let projects_path = crate::projects::path_beside(trust_path);
+    match crate::projects::list(&projects_path) {
+        Ok(checkouts) => {
+            for checkout in checkouts {
+                rows.entry(checkout.path.to_string_lossy().into_owned())
+                    .or_default();
+            }
+        }
+        Err(error) => problems.push((
+            Problem {
+                path: projects_path,
+                message: error.to_string().into(),
+                kind: ProblemKind::Projects,
                 cells: Vec::new(),
             },
             None,

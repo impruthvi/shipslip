@@ -17,6 +17,8 @@
     "allow-receipts-changed",
     "allow-compare",
     "allow-load-receipt",
+    "allow-pick-folder",
+    "allow-add-checkout",
     "allow-deploy-entry",
     "allow-open-config",
     "allow-prepare-deploy",

@@ -5,6 +5,8 @@ fn main() {
             "receipts_changed",
             "compare",
             "load_receipt",
+            "pick_folder",
+            "add_checkout",
             "deploy_entry",
             "open_config",
             "prepare_deploy",

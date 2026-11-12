@@ -57,6 +57,74 @@ function Changed({ row }: { row: TrustRow }) {
   );
 }
 
+/** Every setting the environment would run with, changed ones first, and a
+ * way to edit the file. */
+export function TrustSettings({
+  review,
+  onEdit,
+  headingId = "trust-settings",
+}: {
+  review: Review;
+  /** Opens `.shipslip.toml` in the editor; a saved change needs a new review.
+   * Rejects with a `CommandError`. */
+  onEdit: () => Promise<void>;
+  headingId?: string;
+}) {
+  const [editError, setEditError] = useState<string | null>(null);
+  const edit = () => {
+    setEditError(null);
+    onEdit().catch((error: unknown) =>
+      setEditError(error && typeof error === "object" && "message" in error ? String(error.message) : String(error)),
+    );
+  };
+  const [showUnchanged, setShowUnchanged] = useState(false);
+  const changed = review.settings.filter((row) => row.changed);
+  const unchanged = review.settings.filter((row) => !row.changed);
+
+  return (
+    <section className="workspace-section" aria-labelledby={headingId}>
+      <h2 id={headingId} className="caps">
+        Settings
+      </h2>
+      <ul className="trust-rows">
+        {changed.map((row) => (
+          <Changed key={row.name} row={row} />
+        ))}
+      </ul>
+      {unchanged.length > 0 && (
+        <button
+          type="button"
+          className="more-button"
+          aria-expanded={showUnchanged}
+          onClick={() => setShowUnchanged(!showUnchanged)}
+        >
+          {unchanged.length} unchanged
+        </button>
+      )}
+      {showUnchanged && (
+        <ul className="trust-rows">
+          {unchanged.map((row) => (
+            <li key={row.name} className="trust-row">
+              <h3 className="trust-name mono">{row.name}</h3>
+              <Value row={row} lines={row.proposed} mark={null} />
+            </li>
+          ))}
+        </ul>
+      )}
+      <p>
+        <button type="button" className="more-button" onClick={edit}>
+          Edit .shipslip.toml in your editor
+        </button>
+      </p>
+      {editError && (
+        <p className="muted" role="status">
+          {editError}
+        </p>
+      )}
+    </section>
+  );
+}
+
 export type TrustBusy = "approving" | null;
 
 /** Every setting this env would run with, changed ones first, and the typed approval. */
@@ -80,60 +148,10 @@ export function TrustReview({
    * Rejects with a `CommandError`. */
   onEdit: () => Promise<void>;
 }) {
-  const [editError, setEditError] = useState<string | null>(null);
-  const edit = () => {
-    setEditError(null);
-    onEdit().catch((error: unknown) =>
-      setEditError(error && typeof error === "object" && "message" in error ? String(error.message) : String(error)),
-    );
-  };
-  const [showUnchanged, setShowUnchanged] = useState(false);
-  const changed = review.settings.filter((row) => row.changed);
-  const unchanged = review.settings.filter((row) => !row.changed);
-
   return (
     <>
       <div className="workspace-body">
-        <section className="workspace-section" aria-labelledby="trust-settings">
-          <h2 id="trust-settings" className="caps">
-            Settings
-          </h2>
-          <ul className="trust-rows">
-            {changed.map((row) => (
-              <Changed key={row.name} row={row} />
-            ))}
-          </ul>
-          {unchanged.length > 0 && (
-            <button
-              type="button"
-              className="more-button"
-              aria-expanded={showUnchanged}
-              onClick={() => setShowUnchanged(!showUnchanged)}
-            >
-              {unchanged.length} unchanged
-            </button>
-          )}
-          {showUnchanged && (
-            <ul className="trust-rows">
-              {unchanged.map((row) => (
-                <li key={row.name} className="trust-row">
-                  <h3 className="trust-name mono">{row.name}</h3>
-                  <Value row={row} lines={row.proposed} mark={null} />
-                </li>
-              ))}
-            </ul>
-          )}
-          <p>
-            <button type="button" className="more-button" onClick={edit}>
-              Edit .shipslip.toml in your editor
-            </button>
-          </p>
-          {editError && (
-            <p className="muted" role="status">
-              {editError}
-            </p>
-          )}
-        </section>
+        <TrustSettings review={review} onEdit={onEdit} />
         {changedAgain && (
           <p className="workspace-section">
             Config changed again; review the new version.{" "}

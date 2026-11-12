@@ -62,7 +62,7 @@ test("Tab goes sidebar → problems → picker → grid (one stop) → receipt",
   expect(gridStops).toHaveLength(1);
   expect(gridStops[0]).toHaveAttribute("aria-selected", "true");
   const order = stops.map((el) =>
-    el.classList.contains("side-item") || el.classList.contains("side-more")
+    el.classList.contains("side-item") || el.classList.contains("side-more") || el.classList.contains("side-add")
       ? "sidebar"
       : el.id === "compare-pair"
       ? "picker"

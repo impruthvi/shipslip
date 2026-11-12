@@ -6,6 +6,7 @@ use tauri::menu::Menu;
 use tauri::menu::{MenuItem, MenuItemKind};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 
+mod add_project;
 mod awake;
 mod commands;
 mod deploy_session;
@@ -29,6 +30,7 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(Arc::new(commands::App::from_env()))
         .menu(menu)
         .on_menu_event(|app, event| {
@@ -83,6 +85,8 @@ fn main() {
             commands::load_receipt,
             commands::checkout_receipts,
             commands::open_folder,
+            commands::pick_folder,
+            commands::add_checkout,
             commands::deploy_entry,
             commands::open_config,
             commands::prepare_deploy,
@@ -200,6 +204,7 @@ mod tests {
             perms,
             [
                 "allow-ack-run",
+                "allow-add-checkout",
                 "allow-approve-trust",
                 "allow-cancel-deploy",
                 "allow-cancel-pending",
@@ -212,6 +217,7 @@ mod tests {
                 "allow-load-map",
                 "allow-load-receipt",
                 "allow-open-config",
+                "allow-pick-folder",
                 "allow-prepare-deploy",
                 "allow-quit-now",
                 "allow-quit-status",

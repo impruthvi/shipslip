@@ -172,11 +172,11 @@ test("a receipt check failure keeps the recorded map and read time, then recover
   expect(screen.queryByText(/Could not re-read/)).not.toBeInTheDocument();
 });
 
-test("first run shows the two setup steps and no problems", async () => {
+test("first run shows the empty state and no problems", async () => {
   loadMap.mockResolvedValue(fixtures.firstRun);
   render(<App />);
   await settle();
-  expect(screen.getByText("No deploys or approvals recorded yet.")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "No projects on this Mac yet." })).toBeInTheDocument();
   expect(screen.queryByRole("grid")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("Problems")).not.toBeInTheDocument();
 });

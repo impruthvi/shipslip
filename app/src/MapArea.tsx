@@ -16,6 +16,7 @@ interface Props {
   compare: Compare | null;
   /** Outcome lines of cells with a run going now, by `repoRoot\nenv`. */
   live?: Record<string, string>;
+  onAddProject: () => void;
 }
 
 export function MapArea({
@@ -27,6 +28,7 @@ export function MapArea({
   onCellFocus,
   compare,
   live,
+  onAddProject,
 }: Props) {
   switch (state.phase) {
     case "loading":
@@ -48,17 +50,22 @@ export function MapArea({
       const { map } = state.loaded;
       if (map.screen === "firstRun") {
         return (
-          <section className="first-run">
-            <p className="first-run-title">No deploys or approvals recorded yet.</p>
-            <ol className="first-run-steps mono">
-              <li>
-                <span className="muted">1</span> cd your-laravel-app && slip trust staging
-              </li>
-              <li>
-                <span className="muted">2</span> slip deploy staging
-              </li>
-            </ol>
-            <p className="muted">This window refreshes when you come back to it.</p>
+          <section className="first-run" aria-labelledby="first-run-title">
+            <h2 id="first-run-title" className="first-run-title">
+              No projects on this Mac yet.
+            </h2>
+            <p className="first-run-text muted">
+              Add the folder of a Laravel app. Shipslip reads its .shipslip.toml, you approve the settings, and
+              its environments are ready to deploy.
+            </p>
+            <p>
+              <button type="button" className="button button-primary" onClick={onAddProject}>
+                Add project
+              </button>
+            </p>
+            <p className="muted">
+              Or from a terminal: <code className="mono">cd your-app && slip init</code>
+            </p>
           </section>
         );
       }

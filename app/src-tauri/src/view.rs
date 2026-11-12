@@ -246,6 +246,7 @@ pub struct ProblemView {
 #[serde(rename_all = "camelCase")]
 pub enum ProblemKindView {
     Trust,
+    Projects,
     ProjectDir,
     Receipt,
 }
@@ -317,6 +318,7 @@ pub fn map(
         .map(|problem| ProblemView {
             kind: match problem.kind {
                 ProblemKind::Trust => ProblemKindView::Trust,
+                ProblemKind::Projects => ProblemKindView::Projects,
                 ProblemKind::ProjectDir => ProblemKindView::ProjectDir,
                 ProblemKind::Receipt => ProblemKindView::Receipt,
             },
