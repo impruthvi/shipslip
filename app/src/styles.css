@@ -398,7 +398,7 @@ button.side-item:hover {
   font-weight: var(--font-weight-semibold);
 }
 
-.side-all[aria-current="page"] {
+.side-item[aria-current="page"] {
   background: var(--color-selection);
 }
 
@@ -523,6 +523,119 @@ button.side-item:hover {
   display: flex;
   flex-direction: column;
   gap: var(--space-16);
+}
+
+/* One checkout: a one-row map, its Deploys, then its receipts. */
+.checkout {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.checkout .toolbar-subtitle {
+  font-size: var(--text-11);
+}
+
+.checkout-menu-error {
+  padding-top: var(--space-8);
+  font-size: var(--text-12);
+}
+
+.checkout-body {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-24);
+  padding: var(--space-16) 0;
+}
+
+.checkout-envs {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  border-top: 1px solid var(--color-text);
+  border-bottom: 1px solid var(--color-rule);
+}
+
+.checkout-env {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-8);
+  min-width: 0;
+  padding: var(--space-12) var(--space-16) var(--space-16) 0;
+}
+
+.checkout-env + .checkout-env {
+  padding-left: var(--space-16);
+  border-left: 1px solid var(--color-rule);
+}
+
+.checkout-env .cell {
+  align-self: stretch;
+}
+
+.checkout-env-name {
+  font-size: var(--text-13);
+  line-height: 18px;
+  font-weight: var(--font-weight-semibold);
+}
+
+.checkout-never,
+.checkout-deploy-reason {
+  font-size: var(--text-12);
+  line-height: 16px;
+}
+
+.checkout-target {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: var(--text-11);
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.checkout-receipts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  max-width: 720px;
+  font-size: var(--text-13);
+}
+
+.receipt-row {
+  display: grid;
+  grid-template-columns: 80px 100px 1fr 72px;
+  column-gap: var(--space-12);
+  width: 100%;
+  padding: 6px var(--space-8);
+  border-bottom: 1px solid var(--color-rule);
+  text-align: left;
+  font-size: var(--text-13);
+  line-height: 16px;
+}
+
+.receipt-row:hover {
+  background: color-mix(in srgb, var(--color-text) 6%, transparent);
+}
+
+.receipt-row[aria-current="true"] {
+  background: var(--color-selection);
+}
+
+.receipt-row > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.menu-end .menu-list {
+  right: 0;
+  left: auto;
 }
 
 .placeholder {

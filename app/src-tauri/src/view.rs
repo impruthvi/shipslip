@@ -15,7 +15,8 @@ mod words;
 use crate::receipt_words::headline;
 use shipslip::records::{
     self, copy_is_safe, env_order, AttemptSummary, Badge, EnvCell, Flag, Mark, NextSteps, Part,
-    ProblemKind, ReceiptQueryError, RepoRow, StaleHint, Status as Overview, Untrusted,
+    ProblemKind, ReceiptQueryError, ReceiptSummary, RepoRow, StaleHint, Status as Overview,
+    Untrusted,
 };
 use shipslip::transport::ConnectFailure;
 use words::{age, code_text, newer_elsewhere_text, short_sha, stale_hint_text, target_moved_text};
@@ -108,6 +109,8 @@ pub struct EnvCellView {
     pub steps_run: Option<String>,
     pub flags: Vec<FlagView>,
     pub target: Option<String>,
+    /// An approval record exists; it may be for an older config.
+    pub approved: bool,
     pub target_moved: Option<String>,
     pub needs_attention: bool,
     /// The receipt the pane opens: the run behind the code, else the
@@ -404,13 +407,56 @@ fn cell_view(cell: &EnvCell, now_ms: u128, locators: &mut Locators) -> EnvCellVi
         outcome: opened.map(|run| outcome(&run.badge)),
         steps_run: opened.and_then(|run| run.steps_run.clone()),
         flags: opened.map(|run| flags(&run.badge)).unwrap_or_default(),
-        target: cell.target.as_ref().map(Untrusted::field),
+        // A never-deployed environment deploys to its approved target.
+        target: cell
+            .target
+            .as_ref()
+            .or(cell.approved_target.as_ref())
+            .map(Untrusted::field),
+        approved: cell.approved,
         target_moved: target_moved_text(cell),
         needs_attention: cell.needs_attention(),
         receipt: opened.map(|run| locators.id(&run.path)),
         stale_receipt: stale_path.map(|path| locators.id(path)),
         last_attempt: last_attempt.map(|last| attempt_view(last, now_ms, locators)),
     }
+}
+
+/// One line of a checkout's receipts table.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiptRowView {
+    /// Opens with `load_receipt`, like a cell's receipt.
+    pub receipt: usize,
+    pub env: String,
+    pub age: String,
+    pub outcome: OutcomeView,
+    /// The commit the run deployed or brought up.
+    pub sha: String,
+    pub short_sha: String,
+}
+
+pub fn receipt_rows<'a>(
+    receipts: impl Iterator<Item = (&'a Path, &'a ReceiptSummary)>,
+    now_ms: u128,
+    locators: &mut Locators,
+) -> Vec<ReceiptRowView> {
+    receipts
+        .map(|(path, receipt)| {
+            let badge = Badge {
+                outcome: receipt.outcome,
+                flags: receipt.flags.clone(),
+            };
+            ReceiptRowView {
+                receipt: locators.id(path),
+                env: receipt.env.field(),
+                age: age(now_ms, receipt.started_at_ms),
+                outcome: outcome(&badge),
+                sha: receipt.target_sha.field(),
+                short_sha: escape_field(short_sha(receipt.target_sha.raw(), SHORT_SHA)),
+            }
+        })
+        .collect()
 }
 
 fn attempt_view(attempt: &AttemptSummary, now_ms: u128, locators: &mut Locators) -> AttemptView {
@@ -730,6 +776,9 @@ mod tests {
         assert_eq!(cell.words, "no deploy receipt on this Mac");
         assert_eq!(cell.evidence, ["approved before"]);
         assert!(cell.receipt.is_none() && cell.outcome.is_none());
+        assert!(cell.approved);
+        // Nothing ran yet, so the approved target is where it deploys.
+        assert_eq!(cell.target.as_deref(), Some("web1:/srv/app"));
     }
 
     #[test]

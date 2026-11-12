@@ -12,10 +12,10 @@ use shipslip::git::{Comparison, Git};
 use shipslip::receipt::{compare_envs_with, ReceiptError};
 use shipslip::records::{env_order, CodeState, EnvCell, ReceiptQueryError, Status as Overview};
 
-use shipslip::records::receipt_at;
+use shipslip::records::{receipt_at, receipts, ReceiptListRow};
 
 use crate::receipt_view::{slip, SlipView};
-use crate::view::{self, compare_view, CellView, CompareView, Locators, MapView};
+use crate::view::{self, compare_view, CellView, CompareView, Locators, MapView, ReceiptRowView};
 
 #[derive(Default)]
 pub struct AppState {
@@ -35,7 +35,8 @@ struct Inner {
 struct Snapshot {
     generation: u64,
     overview: Overview,
-    locators: Locators,
+    /// Grows when a checkout's receipts are listed, so their ids open too.
+    locators: Mutex<Locators>,
     map: Arc<MapView>,
 }
 
@@ -93,6 +94,29 @@ pub enum ReceiptResult {
         generation: u64,
         id: usize,
         slip: SlipView,
+    },
+    Stale,
+    NotFound,
+}
+
+/// Receipt files read for one checkout's list; a project's twins share them.
+const RECEIPTS_READ: usize = 50;
+
+#[derive(Debug, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum CheckoutReceipts {
+    Listed {
+        generation: u64,
+        row: usize,
+        receipts: Vec<ReceiptRowView>,
+    },
+    /// The project's receipts folder could not be read.
+    Unreadable {
+        message: String,
     },
     Stale,
     NotFound,
@@ -195,7 +219,7 @@ impl AppState {
                     let snapshot = Arc::new(Snapshot {
                         generation: inner.generation,
                         overview,
-                        locators,
+                        locators: Mutex::new(locators),
                         map: Arc::new(map),
                     });
                     inner.snapshot = Some(Arc::clone(&snapshot));
@@ -248,14 +272,85 @@ impl AppState {
         let Some(snapshot) = self.current(generation) else {
             return ReceiptResult::Stale;
         };
-        let Some(path) = snapshot.locators.get(id) else {
+        let Some(path) = snapshot
+            .locators
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(id)
+            .map(Path::to_path_buf)
+        else {
             return ReceiptResult::NotFound;
         };
         ReceiptResult::Opened {
             generation,
             id,
-            slip: slip(receipt_at(path)),
+            slip: slip(receipt_at(&path)),
         }
+    }
+
+    /// The checkout's own receipts, newest first, each with an id
+    /// [`Self::load_receipt`] opens. A receipt no checkout can claim is left
+    /// to the map's problems.
+    pub fn checkout_receipts(
+        &self,
+        generation: u64,
+        row: usize,
+        receipts_root: &Path,
+        now_ms: u128,
+    ) -> CheckoutReceipts {
+        let Some(snapshot) = self.current(generation) else {
+            return CheckoutReceipts::Stale;
+        };
+        let Some(repo) = snapshot.overview.repos.get(row) else {
+            return CheckoutReceipts::NotFound;
+        };
+        let listed = match &repo.project {
+            Some(project) => {
+                match receipts(
+                    receipts_root,
+                    project.raw(),
+                    None,
+                    Some(RECEIPTS_READ),
+                    None,
+                ) {
+                    Ok(list) => list.rows,
+                    Err(error) => {
+                        return CheckoutReceipts::Unreadable {
+                            message: view::load_error(&error),
+                        }
+                    }
+                }
+            }
+            None => Vec::new(),
+        };
+        let own = listed.iter().filter_map(|listed| match listed {
+            ReceiptListRow::Receipt { path, receipt, .. }
+                if receipt.repo_root.raw() == repo.repo_root.raw() =>
+            {
+                Some((Path::new(path.raw()), receipt.as_ref()))
+            }
+            _ => None,
+        });
+        let mut locators = snapshot
+            .locators
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        CheckoutReceipts::Listed {
+            generation,
+            row,
+            receipts: view::receipt_rows(own, now_ms, &mut locators),
+        }
+    }
+
+    /// The checkout behind a map row, for opening it on this Mac.
+    pub fn resolve_checkout(&self, generation: u64, row: usize) -> Result<PathBuf, SelectionError> {
+        let snapshot = self.current(generation).ok_or(SelectionError::Stale)?;
+        let repo = snapshot
+            .overview
+            .repos
+            .get(row)
+            .ok_or(SelectionError::NotFound)?;
+        Ok(PathBuf::from(repo.repo_root.raw()))
     }
 
     fn memoized(
@@ -748,6 +843,135 @@ mod tests {
         assert!(matches!(state.load_receipt(1, 7), ReceiptResult::NotFound));
         state.load_map(|| NOW, reader(&fx));
         assert!(matches!(state.load_receipt(1, 0), ReceiptResult::Stale));
+    }
+
+    #[test]
+    fn a_checkouts_receipts_list_newest_first_and_open_by_id() {
+        let fx = Fixture::new();
+        fx.save(&run(1, "staging"));
+        let mut failed = run(2, "production");
+        failed["outcome"] = json!({"FailedAtStep": {"step": 1, "partial_update": false}});
+        failed["steps"][1]["status"] = json!("Failed");
+        failed["steps"][1]["exit_code"] = json!(1);
+        fx.save(&failed);
+        let mut twin = run(3, "staging");
+        twin["repo_root"] = json!("/work/twin");
+        fx.save(&twin);
+        let state = AppState::default();
+        let generation = generation(&state.load_map(|| NOW, reader(&fx)));
+        let rows = match state.checkout_receipts(generation, 0, &fx.receipts(), NOW) {
+            CheckoutReceipts::Listed {
+                generation: listed,
+                row,
+                receipts,
+            } => {
+                assert_eq!((listed, row), (generation, 0));
+                receipts
+            }
+            other => panic!("{other:?}"),
+        };
+        let seen: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                (
+                    r.env.as_str(),
+                    r.outcome.text.as_str(),
+                    r.short_sha.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ("production", "Failed at step 1", "2222222"),
+                ("staging", "Succeeded", "2222222")
+            ]
+        );
+        assert_eq!(rows[0].age, "16m ago");
+        match state.load_receipt(generation, rows[0].receipt) {
+            ReceiptResult::Opened {
+                slip: SlipView::Receipt(receipt),
+                ..
+            } => assert_eq!(receipt.env, "production"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_receipt_already_on_the_map_keeps_its_id_in_the_list() {
+        let fx = Fixture::new();
+        fx.save(&run(1, "staging"));
+        let state = AppState::default();
+        let loaded = match state.load_map(|| NOW, reader(&fx)) {
+            LoadResult::Loaded(loaded) => loaded,
+            other => panic!("{other:?}"),
+        };
+        let CellView::Present(cell) = &loaded.map.rows[0].cells[0] else {
+            panic!("no cell");
+        };
+        let CheckoutReceipts::Listed { receipts, .. } =
+            state.checkout_receipts(loaded.generation, 0, &fx.receipts(), NOW)
+        else {
+            panic!("not listed");
+        };
+        assert_eq!(Some(receipts[0].receipt), cell.receipt);
+    }
+
+    #[test]
+    fn checkout_receipts_answer_only_for_the_current_map() {
+        let fx = Fixture::new();
+        fx.save(&run(1, "staging"));
+        let state = AppState::default();
+        state.load_map(|| NOW, reader(&fx));
+        assert!(matches!(
+            state.checkout_receipts(1, 4, &fx.receipts(), NOW),
+            CheckoutReceipts::NotFound
+        ));
+        state.load_map(|| NOW, reader(&fx));
+        assert!(matches!(
+            state.checkout_receipts(1, 0, &fx.receipts(), NOW),
+            CheckoutReceipts::Stale
+        ));
+    }
+
+    #[test]
+    fn a_checkout_known_only_from_approvals_lists_no_receipts() {
+        let fx = Fixture::new();
+        fx.approve("/work/app", "staging");
+        let state = AppState::default();
+        state.load_map(|| NOW, reader(&fx));
+        assert!(matches!(
+            state.checkout_receipts(1, 0, &fx.receipts(), NOW),
+            CheckoutReceipts::Listed { receipts, .. } if receipts.is_empty()
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_receipts_folder_is_said_not_listed_as_empty() {
+        let fx = Fixture::new();
+        fx.save(&run(1, "staging"));
+        let state = AppState::default();
+        state.load_map(|| NOW, reader(&fx));
+        let not_a_folder = fx.dir().join("file");
+        fs::write(&not_a_folder, "").unwrap();
+        assert!(matches!(
+            state.checkout_receipts(1, 0, &not_a_folder, NOW),
+            CheckoutReceipts::Unreadable { .. }
+        ));
+    }
+
+    #[test]
+    fn checkout_paths_resolve_through_the_current_map() {
+        let fx = Fixture::new();
+        fx.save(&run(1, "staging"));
+        let state = AppState::default();
+        state.load_map(|| NOW, reader(&fx));
+        assert_eq!(
+            state.resolve_checkout(1, 0).unwrap(),
+            Path::new("/work/app")
+        );
+        assert_eq!(state.resolve_checkout(1, 3), Err(SelectionError::NotFound));
+        assert_eq!(state.resolve_checkout(2, 0), Err(SelectionError::Stale));
     }
 
     #[test]

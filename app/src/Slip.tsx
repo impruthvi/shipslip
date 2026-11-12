@@ -36,7 +36,7 @@ function flagClass(kind: FlagKind | null): string {
 
 /** Red only for a step that failed; a stop or a lost result is amber.
  * Success stays ink, as on the map. */
-function outcomeClass(outcome: OutcomeView): string {
+export function outcomeClass(outcome: OutcomeView): string {
   if (outcome.tone !== "bad") return "";
   return outcome.kind === "failed" ? "tone-bad" : "tone-attention";
 }

@@ -3,6 +3,7 @@
 
 import type {
   CellView,
+  CheckoutReceipts,
   CommandError,
   CompareResult,
   DeployEntry,
@@ -55,6 +56,7 @@ export const map: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/api",
+            "approved": true,
             "targetMoved": "approved config now deploys to production2:/var/www/api, not this target",
             "needsAttention": true,
             "receipt": 0,
@@ -102,6 +104,7 @@ export const map: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/api",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": true,
             "receipt": 2,
@@ -137,6 +140,7 @@ export const map: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/billing",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": true,
             "receipt": 3,
@@ -164,6 +168,7 @@ export const map: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/billing",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": true,
             "receipt": 5,
@@ -200,6 +205,7 @@ export const map: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/blog",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": true,
             "receipt": 6,
@@ -222,7 +228,8 @@ export const map: LoadResult = {
             "outcome": null,
             "stepsRun": null,
             "flags": [],
-            "target": null,
+            "target": "staging1:/var/www/blog",
+            "approved": true,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": null,
@@ -261,6 +268,7 @@ export const map: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/shop",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": true,
             "receipt": 7,
@@ -294,6 +302,7 @@ export const map: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/shop",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 8,
@@ -337,6 +346,7 @@ export const map: LoadResult = {
               }
             ],
             "target": "staging1:/var/www/shop",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": true,
             "receipt": 10,
@@ -401,6 +411,7 @@ export const wideMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/shop",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 0,
@@ -426,6 +437,7 @@ export const wideMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/shop",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 1,
@@ -451,6 +463,7 @@ export const wideMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "demo1:/var/www/shop",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 2,
@@ -476,6 +489,7 @@ export const wideMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "qa1:/var/www/shop",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 3,
@@ -501,6 +515,7 @@ export const wideMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "sandbox1:/var/www/shop",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 4,
@@ -526,6 +541,7 @@ export const wideMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "uat1:/var/www/shop",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 5,
@@ -574,6 +590,7 @@ export const approvalMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/docs",
+            "approved": true,
             "targetMoved": "approved config now deploys to production1:/var/www/old, not this target",
             "needsAttention": true,
             "receipt": 0,
@@ -599,6 +616,7 @@ export const approvalMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/docs",
+            "approved": true,
             "targetMoved": "approved config now deploys to staging1:/var/www/old, not this target",
             "needsAttention": true,
             "receipt": 1,
@@ -632,6 +650,7 @@ export const approvalMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "production1:/var/www/shop",
+            "approved": true,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 2,
@@ -657,6 +676,7 @@ export const approvalMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/shop",
+            "approved": true,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 3,
@@ -709,6 +729,7 @@ export const terminalMap: LoadResult = {
             "stepsRun": null,
             "flags": [],
             "target": "staging1:/var/www/shop",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": true,
             "receipt": 0,
@@ -725,6 +746,7 @@ export const terminalMap: LoadResult = {
 export const smokeCells: Record<string, CellView> = {
   "failed": {
     "age": "8m ago",
+    "approved": false,
     "atMs": 1791794495000,
     "evidence": [],
     "flags": [
@@ -775,6 +797,7 @@ export const smokeCells: Record<string, CellView> = {
   },
   "passed": {
     "age": "8m ago",
+    "approved": false,
     "atMs": 1791794495000,
     "evidence": [],
     "flags": [],
@@ -811,6 +834,7 @@ export const smokeCells: Record<string, CellView> = {
   },
   "upOnlyFailed": {
     "age": null,
+    "approved": false,
     "atMs": null,
     "evidence": [],
     "flags": [
@@ -845,6 +869,7 @@ export const smokeCells: Record<string, CellView> = {
 
 export const fromStepCell: CellView = {
   "age": "3m ago",
+  "approved": false,
   "atMs": 1791794795000,
   "evidence": [
     "checked out at start"
@@ -983,6 +1008,164 @@ export const compares: Record<string, CompareResult> = {
     "row": 4
   }
 };
+
+export const checkoutReceipts: CheckoutReceipts[] = [
+  {
+    "kind": "listed",
+    "generation": 1,
+    "row": 0,
+    "receipts": [
+      {
+        "receipt": 1,
+        "env": "production",
+        "age": "20m ago",
+        "outcome": {
+          "text": "Stopped in maintenance mode, no steps ran",
+          "tone": "bad",
+          "kind": "stoppedInMaintenance"
+        },
+        "sha": "ffffffffffffffffffffffffffffffffffffffff",
+        "shortSha": "fffffff"
+      },
+      {
+        "receipt": 2,
+        "env": "staging",
+        "age": "4h ago",
+        "outcome": {
+          "text": "Failed at step 1",
+          "tone": "bad",
+          "kind": "failed"
+        },
+        "sha": "7777777777777777777777777777777777777777",
+        "shortSha": "7777777"
+      },
+      {
+        "receipt": 0,
+        "env": "production",
+        "age": "25h ago",
+        "outcome": {
+          "text": "Succeeded",
+          "tone": "good",
+          "kind": "succeeded"
+        },
+        "sha": "ffffffffffffffffffffffffffffffffffffffff",
+        "shortSha": "fffffff"
+      }
+    ]
+  },
+  {
+    "kind": "listed",
+    "generation": 1,
+    "row": 1,
+    "receipts": [
+      {
+        "receipt": 5,
+        "env": "staging",
+        "age": "2h ago",
+        "outcome": {
+          "text": "Failed at step 1",
+          "tone": "bad",
+          "kind": "failed"
+        },
+        "sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "shortSha": "ccccccc"
+      },
+      {
+        "receipt": 3,
+        "env": "production",
+        "age": "6d ago",
+        "outcome": {
+          "text": "Succeeded",
+          "tone": "good",
+          "kind": "succeeded"
+        },
+        "sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "shortSha": "ddddddd"
+      }
+    ]
+  },
+  {
+    "kind": "listed",
+    "generation": 1,
+    "row": 2,
+    "receipts": [
+      {
+        "receipt": 6,
+        "env": "production",
+        "age": "30m ago",
+        "outcome": {
+          "text": "Failed at step 0",
+          "tone": "bad",
+          "kind": "failed"
+        },
+        "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "shortSha": "eeeeeee"
+      }
+    ]
+  },
+  {
+    "kind": "listed",
+    "generation": 1,
+    "row": 3,
+    "receipts": [
+      {
+        "receipt": 7,
+        "env": "staging",
+        "age": "4d ago",
+        "outcome": {
+          "text": "Succeeded",
+          "tone": "good",
+          "kind": "succeeded"
+        },
+        "sha": "9999999999999999999999999999999999999999",
+        "shortSha": "9999999"
+      }
+    ]
+  },
+  {
+    "kind": "listed",
+    "generation": 1,
+    "row": 4,
+    "receipts": [
+      {
+        "receipt": 9,
+        "env": "production",
+        "age": "45m ago",
+        "outcome": {
+          "text": "Cancelled before changes",
+          "tone": "neutral",
+          "kind": "cancelled"
+        },
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "shortSha": "aaaaaaa"
+      },
+      {
+        "receipt": 10,
+        "env": "staging",
+        "age": "1h ago",
+        "outcome": {
+          "text": "Succeeded",
+          "tone": "good",
+          "kind": "succeeded"
+        },
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "shortSha": "aaaaaaa"
+      },
+      {
+        "receipt": 8,
+        "env": "production",
+        "age": "3d ago",
+        "outcome": {
+          "text": "Succeeded",
+          "tone": "good",
+          "kind": "succeeded"
+        },
+        "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "shortSha": "bbbbbbb"
+      }
+    ]
+  }
+];
 
 export const receipts: Record<string, ReceiptResult> = {
   "0": {
@@ -2109,6 +2292,7 @@ export const watchResults: LoadResult = {
               }
             ],
             "target": "staging1:/var/www/watchInterrupted",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": true,
             "receipt": 0,
@@ -2149,6 +2333,7 @@ export const watchResults: LoadResult = {
               }
             ],
             "target": "staging1:/var/www/watchNoFile",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 1,
@@ -2189,6 +2374,7 @@ export const watchResults: LoadResult = {
               }
             ],
             "target": "staging1:/var/www/watchSkipped",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 2,
@@ -2229,6 +2415,7 @@ export const watchResults: LoadResult = {
               }
             ],
             "target": "staging1:/var/www/watchStopped",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": 3,
@@ -2269,6 +2456,7 @@ export const watchResults: LoadResult = {
               }
             ],
             "target": "staging1:/var/www/watchUnreadable",
+            "approved": false,
             "targetMoved": null,
             "needsAttention": true,
             "receipt": 4,

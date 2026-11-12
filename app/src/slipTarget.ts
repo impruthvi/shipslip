@@ -27,6 +27,14 @@ export function target(cell: EnvCellView, view: PaneView): Target {
   return { id: null, role: null };
 }
 
+/** What a receipt picked from a checkout's table is to its cell. */
+export function roleOf(cell: EnvCellView, id: number): Target["role"] {
+  if (id === cell.staleReceipt) return "stale";
+  if (id === cell.lastAttempt?.receipt) return "last";
+  if (id === cell.receipt) return cell.mark === "noCode" ? null : "code";
+  return null;
+}
+
 export interface ContextLink {
   text: string;
   /** The button's spoken name; "open" alone says too little. */

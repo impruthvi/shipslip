@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type Ref } from "react";
+import { useEffect, useState, type Ref } from "react";
+import { Menu, type MenuItem } from "./Menu";
 import { deploy } from "./deployApi";
 import { withCode } from "./text";
 import type { DeployEntry, RecoveryAction } from "./types";
@@ -63,85 +64,6 @@ export type EntryChoice =
   | { kind: "fromStep"; step: number }
   | { kind: "attach" }
   | { kind: "up" };
-
-interface MenuItem {
-  label: string;
-  onSelect: () => void;
-}
-
-/** A menu button: arrows move between items, Esc and Tab close it. */
-function Menu({ items }: { items: MenuItem[] }) {
-  const [open, setOpen] = useState(false);
-  const button = useRef<HTMLButtonElement>(null);
-  const list = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    list.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
-    const onPointer = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (!list.current?.contains(target) && !button.current?.contains(target)) setOpen(false);
-    };
-    document.addEventListener("pointerdown", onPointer);
-    return () => document.removeEventListener("pointerdown", onPointer);
-  }, [open]);
-  const close = () => {
-    setOpen(false);
-    button.current?.focus();
-  };
-  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
-    const entries = [...(list.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
-    const at = entries.indexOf(document.activeElement as HTMLElement);
-    const next = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: entries.length - 1 }[event.key];
-    if (next !== undefined) {
-      event.preventDefault();
-      entries[(next + entries.length) % entries.length]?.focus();
-    } else if (event.key === "Escape") {
-      // The pane's own Escape would close the drawer.
-      event.preventDefault();
-      event.stopPropagation();
-      close();
-    } else if (event.key === "Tab") {
-      setOpen(false);
-    }
-  };
-  return (
-    <div className="menu">
-      <button
-        type="button"
-        ref={button}
-        className="button"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? "deploy-entry-more" : undefined}
-        onClick={() => setOpen(!open)}
-      >
-        More
-        <svg className="menu-chevron" width="8" height="8" viewBox="0 0 8 8" aria-hidden="true">
-          <path d="M1.5 3 L4 5.5 L6.5 3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
-      {open && (
-        <div id="deploy-entry-more" className="menu-list" role="menu" aria-label="More" ref={list} onKeyDown={onKeyDown}>
-          {items.map((item) => (
-            <button
-              type="button"
-              role="menuitem"
-              tabIndex={-1}
-              className="menu-item"
-              key={item.label}
-              onClick={() => {
-                close();
-                item.onSelect();
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
 
 /** The panel's actions for the selected cell: what the env's newest run
  * left to do, each choice with what it does, then the deploy itself. */

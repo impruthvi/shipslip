@@ -4,13 +4,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import type { CompareResult, LoadResult, QuitRun, ReceiptResult } from "./types";
+import type { CheckoutReceipts, CompareResult, LoadResult, QuitRun, ReceiptResult } from "./types";
 
 export interface Backend {
   loadMap(): Promise<LoadResult>;
   receiptsChanged(): Promise<boolean>;
   compare(generation: number, row: number, a: number, b: number): Promise<CompareResult>;
   loadReceipt(generation: number, id: number): Promise<ReceiptResult>;
+  /** A map row's own receipts, newest first; their ids open with `loadReceipt`. */
+  checkoutReceipts(generation: number, row: number): Promise<CheckoutReceipts>;
   copyText(text: string): Promise<void>;
   /** Calls `handler` each time the window gains focus; resolves to an unsubscribe. */
   onFocus(handler: () => void): Promise<() => void>;
@@ -24,6 +26,7 @@ const tauri: Backend = {
   receiptsChanged: () => invoke<boolean>("receipts_changed"),
   compare: (generation, row, a, b) => invoke<CompareResult>("compare", { generation, row, a, b }),
   loadReceipt: (generation, id) => invoke<ReceiptResult>("load_receipt", { generation, id }),
+  checkoutReceipts: (generation, row) => invoke<CheckoutReceipts>("checkout_receipts", { generation, row }),
   copyText: (text) => writeText(text),
   onFocus: (handler) =>
     getCurrentWindow().onFocusChanged(({ payload: focused }) => {
@@ -50,6 +53,7 @@ export const api: Backend = {
   receiptsChanged: async () => (await getBackend()).receiptsChanged(),
   compare: async (...args) => (await getBackend()).compare(...args),
   loadReceipt: async (...args) => (await getBackend()).loadReceipt(...args),
+  checkoutReceipts: async (...args) => (await getBackend()).checkoutReceipts(...args),
   copyText: async (text) => (await getBackend()).copyText(text),
   onFocus: async (handler) => (await getBackend()).onFocus(handler),
   receiptSeen: async (runId) => (await getBackend()).receiptSeen(runId),
