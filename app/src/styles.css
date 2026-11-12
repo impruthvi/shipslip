@@ -298,6 +298,11 @@ button {
   color: var(--color-text);
 }
 
+.side-more {
+  align-self: flex-start;
+  margin: 0 var(--space-8);
+}
+
 .side-empty {
   padding: 0 var(--space-8);
   font-size: var(--text-12);

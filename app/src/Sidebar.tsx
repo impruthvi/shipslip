@@ -1,4 +1,4 @@
-import type { ReactNode, Ref } from "react";
+import { useState, type ReactNode, type Ref } from "react";
 import { Flap, reason, status, type StatusTone } from "./Cell";
 import { Footer } from "./Footer";
 import { Mark, markLabel } from "./Mark";
@@ -10,6 +10,9 @@ import type { MapView, RunInfo } from "./types";
 import type { MapState } from "./useReleaseMap";
 
 const rank: Record<StatusTone, number> = { bad: 0, attention: 1, running: 2, ink: 3, muted: 4 };
+/** From this many items, Needs attention shows only the worst few so Projects stays in view. */
+const collapseAttentionAt = 5;
+const collapsedAttention = 3;
 
 interface Props {
   state: MapState;
@@ -73,6 +76,7 @@ function EnvMarks({ map, row, live }: { map: MapView; row: MapView["rows"][numbe
 }
 
 export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onProblem, live, busy, onAllProjects }: Props) {
+  const [allAttention, setAllAttention] = useState(false);
   const map = state.phase === "shown" && state.loaded.map.screen !== "firstRun" ? state.loaded.map : null;
   const labels = map?.rows.map((row) => row.label) ?? [];
   const terminal = map?.rows.flatMap((row, rowIndex) =>
@@ -96,6 +100,8 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
         )
         .sort((a, b) => rank[a.said.tone] - rank[b.said.tone])
     : [];
+  const collapsible = attention.length >= collapseAttentionAt;
+  const attentionShown = collapsible && !allAttention ? attention.slice(0, collapsedAttention) : attention;
   return (
     <nav className="sidebar" aria-label="Sidebar">
       <div className="titlebar-drag" data-tauri-drag-region />
@@ -184,7 +190,7 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
             <p className="side-empty muted">Nothing on this Mac</p>
           ) : (
             <ul className="side-list">
-              {attention.map(({ row, cell, r, c, env, said, why }) => (
+              {attentionShown.map(({ row, cell, r, c, env, said, why }) => (
                 <li key={`${row.repoRoot}\n${env}`}>
                   <Item busy={busy} onClick={() => onProblem(r, c)}>
                     <span className="side-line">
@@ -206,6 +212,16 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
                 </li>
               ))}
             </ul>
+          )}
+          {collapsible && (
+            <button
+              type="button"
+              className="link side-more"
+              aria-expanded={allAttention}
+              onClick={() => setAllAttention(!allAttention)}
+            >
+              {allAttention ? "Show less" : `Show all ${attention.length}`}
+            </button>
           )}
         </section>
       )}
