@@ -133,7 +133,7 @@ impl App {
                     .receipt_stamp
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner) = stamp;
-                Ok(crate::state::with_configured_envs(overview))
+                Ok(crate::state::with_checkout_configs(overview, trust))
             }
             Err(reason) => Err(ReceiptError::Invalid(reason.clone()).into()),
         })

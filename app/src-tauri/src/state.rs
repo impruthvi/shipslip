@@ -2,7 +2,7 @@
 //! behind its ids, and git comparisons already made. Every answer carries
 //! the generation of the map it belongs to, so the UI can drop late ones.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -160,10 +160,10 @@ impl AppState {
 
     /// Reads the map unless a read is already running; then that read runs
     /// once more when it finishes and answers with the newer map.
-    pub fn load_map(
+    pub fn load_map<R: Into<MapRead>>(
         &self,
         now_ms: impl Fn() -> u128,
-        read_overview: impl Fn() -> Result<Overview, ReceiptQueryError>,
+        read_overview: impl Fn() -> Result<R, ReceiptQueryError>,
     ) -> LoadResult {
         {
             let mut inner = self.inner();
@@ -176,9 +176,13 @@ impl AppState {
         let _release = ReleaseOnPanic(&self.inner);
         loop {
             let started = std::time::Instant::now();
-            let built = read_overview().map(|overview| {
+            let built = read_overview().map(|read| {
+                let MapRead {
+                    overview,
+                    needs_approval,
+                } = read.into();
                 let mut locators = Locators::default();
-                let map = view::map(&overview, now_ms(), &mut locators);
+                let map = view::map(&overview, &needs_approval, now_ms(), &mut locators);
                 (overview, locators, map)
             });
             if cfg!(debug_assertions) {
@@ -309,10 +313,29 @@ impl Drop for ReleaseOnPanic<'_> {
     }
 }
 
-/// Adds each checkout's configured envs that have no cell yet, as never
-/// deployed, so "Review deploy…" can reach them. A config that can't be read
-/// adds nothing; the env's entry explains why when there is a cell.
-pub fn with_configured_envs(mut overview: Overview) -> Overview {
+/// What one map load read: the overview, and the checkouts whose
+/// `.shipslip.toml` has an environment without a current approval.
+pub struct MapRead {
+    pub overview: Overview,
+    /// Checkout paths, as the overview spells them.
+    pub needs_approval: BTreeSet<String>,
+}
+
+impl From<Overview> for MapRead {
+    fn from(overview: Overview) -> Self {
+        Self {
+            overview,
+            needs_approval: BTreeSet::new(),
+        }
+    }
+}
+
+/// Adds each checkout's configured environments that have no cell yet, as
+/// never deployed, so "Review deploy…" can reach them, and notes the checkouts
+/// that need approval. A config that can't be read adds nothing and is not
+/// judged; the environment's entry explains why when there is a cell.
+pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRead {
+    let mut needs_approval = BTreeSet::new();
     for repo in overview.repos.iter_mut().filter(|repo| !repo.path_missing) {
         let Ok(config) = LoadedConfig::load(Path::new(repo.repo_root.raw()), None) else {
             continue;
@@ -338,8 +361,22 @@ pub fn with_configured_envs(mut overview: Overview) -> Overview {
         }
         repo.envs
             .sort_by(|a, b| env_order(a.env.raw(), b.env.raw()));
+        if !approved(&config, trust_path) {
+            needs_approval.insert(repo.repo_root.raw().to_string());
+        }
     }
-    overview
+    MapRead {
+        overview,
+        needs_approval,
+    }
+}
+
+/// Every configured environment has an approval that matches the config as it
+/// reads now. An approvals file that can't be read approves nothing.
+fn approved(config: &LoadedConfig, trust_path: &Path) -> bool {
+    config
+        .environment_names()
+        .all(|env| config.trusted_target(env, trust_path).is_ok())
 }
 
 #[cfg(test)]
@@ -393,28 +430,20 @@ mod tests {
     #[test]
     fn configured_envs_without_runs_or_approval_show_as_never_deployed() {
         let fx = Fixture::new();
-        let root = fx.dir().join("shop");
-        fs::create_dir_all(&root).unwrap();
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&root)
-            .status()
-            .unwrap();
-        assert!(status.success());
-        fs::write(
-            root.join(".shipslip.toml"),
+        let root = fx.checkout(
+            "shop",
             "[project]\nname = \"app\"\nstack = \"laravel\"\n\
              [env.production]\nssh = \"web1\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = true\n\
              [env.demo]\nssh = \"web3\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = false\n\
              [env.staging]\nssh = \"web2\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = false\n",
-        )
-        .unwrap();
-        let root = fs::canonicalize(root).unwrap();
+        );
         let mut receipt = run(1, "production");
         receipt["repo_root"] = json!(root.to_string_lossy());
         fx.save(&receipt);
 
-        let shown = with_configured_envs(overview(&fx.receipts(), &fx.trust()).unwrap());
+        let shown =
+            with_checkout_configs(overview(&fx.receipts(), &fx.trust()).unwrap(), &fx.trust())
+                .overview;
         let envs: Vec<_> = shown.repos[0].envs.iter().map(|c| c.env.raw()).collect();
         assert_eq!(envs, ["production", "staging", "demo"]);
         let staging = &shown.repos[0].envs[1];
@@ -424,8 +453,84 @@ mod tests {
 
         // A checkout that is gone or has no config adds nothing.
         fs::remove_file(root.join(".shipslip.toml")).unwrap();
-        let shown = with_configured_envs(overview(&fx.receipts(), &fx.trust()).unwrap());
+        let shown =
+            with_checkout_configs(overview(&fx.receipts(), &fx.trust()).unwrap(), &fx.trust())
+                .overview;
         assert_eq!(shown.repos[0].envs.len(), 1);
+    }
+
+    const TWO_ENVS: &str = "[project]\nname = \"app\"\nstack = \"laravel\"\n\
+        [env.production]\nssh = \"web1\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = true\n\
+        [env.staging]\nssh = \"web2\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = false\n";
+
+    fn needs_approval(fx: &Fixture) -> bool {
+        let state = AppState::default();
+        let read = || {
+            Ok(with_checkout_configs(
+                overview(&fx.receipts(), &fx.trust())?,
+                &fx.trust(),
+            ))
+        };
+        match state.load_map(|| NOW, read) {
+            LoadResult::Loaded(loaded) => loaded.map.rows[0].needs_approval,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_checkout_needs_approval_until_every_configured_environment_has_a_current_one() {
+        let fx = Fixture::new();
+        let root = fx.checkout("shop", TWO_ENVS);
+        let mut receipt = run(1, "production");
+        receipt["repo_root"] = json!(root.to_string_lossy());
+        fx.save(&receipt);
+        assert!(needs_approval(&fx), "nothing approved");
+
+        fx.approve_config(&root, "production");
+        assert!(needs_approval(&fx), "staging has no approval");
+
+        fx.approve_config(&root, "staging");
+        assert!(!needs_approval(&fx), "both approved as configured");
+
+        let changed = TWO_ENVS.replace("ssh = \"web2\"", "ssh = \"web9\"");
+        fs::write(root.join(".shipslip.toml"), changed).unwrap();
+        assert!(needs_approval(&fx), "staging changed since its approval");
+    }
+
+    #[test]
+    fn a_checkout_known_only_from_approvals_needs_approval_when_its_config_changed() {
+        let fx = Fixture::new();
+        let root = fx.checkout("shop", TWO_ENVS);
+        fx.approve_at(&root.to_string_lossy(), "staging", "web2", "/srv/app");
+        assert!(needs_approval(&fx));
+    }
+
+    #[test]
+    fn an_unreadable_approvals_file_approves_nothing() {
+        let fx = Fixture::new();
+        let root = fx.checkout("shop", TWO_ENVS);
+        let mut receipt = run(1, "production");
+        receipt["repo_root"] = json!(root.to_string_lossy());
+        fx.save(&receipt);
+        fx.approve_config(&root, "production");
+        fx.approve_config(&root, "staging");
+        fs::write(fx.trust(), "not json").unwrap();
+        assert!(needs_approval(&fx));
+    }
+
+    #[test]
+    fn a_checkout_without_a_readable_config_does_not_need_approval() {
+        let fx = Fixture::new();
+        // Receipts only: the checkout is not on this Mac.
+        fx.save(&run(1, "staging"));
+        assert!(!needs_approval(&fx));
+
+        let fx = Fixture::new();
+        let root = fx.checkout("shop", "not = [toml");
+        let mut receipt = run(1, "staging");
+        receipt["repo_root"] = json!(root.to_string_lossy());
+        fx.save(&receipt);
+        assert!(!needs_approval(&fx));
     }
 
     const NOW: u128 = 1_000_000;
@@ -464,7 +569,7 @@ mod tests {
     #[test]
     fn failed_load_keeps_and_returns_the_shown_map() {
         let state = AppState::default();
-        let fail = || Err(ReceiptError::Invalid("root \u{1b}gone".into()).into());
+        let fail = || Err::<Overview, _>(ReceiptError::Invalid("root \u{1b}gone".into()).into());
         match state.load_map(|| NOW, fail) {
             LoadResult::Failed { message, current } => {
                 assert!(current.is_none());
@@ -523,7 +628,10 @@ mod tests {
         let fx = Fixture::new();
         let state = AppState::default();
         let panicked = catch_unwind(AssertUnwindSafe(|| {
-            state.load_map(|| NOW, || panic!("read failed"))
+            state.load_map(
+                || NOW,
+                || -> Result<Overview, ReceiptQueryError> { panic!("read failed") },
+            )
         }));
         assert!(panicked.is_err());
         assert_eq!(generation(&state.load_map(|| NOW, reader(&fx))), 1);

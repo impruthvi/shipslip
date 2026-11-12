@@ -9,7 +9,7 @@ function props(busy: boolean) {
   const state: MapState = { phase: "shown", loaded: fixtures.map, readAt: new Date(0), failure: null };
   return {
     state, busy, onRetry: vi.fn(), runs: [fixtures.runInfo], now: fixtures.runInfo.startedAtMs,
-    onFollow: vi.fn(), runsButton: { current: null }, onProblem: vi.fn(), live: {},
+    onFollow: vi.fn(), runsButton: { current: null }, onProblem: vi.fn(), live: {}, onAllProjects: vi.fn(),
   };
 }
 
@@ -91,4 +91,83 @@ test.each([false, true])("an app-owned running environment is not duplicated (te
   expect(within(runs).getAllByRole("listitem")).toHaveLength(1);
   expect(runs).not.toHaveTextContent("Running from the terminal");
   expect(within(screen.getByRole("region", { name: /^Needs attention/ })).queryByRole("listitem")).toBeNull();
+});
+
+function shown(loaded: typeof fixtures.map): MapState {
+  if (loaded.kind !== "loaded") throw new Error("fixture not loaded");
+  return { phase: "shown", loaded, readAt: new Date(0), failure: null };
+}
+
+test("the sidebar runs Add project, All projects, Deploys running, Needs attention, problems, then Projects", () => {
+  render(<Sidebar {...props(false)} />);
+  const nav = screen.getByRole("navigation", { name: "Sidebar" });
+  const order = [
+    screen.getByRole("button", { name: "Add project" }),
+    screen.getByRole("button", { name: "All projects" }),
+    screen.getByRole("region", { name: "Deploys running" }),
+    screen.getByRole("region", { name: /^Needs attention/ }),
+    screen.getByText("1 receipt could not be read"),
+    screen.getByRole("region", { name: "Projects" }),
+  ];
+  for (const [before, after] of order.slice(0, -1).map((el, i) => [el, order[i + 1]])) {
+    expect(nav).toContainElement(before);
+    expect(before.compareDocumentPosition(after) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  }
+  expect(screen.getByRole("button", { name: "All projects" })).toHaveAttribute("aria-current", "page");
+});
+
+test("All projects asks for its screen; a deploy screen keeps it from navigating", () => {
+  const current = props(false);
+  const onAllProjects = vi.fn();
+  const { rerender } = render(<Sidebar {...current} onAllProjects={onAllProjects} />);
+  fireEvent.click(screen.getByRole("button", { name: "All projects" }));
+  expect(onAllProjects).toHaveBeenCalledOnce();
+  rerender(<Sidebar {...current} busy onAllProjects={onAllProjects} />);
+  expect(screen.queryByRole("button", { name: "All projects" })).toBeNull();
+  expect(screen.getByText("All projects")).not.toHaveAttribute("aria-current");
+});
+
+test("Projects has one line per checkout, with the folder only on repeated names", () => {
+  render(<Sidebar {...props(false)} />);
+  const projects = screen.getByRole("region", { name: "Projects" });
+  const lines = within(projects).getAllByRole("listitem");
+  if (fixtures.map.kind !== "loaded") throw new Error("fixture");
+  expect(lines).toHaveLength(fixtures.map.map.rows.length);
+  expect(lines.map((line) => line.querySelector(".side-name")?.textContent)).toEqual([
+    "api",
+    "billing",
+    "blog",
+    "shop · in ~/tmp",
+    "shop · in ~/code",
+  ]);
+});
+
+test("a checkout's marks keep their evidence tone; hovering one names its environment and status word", () => {
+  if (fixtures.map.kind !== "loaded") throw new Error("fixture");
+  const api = fixtures.map.map.rows[0];
+  render(<Sidebar {...props(false)} live={{ [`${api.repoRoot}\nstaging`]: "Step 1" }} />);
+  const projects = screen.getByRole("region", { name: "Projects" });
+  const [apiLine, billingLine] = within(projects).getAllByRole("listitem");
+  const marks = within(billingLine).getAllByRole("img");
+  expect(marks.map((mark) => mark.getAttribute("title"))).toEqual([
+    "production: Out of date?",
+    "staging: Incomplete",
+  ]);
+  // The word is red on the map; the mark keeps the incomplete evidence tone.
+  expect(within(billingLine).getByTitle("staging: Incomplete").querySelector("svg")).toHaveClass("mark-attention");
+  // A run going now changes the word, never the mark.
+  const running = within(apiLine).getByTitle("staging: Running");
+  expect(running.querySelector("svg")).not.toHaveClass("mark-running");
+  expect(projects.querySelector(".flap, .tone-bad, .mark-bad, .mark-running")).toBeNull();
+});
+
+test("a checkout whose config has an environment without a current approval reads Needs approval", () => {
+  render(<Sidebar {...props(false)} state={shown(fixtures.approvalMap)} />);
+  const projects = screen.getByRole("region", { name: "Projects" });
+  const [docs, shop] = within(projects).getAllByRole("listitem");
+  expect(docs).toHaveTextContent(/^docs\s*Needs approval$/);
+  expect(within(docs).getByText("Needs approval")).toHaveClass("tone-attention");
+  expect(within(docs).queryByRole("img")).toBeNull();
+  expect(shop).not.toHaveTextContent("Needs approval");
+  expect(within(shop).getAllByRole("img")).toHaveLength(2);
 });

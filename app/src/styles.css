@@ -378,6 +378,42 @@ button.side-item:hover {
   flex-shrink: 0;
 }
 
+.side-top {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+.side-add {
+  width: 100%;
+}
+
+.side-all {
+  font-size: var(--text-13);
+  font-weight: var(--font-weight-semibold);
+}
+
+.side-all[aria-current="page"] {
+  background: var(--color-selection);
+}
+
+.side-checkout {
+  font-size: var(--text-13);
+}
+
+/* Evidence marks only: the status word lives in Needs attention and on the map. */
+.side-marks {
+  display: flex;
+  flex-shrink: 0;
+  gap: var(--space-4);
+}
+
+.side-state {
+  flex-shrink: 0;
+  font-size: var(--text-11);
+  line-height: 14px;
+}
+
 /* An unreadable receipt is a note, not a failed deploy. */
 .sidebar .banner {
   flex-direction: column;

@@ -1,12 +1,12 @@
 import type { ReactNode, Ref } from "react";
 import { Flap, reason, status, type StatusTone } from "./Cell";
 import { Footer } from "./Footer";
-import { Mark } from "./Mark";
+import { Mark, markLabel } from "./Mark";
 import { ConnectionGap } from "./ConnectionGap";
 import { ProblemsStrip } from "./ProblemsStrip";
 import { twinFolder } from "./text";
 import { elapsed } from "./time";
-import type { RunInfo } from "./types";
+import type { MapView, RunInfo } from "./types";
 import type { MapState } from "./useReleaseMap";
 
 const rank: Record<StatusTone, number> = { bad: 0, attention: 1, running: 2, ink: 3, muted: 4 };
@@ -25,6 +25,7 @@ interface Props {
   live: Record<string, string>;
   /** A deploy screen is open: it owns navigation, so the lists only show. */
   busy: boolean;
+  onAllProjects: () => void;
 }
 
 /** Which checkout a same-named app is, kept whole so it never breaks mid-name. */
@@ -52,7 +53,26 @@ function Item({
   );
 }
 
-export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onProblem, live, busy }: Props) {
+/** One mark per environment, in map column order. The mark keeps its evidence
+ * tone; the status word is only named on hover. */
+function EnvMarks({ map, row, live }: { map: MapView; row: MapView["rows"][number]; live: Record<string, string> }) {
+  return (
+    <span className="side-marks">
+      {row.cells.map((cell, col) => {
+        if (cell.kind !== "present") return null;
+        const env = map.envs[col];
+        const tip = `${env}: ${status(cell, live[`${row.repoRoot}\n${env}`]).word}`;
+        return (
+          <span key={env} className="side-mark" role="img" title={tip} aria-label={`${tip}, ${markLabel[cell.mark]}`}>
+            <span aria-hidden><Mark kind={cell.mark} size={8} /></span>
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onProblem, live, busy, onAllProjects }: Props) {
   const map = state.phase === "shown" && state.loaded.map.screen !== "firstRun" ? state.loaded.map : null;
   const labels = map?.rows.map((row) => row.label) ?? [];
   const terminal = map?.rows.flatMap((row, rowIndex) =>
@@ -79,6 +99,19 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
   return (
     <nav className="sidebar" aria-label="Sidebar">
       <div className="titlebar-drag" data-tauri-drag-region />
+      <div className="side-top">
+        {/* Opens the setup sheet once Add project lands. */}
+        <button type="button" className="button side-add" disabled>
+          Add project
+        </button>
+        {busy ? (
+          <div className="side-item side-item-static side-all">All projects</div>
+        ) : (
+          <button type="button" className="side-item side-all" aria-current="page" onClick={onAllProjects}>
+            All projects
+          </button>
+        )}
+      </div>
       <section className="side-section" aria-labelledby="side-runs">
         <h2 id="side-runs" className="side-title">
           Deploys running
@@ -182,6 +215,30 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
           onSelect={onProblem}
           cellName={(row, col) => `${map.rows[row]?.label} · ${map.envs[col]}`}
         />
+      )}
+      {map && (
+        <section className="side-section" aria-labelledby="side-projects">
+          <h2 id="side-projects" className="side-title">
+            Projects
+          </h2>
+          <ul className="side-list">
+            {map.rows.map((row) => (
+              <li key={row.repoRoot} className="side-item side-item-static side-checkout">
+                <span className="side-line">
+                  <span className="side-name" title={row.repoRoot}>
+                    {row.label}
+                    <Folder path={twinFolder(labels, row.label, row.repoRoot)} />
+                  </span>
+                  {row.needsApproval ? (
+                    <span className="side-state tone-attention">Needs approval</span>
+                  ) : (
+                    <EnvMarks map={map} row={row} live={live} />
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
       )}
       <Footer state={state} onRetry={onRetry} />
     </nav>

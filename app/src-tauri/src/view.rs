@@ -2,6 +2,7 @@
 //! receipt, the trust store or the file system is escaped here, and receipt
 //! files are replaced by ids, so the UI never holds or sends a path.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -68,6 +69,9 @@ pub struct RowView {
     pub label: String,
     pub repo_root: String,
     pub path_missing: bool,
+    /// The checkout's `.shipslip.toml` has an environment without a current
+    /// approval.
+    pub needs_approval: bool,
     /// One per column in [`MapView::envs`].
     pub cells: Vec<CellView>,
 }
@@ -284,7 +288,12 @@ pub fn compare_view(a: &str, b: &str, comparison: &EnvComparison) -> CompareView
     }
 }
 
-pub fn map(overview: &Overview, now_ms: u128, locators: &mut Locators) -> MapView {
+pub fn map(
+    overview: &Overview,
+    needs_approval: &BTreeSet<String>,
+    now_ms: u128,
+    locators: &mut Locators,
+) -> MapView {
     let screen = match (overview.repos.is_empty(), overview.problems.is_empty()) {
         (false, _) => Screen::Map,
         (true, true) => Screen::FirstRun,
@@ -294,7 +303,10 @@ pub fn map(overview: &Overview, now_ms: u128, locators: &mut Locators) -> MapVie
     let rows = overview
         .repos
         .iter()
-        .map(|row| row_view(row, &columns, now_ms, locators))
+        .map(|row| {
+            let needs_approval = needs_approval.contains(row.repo_root.raw());
+            row_view(row, needs_approval, &columns, now_ms, locators)
+        })
         .collect();
     let problems = overview
         .problems
@@ -329,11 +341,18 @@ pub fn map(overview: &Overview, now_ms: u128, locators: &mut Locators) -> MapVie
     }
 }
 
-fn row_view(row: &RepoRow, columns: &[&str], now_ms: u128, locators: &mut Locators) -> RowView {
+fn row_view(
+    row: &RepoRow,
+    needs_approval: bool,
+    columns: &[&str],
+    now_ms: u128,
+    locators: &mut Locators,
+) -> RowView {
     RowView {
         label: row.label.field(),
         repo_root: row.repo_root.field(),
         path_missing: row.path_missing,
+        needs_approval,
         cells: columns
             .iter()
             .map(
@@ -610,7 +629,10 @@ mod tests {
     fn load(fx: &Fixture) -> (MapView, Locators) {
         let overview = overview(&fx.receipts(), &fx.trust()).unwrap();
         let mut locators = Locators::default();
-        (map(&overview, NOW, &mut locators), locators)
+        (
+            map(&overview, &BTreeSet::new(), NOW, &mut locators),
+            locators,
+        )
     }
 
     fn present(view: &MapView, row: usize, col: usize) -> &EnvCellView {

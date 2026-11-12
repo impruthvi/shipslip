@@ -53,6 +53,33 @@ impl Fixture {
         approve_trust(&self.trust(), Path::new(repo_root), env, snapshot).unwrap();
     }
 
+    /// A git checkout named `name` holding `config` as its `.shipslip.toml`;
+    /// returns its canonical path, the one receipts and approvals record.
+    pub fn checkout(&self, name: &str, config: &str) -> PathBuf {
+        let root = self.0.join("code").join(name);
+        fs::create_dir_all(&root).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        fs::write(root.join(".shipslip.toml"), config).unwrap();
+        fs::canonicalize(root).unwrap()
+    }
+
+    /// Approves `env` exactly as the checkout's config now reads.
+    pub fn approve_config(&self, root: &Path, env: &str) {
+        let config = shipslip::config::LoadedConfig::load(root, None).unwrap();
+        approve_trust(
+            &self.trust(),
+            root,
+            env,
+            config.trust_snapshot(env).unwrap(),
+        )
+        .unwrap();
+    }
+
     /// Saves a receipt under its project and env. Names must be plain
     /// (letters, digits, `-`, `_`): the library encodes anything else.
     pub fn save(&self, receipt: &Value) -> PathBuf {
