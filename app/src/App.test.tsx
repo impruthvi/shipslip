@@ -224,6 +224,10 @@ test("launch selects the first cell that needs attention; clicks and problems se
   expect(selected()[0]).toHaveTextContent("ddddddd");
 
   const absent = screen.getAllByRole("gridcell").find((c) => c.getAttribute("aria-label")?.endsWith(", none"))!;
+  // Selecting cells elsewhere leaves Needs attention collapsed.
+  expect(within(screen.getByRole("navigation")).getByRole("button", { name: /^Show all \d+$/ }))
+    .toHaveAttribute("aria-expanded", "false");
+  fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: /^Show all \d+$/ }));
   fireEvent.click(within(screen.getByRole("navigation")).getByRole("button", { name: /^blog Not known production$/ }));
   expect(selected()[0]).toHaveAccessibleName(/^blog, production/);
   expect(selected()[0]).toHaveFocus();

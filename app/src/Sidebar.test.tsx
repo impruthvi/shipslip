@@ -23,7 +23,7 @@ test("a deploy keeps the running and attention lists visible without navigation 
   const attention = screen.getByRole("heading", { name: /^Needs attention/ }).closest("section")!;
   expect(within(attention).getAllByRole("listitem").length).toBeGreaterThan(0);
   expect(within(runs).queryByRole("button")).toBeNull();
-  expect(within(attention).queryByRole("button")).toBeNull();
+  expect(within(within(attention).getByRole("list")).queryByRole("button")).toBeNull();
   expect(current.onFollow).not.toHaveBeenCalled();
   expect(current.onProblem).not.toHaveBeenCalled();
 });
@@ -170,4 +170,67 @@ test("a checkout whose config has an environment without a current approval read
   expect(within(docs).queryByRole("img")).toBeNull();
   expect(shop).not.toHaveTextContent("Needs approval");
   expect(within(shop).getAllByRole("img")).toHaveLength(2);
+});
+
+/** The fixture map with only its first `count` attention cells still needing attention. */
+function attentionMap(count: number): MapState {
+  const loaded = structuredClone(fixtures.map);
+  if (loaded.kind !== "loaded") throw new Error("fixture not loaded");
+  let kept = 0;
+  for (const row of loaded.map.rows) {
+    for (const cell of row.cells) {
+      if (cell.kind !== "present" || !cell.needsAttention) continue;
+      cell.needsAttention = kept < count;
+      kept += 1;
+    }
+  }
+  if (kept < count) throw new Error("fixture has too few attention cells");
+  return shown(loaded);
+}
+
+function attentionNames(section: HTMLElement) {
+  return within(within(section).getByRole("list")).getAllByRole("listitem").map((item) => item.textContent);
+}
+
+test("with 4 or fewer, Needs attention shows every item and no toggle", () => {
+  render(<Sidebar {...props(false)} state={attentionMap(4)} />);
+  const section = screen.getByRole("region", { name: /^Needs attention/ });
+  expect(attentionNames(section)).toHaveLength(4);
+  expect(within(section).queryByRole("button", { name: /^Show / })).toBeNull();
+});
+
+test("with 5 or more, Needs attention shows the 3 worst and toggles between Show all n and Show less", () => {
+  render(<Sidebar {...props(false)} state={attentionMap(5)} />);
+  const section = screen.getByRole("region", { name: /^Needs attention/ });
+  const heading = within(section).getByRole("heading");
+  expect(heading).toHaveTextContent(/^Needs attention5$/);
+  const collapsed = attentionNames(section);
+  expect(collapsed).toHaveLength(3);
+
+  fireEvent.click(within(section).getByRole("button", { name: "Show all 5" }));
+  const all = attentionNames(section);
+  expect(all).toHaveLength(5);
+  expect(all.slice(0, 3)).toEqual(collapsed);
+  expect(heading).toHaveTextContent(/^Needs attention5$/);
+
+  fireEvent.click(within(section).getByRole("button", { name: "Show less" }));
+  expect(attentionNames(section)).toEqual(collapsed);
+  expect(within(section).getByRole("button", { name: "Show all 5" })).toBeInTheDocument();
+});
+
+test("the Needs attention toggle is not kept across a reload", () => {
+  const { unmount } = render(<Sidebar {...props(false)} state={attentionMap(5)} />);
+  fireEvent.click(screen.getByRole("button", { name: "Show all 5" }));
+  unmount();
+  render(<Sidebar {...props(false)} state={attentionMap(5)} />);
+  expect(attentionNames(screen.getByRole("region", { name: /^Needs attention/ }))).toHaveLength(3);
+});
+
+test("a deploy screen keeps the Needs attention toggle, which only changes what the list shows", () => {
+  const current = props(true);
+  render(<Sidebar {...current} state={attentionMap(5)} />);
+  const section = screen.getByRole("region", { name: /^Needs attention/ });
+  fireEvent.click(within(section).getByRole("button", { name: "Show all 5" }));
+  expect(attentionNames(section)).toHaveLength(5);
+  expect(current.onProblem).not.toHaveBeenCalled();
 });
