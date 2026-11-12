@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAnnouncer } from "./Announcer";
+import { CheckoutPane } from "./CheckoutPane";
 import { ComparePicker } from "./ComparePicker";
 import { liveText } from "./Cell";
 import { DeployEntryBar, useDeployEntry, type EntryChoice } from "./DeployEntry";
@@ -8,7 +9,7 @@ import { MapArea } from "./MapArea";
 import { useNarrow, usePaneWidth } from "./pane";
 import { ReceiptPane, type SlipMeta } from "./ReceiptPane";
 import { Sidebar } from "./Sidebar";
-import { target, type PaneView } from "./slipTarget";
+import { roleOf, target, type PaneView } from "./slipTarget";
 import { useCompare } from "./useCompare";
 import { useReceipt, type Request } from "./useReceipt";
 import { useReleaseMap } from "./useReleaseMap";
@@ -19,9 +20,12 @@ import { Workspace, type DeployTarget, type Leave, type Next, type Start } from 
 import { notify } from "./notify";
 import { twinFolder } from "./text";
 import { deploy } from "./deployApi";
-import type { Loaded, RunInfo } from "./types";
+import type { Loaded, ReadyEntry, RunInfo } from "./types";
 
 const cellKey = (repoRoot: string, env: string) => `${repoRoot}\n${env}`;
+
+/** What the main area shows: the release map, or one checkout. */
+type Screen = { kind: "all" } | { kind: "checkout"; repoRoot: string };
 
 function focusCell(row: number, col: number) {
   document.querySelector<HTMLElement>(`[role="gridcell"][data-row="${row}"][data-col="${col}"]`)?.focus();
@@ -42,6 +46,14 @@ export default function App() {
   const { width, resize } = usePaneWidth();
   const narrow = useNarrow(width);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [screenShown, setScreenShown] = useState<Screen>({ kind: "all" });
+  /** Counts sidebar moves; each one focuses the new screen's heading. */
+  const [moved, setMoved] = useState(0);
+  /** A sidebar problem's cell, focused once the map has drawn it. */
+  const [focusGrid, setFocusGrid] = useState<{ row: number; col: number } | null>(null);
+  /** In a checkout: the receipt its pane shows, by cell. `id` null opens the
+   * cell's own receipt, latest risk first. */
+  const [opened, setOpened] = useState<{ key: string; id: number | null } | null>(null);
   const [paneView, setPaneView] = useState<{ key: string; view: PaneView } | null>(null);
   /** The cell whose run just ended: its new receipt slides up into the pane. */
   const [printFor, setPrintFor] = useState<string | null>(null);
@@ -70,16 +82,21 @@ export default function App() {
   const selectedKey = selected ? cellKey(selected.repoRoot, selected.env) : null;
   const row = selected && map ? map.rows[selected.row] : undefined;
   const cell = selected ? row?.cells[selected.col] : undefined;
+  const checkoutRow =
+    screenShown.kind === "checkout" && map ? map.rows.findIndex((r) => r.repoRoot === screenShown.repoRoot) : -1;
+  // A checkout gone from the map leaves its screen for All projects.
+  const inCheckout = checkoutRow >= 0;
   // Latest risk first: a failed last attempt opens before the older success.
   const riskFirst: PaneView = cell?.kind === "present" && cell.lastAttempt?.outcome.tone === "bad" ? "last" : "code";
   const view = paneView?.key === selectedKey ? paneView.view : riskFirst;
+  const picked = inCheckout && opened?.key === selectedKey ? opened : null;
   let request: Request<SlipMeta> | null = null;
-  if (loaded && selected && row && cell?.kind === "present") {
-    const opens = target(cell, view);
+  if (loaded && selected && row && cell?.kind === "present" && (!inCheckout || picked)) {
+    const opens = picked && picked.id !== null ? { id: picked.id, role: roleOf(cell, picked.id) } : target(cell, view);
     request = {
       generation: loaded.generation,
       id: opens.id,
-      key: `${selectedKey}\n${view}`,
+      key: `${selectedKey}\n${picked && picked.id !== null ? `receipt ${picked.id}` : view}`,
       meta: { cell, label: row.label, env: selected.env, role: opens.role },
     };
   }
@@ -119,15 +136,16 @@ export default function App() {
           : "The preview closed when the window reloaded. Nothing ran, but the server lock could not be released."
         : null;
 
-  const onChoose = (choice: EntryChoice) => {
-    if (!loaded || !selected || !row || entry?.kind !== "ready") return;
+  const start = (r: number, env: string, entry: ReadyEntry, choice: EntryChoice) => {
+    if (!loaded || !map) return;
+    const row = map.rows[r];
     const target = {
       generation: loaded.generation,
-      row: selected.row,
+      row: r,
       checkout: row.repoRoot,
-      env: selected.env,
+      env,
       label: row.label,
-      folder: map ? twinFolder(map.rows.map((x) => x.label), row.label, row.repoRoot) : null,
+      folder: twinFolder(map.rows.map((x) => x.label), row.label, row.repoRoot),
       production: entry.production,
     };
     let next: Next;
@@ -136,10 +154,41 @@ export default function App() {
     else if (choice.kind === "fromStep") next = { kind: "pick", steps: entry.steps, step: choice.step };
     else next = { kind: choice.kind };
     // A config that needs approval is reviewed first, then the choice goes on.
-    const start: Start = entry.needsTrust ? { kind: "trust", then: next } : next;
+    const first: Start = entry.needsTrust ? { kind: "trust", then: next } : next;
     setApproved(null);
-    setWorkspace({ target, start });
+    setWorkspace({ target, start: first });
   };
+  const onChoose = (choice: EntryChoice) => {
+    if (selected && entry?.kind === "ready") start(selected.row, selected.env, entry, choice);
+  };
+  /** A checkout's Deploy: its cell becomes the selection, so the run's
+   * receipt opens there when it ends. */
+  /** Selects the shown checkout's cell for `env`; false when it has none. */
+  const selectInCheckout = (env: string) => {
+    const col = map?.envs.indexOf(env) ?? -1;
+    if (!inCheckout || col < 0) return false;
+    select(checkoutRow, col);
+    return true;
+  };
+  const onCheckoutDeploy = (env: string, entry: ReadyEntry) => {
+    if (selectInCheckout(env)) start(checkoutRow, env, entry, { kind: "review" });
+  };
+  const onOpenReceipt = (env: string, id: number) => {
+    if (!map || !selectInCheckout(env)) return;
+    setOpened({ key: cellKey(map.rows[checkoutRow].repoRoot, env), id });
+    setPrintFor(null);
+    setDrawerOpen(true);
+    setFocusReceipt(false);
+  };
+  const go = (next: Screen) => {
+    setScreenShown(next);
+    setOpened(null);
+    setFocusEntry(null);
+    setMoved((n) => n + 1);
+  };
+  useEffect(() => {
+    if (moved > 0) heading.current?.focus();
+  }, [moved]);
   /** The toolbar's way back to a run: its cell is selected, then its run shown. */
   const follow = (run: RunInfo) => {
     const r = map?.rows.findIndex((x) => x.repoRoot === run.checkout) ?? -1;
@@ -171,6 +220,7 @@ export default function App() {
       if (how === "finished") {
         // The new receipt opens in the pane, on the same cell, risk first.
         setPaneView(null);
+        setOpened(selectedKey ? { key: selectedKey, id: null } : null);
         setPrintFor(selectedKey);
         setDrawerOpen(true);
       }
@@ -204,15 +254,26 @@ export default function App() {
   );
   const onProblem = useCallback(
     (r: number, col: number) => {
+      // Problems point at the map's cells.
+      setScreenShown({ kind: "all" });
       onSelect(r, col);
-      focusCell(r, col);
+      setFocusGrid({ row: r, col });
     },
     [onSelect],
   );
+  useEffect(() => {
+    if (!focusGrid) return;
+    focusCell(focusGrid.row, focusGrid.col);
+    setFocusGrid(null);
+  }, [focusGrid]);
   /** Focus moved on in the grid: a pending keyboard open no longer owns it. */
   const onCellFocus = useCallback(() => setFocusReceipt(false), []);
   const onView = useCallback(
-    (next: PaneView) => selectedKey && setPaneView({ key: selectedKey, view: next }),
+    (next: PaneView) => {
+      if (!selectedKey) return;
+      setPaneView({ key: selectedKey, view: next });
+      setOpened((prev) => (prev?.key === selectedKey ? { key: selectedKey, id: null } : prev));
+    },
     [selectedKey],
   );
 
@@ -237,6 +298,16 @@ export default function App() {
   }, []);
 
   const showPane = !workspace && request !== null && (!narrow || drawerOpen);
+  const drawerButton = narrow && request && (
+    <button
+      type="button"
+      className="toolbar-button"
+      aria-expanded={drawerOpen}
+      onClick={() => setDrawerOpen(!drawerOpen)}
+    >
+      Receipt <kbd className="muted">⌘I</kbd>
+    </button>
+  );
   const shown = showPane && receipt.shown?.key === request?.key ? receipt.shown : null;
   useSeen(shown?.opened.kind === "receipt" ? shown.opened.runId : null);
   return (
@@ -251,10 +322,12 @@ export default function App() {
         runsButton={runsButton}
         onProblem={onProblem}
         live={liveLines}
-        onAllProjects={() => heading.current?.focus()}
+        current={inCheckout && screenShown.kind === "checkout" ? screenShown.repoRoot : null}
+        onAllProjects={() => go({ kind: "all" })}
+        onCheckout={(repoRoot) => go({ kind: "checkout", repoRoot })}
       />
       <main className="main">
-        {!workspace && (
+        {!workspace && !inCheckout && (
           <header className="toolbar" data-tauri-drag-region>
             <h1 className="toolbar-title" ref={heading} tabIndex={-1} data-tauri-drag-region>
               All projects
@@ -265,16 +338,7 @@ export default function App() {
             {map?.screen === "map" && (
               <ComparePicker envs={map.envs} pair={pair} onChange={setPair} />
             )}
-            {narrow && request && (
-              <button
-                type="button"
-                className="toolbar-button"
-                aria-expanded={drawerOpen}
-                onClick={() => setDrawerOpen(!drawerOpen)}
-              >
-                Receipt <kbd className="muted">⌘I</kbd>
-              </button>
-            )}
+            {drawerButton}
           </header>
         )}
         {workspace ? (
@@ -284,6 +348,27 @@ export default function App() {
             onLeave={onLeave}
             onRunEnded={forget}
             announce={announce}
+          />
+        ) : inCheckout && loaded ? (
+          <CheckoutPane
+            key={map?.rows[checkoutRow].repoRoot}
+            generation={loaded.generation}
+            map={loaded.map}
+            row={checkoutRow}
+            live={liveLines}
+            folder={twinFolder(loaded.map.rows.map((x) => x.label), loaded.map.rows[checkoutRow].label, loaded.map.rows[checkoutRow].repoRoot)}
+            entryVersion={entryVersion}
+            openedReceipt={showPane && request ? (picked?.id ?? request.id) : null}
+            onDeploy={onCheckoutDeploy}
+            onOpenReceipt={onOpenReceipt}
+            heading={heading}
+            focusDeploy={
+              focusEntry === "entry" && selected?.repoRoot === loaded.map.rows[checkoutRow].repoRoot
+                ? selected.env
+                : null
+            }
+            onDeployFocused={() => setFocusEntry(null)}
+            tools={drawerButton}
           />
         ) : (
           <>
@@ -338,7 +423,7 @@ export default function App() {
                   ? deploy.openConfig(loaded.generation, selected.row, selected.env)
                   : Promise.resolve()
               }
-              buttonRef={entryButton}
+              buttonRef={inCheckout ? undefined : entryButton}
             />
           }
         />

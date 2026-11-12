@@ -10,6 +10,7 @@ function props(busy: boolean) {
   return {
     state, busy, onRetry: vi.fn(), runs: [fixtures.runInfo], now: fixtures.runInfo.startedAtMs,
     onFollow: vi.fn(), runsButton: { current: null }, onProblem: vi.fn(), live: {}, onAllProjects: vi.fn(),
+    current: null, onCheckout: vi.fn(),
   };
 }
 
@@ -233,4 +234,20 @@ test("a deploy screen keeps the Needs attention toggle, which only changes what 
   fireEvent.click(within(section).getByRole("button", { name: "Show all 5" }));
   expect(attentionNames(section)).toHaveLength(5);
   expect(current.onProblem).not.toHaveBeenCalled();
+});
+
+test("a checkout line opens its checkout and is marked current; a deploy screen keeps it from navigating", () => {
+  if (fixtures.map.kind !== "loaded") throw new Error("fixture");
+  const billing = fixtures.map.map.rows[1];
+  const current = props(false);
+  const { rerender } = render(<Sidebar {...current} current={billing.repoRoot} />);
+  const projects = screen.getByRole("region", { name: "Projects" });
+  const line = within(projects).getByRole("button", { name: /^billing/ });
+  expect(line).toHaveAttribute("aria-current", "page");
+  expect(screen.getByRole("button", { name: "All projects" })).not.toHaveAttribute("aria-current");
+  expect(within(projects).getByRole("button", { name: /^api/ })).not.toHaveAttribute("aria-current");
+  fireEvent.click(line);
+  expect(current.onCheckout).toHaveBeenCalledWith(billing.repoRoot);
+  rerender(<Sidebar {...current} busy current={billing.repoRoot} />);
+  expect(within(projects).queryByRole("button")).toBeNull();
 });

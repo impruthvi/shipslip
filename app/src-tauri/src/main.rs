@@ -81,6 +81,8 @@ fn main() {
             commands::receipts_changed,
             commands::compare,
             commands::load_receipt,
+            commands::checkout_receipts,
+            commands::open_folder,
             commands::deploy_entry,
             commands::open_config,
             commands::prepare_deploy,

@@ -77,6 +77,8 @@ export interface EnvCellView {
   stepsRun: string | null;
   flags: FlagView[];
   target: string | null;
+  /** An approval record exists; it may be for an older config. */
+  approved: boolean;
   targetMoved: string | null;
   needsAttention: boolean;
   receipt: number | null;
@@ -233,6 +235,25 @@ export interface ReceiptView {
   nextSteps: Guidance;
 }
 
+/** One line of a checkout's receipts table (`checkout_receipts`). */
+export interface ReceiptRowView {
+  /** Opens with `load_receipt`, like a cell's receipt. */
+  receipt: number;
+  env: string;
+  age: string;
+  outcome: OutcomeView;
+  /** The commit the run deployed or brought up. */
+  sha: string;
+  shortSha: string;
+}
+
+export type CheckoutReceipts =
+  | { kind: "listed"; generation: number; row: number; receipts: ReceiptRowView[] }
+  /** The project's receipts folder could not be read. */
+  | { kind: "unreadable"; message: string }
+  | { kind: "stale" }
+  | { kind: "notFound" };
+
 export type SlipView =
   | ({ kind: "receipt" } & ReceiptView)
   | { kind: "missing" }
@@ -259,6 +280,9 @@ export interface QuitRun {
 }
 
 /** What "Review deploy…" offers for the selected cell (`deploy_entry`). */
+/** A Deploy that can be offered now. */
+export type ReadyEntry = Extract<DeployEntry, { kind: "ready" }>;
+
 export type DeployEntry =
   | { kind: "hidden" }
   | { kind: "unavailable"; reason: string }

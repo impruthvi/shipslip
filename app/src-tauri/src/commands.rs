@@ -20,7 +20,22 @@ use crate::finish::{self, Unseen};
 use crate::git_path;
 use crate::receipt_changes::{self, ReceiptStamp};
 use crate::state::SelectionError;
-use crate::state::{with_git, AppState, CompareResult, LoadResult, ReceiptResult};
+use crate::state::{
+    with_git, AppState, CheckoutReceipts, CompareResult, LoadResult, ReceiptResult,
+};
+
+fn selection_error(error: SelectionError) -> CommandError {
+    match error {
+        SelectionError::Stale => CommandError::new(
+            ErrorCode::Stale,
+            "The map was read again since this was selected.",
+        ),
+        SelectionError::NotFound => CommandError::new(
+            ErrorCode::NotFound,
+            "This checkout or environment is no longer on the map.",
+        ),
+    }
+}
 
 pub struct App {
     state: AppState,
@@ -75,16 +90,7 @@ impl App {
     fn selection(&self, generation: u64, row: usize, env: &str) -> Result<PathBuf, CommandError> {
         self.state
             .resolve_target(generation, row, env)
-            .map_err(|error| match error {
-                SelectionError::Stale => CommandError::new(
-                    ErrorCode::Stale,
-                    "The map was read again since this was selected.",
-                ),
-                SelectionError::NotFound => CommandError::new(
-                    ErrorCode::NotFound,
-                    "This checkout or environment is no longer on the map.",
-                ),
-            })
+            .map_err(selection_error)
     }
 
     /// Runs that would be cut short by quitting now.
@@ -161,6 +167,13 @@ impl App {
     fn load_receipt(&self, generation: u64, id: usize) -> ReceiptResult {
         self.state.load_receipt(generation, id)
     }
+
+    fn checkout_receipts(&self, generation: u64, row: usize) -> Result<CheckoutReceipts, String> {
+        let (root, _) = self.paths.as_ref().map_err(Clone::clone)?;
+        Ok(self
+            .state
+            .checkout_receipts(generation, row, root, now_ms()))
+    }
 }
 
 #[tauri::command]
@@ -191,6 +204,55 @@ pub async fn load_receipt(
     id: usize,
 ) -> Result<ReceiptResult, String> {
     off_thread(&app, move |app| app.load_receipt(generation, id)).await
+}
+
+#[tauri::command]
+pub async fn checkout_receipts(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+) -> Result<CheckoutReceipts, String> {
+    off_thread(&app, move |app| app.checkout_receipts(generation, row)).await?
+}
+
+/// Shows the checkout's folder in Finder.
+#[tauri::command]
+pub async fn open_folder(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+) -> Result<(), CommandError> {
+    let checkout = app
+        .state
+        .resolve_checkout(generation, row)
+        .map_err(selection_error)?;
+    spawn_blocking(move || {
+        open_folder_with(&checkout, |path| {
+            std::process::Command::new("/usr/bin/open")
+                .arg(path)
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    })
+    .await
+    .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
+}
+
+fn open_folder_with(checkout: &Path, open: impl Fn(&Path) -> bool) -> Result<(), CommandError> {
+    if !checkout.is_dir() {
+        return Err(CommandError::new(
+            ErrorCode::NotFound,
+            "This checkout's folder is no longer on this Mac.",
+        ));
+    }
+    if open(checkout) {
+        Ok(())
+    } else {
+        Err(CommandError::new(
+            ErrorCode::Local,
+            format!("Couldn't open {} in Finder.", checkout.display()),
+        ))
+    }
 }
 
 async fn off_thread<T: Send + 'static>(
@@ -355,6 +417,23 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn open_folder_opens_the_checkout_and_says_when_it_cannot() {
+        let fx = Fixture::new();
+        assert!(open_folder_with(fx.dir(), |path| path == fx.dir()).is_ok());
+        let error = open_folder_with(fx.dir(), |_| false).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Local);
+        let error =
+            open_folder_with(&fx.dir().join("gone"), |_| panic!("nothing to open")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn checkout_receipts_need_the_receipts_folder() {
+        let app = App::new(Err("no home folder".into()), None);
+        assert_eq!(app.checkout_receipts(1, 0).unwrap_err(), "no home folder");
     }
 
     #[test]

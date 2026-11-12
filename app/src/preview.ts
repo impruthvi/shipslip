@@ -33,6 +33,10 @@ export const backend: Backend = {
     later(
       generation === 1 ? (fixtures.receipts[String(id)] ?? { kind: "notFound" }) : { kind: "stale" },
     ),
+  checkoutReceipts: (generation, row) =>
+    later(
+      generation === 1 ? (fixtures.checkoutReceipts[row] ?? { kind: "notFound" }) : { kind: "stale" },
+    ),
   copyText: (text) => navigator.clipboard.writeText(text),
   onFocus: async (handler) => {
     window.addEventListener("focus", handler);
@@ -59,6 +63,7 @@ export const deploy: DeployBackend = {
   },
   reviewTrust: () => later(fixtures.trustReview),
   openConfig: () => wait(100),
+  openFolder: () => wait(100),
   approveTrust: () => wait(300),
   reviewUp: () => later(fixtures.upReview),
   reviewAttach: () => Promise.reject({ code: "notFound", message: "There is no unfinished run for this checkout and environment." }),

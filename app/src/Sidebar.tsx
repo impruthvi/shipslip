@@ -28,7 +28,10 @@ interface Props {
   live: Record<string, string>;
   /** A deploy screen is open: it owns navigation, so the lists only show. */
   busy: boolean;
+  /** The checkout shown in the main area; null on All projects. */
+  current: string | null;
   onAllProjects: () => void;
+  onCheckout: (repoRoot: string) => void;
 }
 
 /** Which checkout a same-named app is, kept whole so it never breaks mid-name. */
@@ -41,16 +44,30 @@ function Item({
   busy,
   onClick,
   buttonRef,
+  className = "",
+  current = false,
+  title,
   children,
 }: {
   busy: boolean;
   onClick: () => void;
   buttonRef?: Ref<HTMLButtonElement>;
+  className?: string;
+  /** The screen this line opens is shown. */
+  current?: boolean;
+  title?: string;
   children: ReactNode;
 }) {
-  if (busy) return <div className="side-item side-item-static">{children}</div>;
+  if (busy) return <div className={`side-item side-item-static ${className}`} title={title}>{children}</div>;
   return (
-    <button type="button" className="side-item" ref={buttonRef} onClick={onClick}>
+    <button
+      type="button"
+      className={`side-item ${className}`}
+      ref={buttonRef}
+      aria-current={current ? "page" : undefined}
+      title={title}
+      onClick={onClick}
+    >
       {children}
     </button>
   );
@@ -75,7 +92,20 @@ function EnvMarks({ map, row, live }: { map: MapView; row: MapView["rows"][numbe
   );
 }
 
-export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onProblem, live, busy, onAllProjects }: Props) {
+export function Sidebar({
+  state,
+  onRetry,
+  runs,
+  now,
+  onFollow,
+  runsButton,
+  onProblem,
+  live,
+  busy,
+  current,
+  onAllProjects,
+  onCheckout,
+}: Props) {
   const [allAttention, setAllAttention] = useState(false);
   const map = state.phase === "shown" && state.loaded.map.screen !== "firstRun" ? state.loaded.map : null;
   const labels = map?.rows.map((row) => row.label) ?? [];
@@ -110,13 +140,9 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
         <button type="button" className="button side-add" disabled>
           Add project
         </button>
-        {busy ? (
-          <div className="side-item side-item-static side-all">All projects</div>
-        ) : (
-          <button type="button" className="side-item side-all" aria-current="page" onClick={onAllProjects}>
-            All projects
-          </button>
-        )}
+        <Item busy={busy} className="side-all" current={current === null} onClick={onAllProjects}>
+          All projects
+        </Item>
       </div>
       <section className="side-section" aria-labelledby="side-runs">
         <h2 id="side-runs" className="side-title">
@@ -239,18 +265,26 @@ export function Sidebar({ state, onRetry, runs, now, onFollow, runsButton, onPro
           </h2>
           <ul className="side-list">
             {map.rows.map((row) => (
-              <li key={row.repoRoot} className="side-item side-item-static side-checkout">
-                <span className="side-line">
-                  <span className="side-name" title={row.repoRoot}>
-                    {row.label}
-                    <Folder path={twinFolder(labels, row.label, row.repoRoot)} />
+              <li key={row.repoRoot}>
+                <Item
+                  busy={busy}
+                  className="side-checkout"
+                  current={current === row.repoRoot}
+                  title={row.repoRoot}
+                  onClick={() => onCheckout(row.repoRoot)}
+                >
+                  <span className="side-line">
+                    <span className="side-name">
+                      {row.label}
+                      <Folder path={twinFolder(labels, row.label, row.repoRoot)} />
+                    </span>
+                    {row.needsApproval ? (
+                      <span className="side-state tone-attention">Needs approval</span>
+                    ) : (
+                      <EnvMarks map={map} row={row} live={live} />
+                    )}
                   </span>
-                  {row.needsApproval ? (
-                    <span className="side-state tone-attention">Needs approval</span>
-                  ) : (
-                    <EnvMarks map={map} row={row} live={live} />
-                  )}
-                </span>
+                </Item>
               </li>
             ))}
           </ul>
