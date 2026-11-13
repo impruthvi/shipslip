@@ -105,6 +105,23 @@ impl App {
             .map_err(selection_error)
     }
 
+    /// The checkout whose config to open: found by one of its environments,
+    /// or by the checkout alone when its config can't be read.
+    fn config_checkout(
+        &self,
+        generation: u64,
+        row: usize,
+        env: Option<&str>,
+    ) -> Result<PathBuf, CommandError> {
+        match env {
+            Some(env) => self.selection(generation, row, env),
+            None => self
+                .state
+                .resolve_checkout(generation, row)
+                .map_err(selection_error),
+        }
+    }
+
     /// Runs that would be cut short by quitting now.
     pub fn quit_runs(&self) -> Vec<QuitRun> {
         self.sessions
@@ -758,6 +775,35 @@ mod tests {
     }
 
     #[test]
+    fn a_config_that_cannot_be_read_is_found_by_its_checkout_alone() {
+        let fx = Fixture::new();
+        let root = fx.checkout(
+            "blog",
+            "[project]\nname = \"blog\"\nstack = \"laravel\"\n\
+             [env.staging]\nssh = \"web1\"\npath = \"/srv/blog\"\nbranch = \"main\"\nproduction = false\n",
+        );
+        crate::add_project::add(&root, &fx.trust(), 0).unwrap();
+        std::fs::write(root.join(".shipslip.toml"), "[project\n").unwrap();
+        let app = app(&fx, None);
+        let LoadResult::Loaded(loaded) = app.load_map() else {
+            panic!("not loaded");
+        };
+        assert!(loaded.map.rows[0].config_unreadable.is_some());
+        assert_eq!(
+            app.config_checkout(loaded.generation, 0, None).unwrap(),
+            root
+        );
+        let error = app
+            .config_checkout(loaded.generation, 0, Some("staging"))
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound, "no cell names it");
+        let error = app
+            .config_checkout(loaded.generation + 1, 0, None)
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::Stale);
+    }
+
+    #[test]
     fn open_folder_opens_the_checkout_and_says_when_it_cannot() {
         let fx = Fixture::new();
         assert!(open_folder_with(fx.dir(), |path| path == fx.dir()).is_ok());
@@ -1160,15 +1206,16 @@ pub async fn deploy_entry(
 }
 
 /// Opens the checkout's `.shipslip.toml` in the user's editor. A change still
-/// has to pass the trust review before any deploy uses it.
+/// has to pass the trust review before any deploy uses it. Without `env`,
+/// the checkout alone finds it, e.g. when the config can't be read.
 #[tauri::command]
 pub async fn open_config(
     app: tauri::State<'_, Arc<App>>,
     generation: u64,
     row: usize,
-    env: String,
+    env: Option<String>,
 ) -> Result<(), CommandError> {
-    let checkout = app.selection(generation, row, &env)?;
+    let checkout = app.config_checkout(generation, row, env.as_deref())?;
     spawn_blocking(move || {
         open_config_with(&checkout.join(".shipslip.toml"), |args, path| {
             std::process::Command::new("/usr/bin/open")

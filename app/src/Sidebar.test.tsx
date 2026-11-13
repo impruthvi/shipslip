@@ -173,6 +173,18 @@ test("a checkout whose config has an environment without a current approval read
   expect(within(shop).getAllByRole("img")).toHaveLength(2);
 });
 
+test("a checkout whose folder is gone or whose config can't be read says so in place of its marks", () => {
+  render(<Sidebar {...props(false)} state={shown(fixtures.cannotDeployMap)} />);
+  const projects = screen.getByRole("region", { name: "Projects" });
+  const [blog, shop] = within(projects).getAllByRole("listitem");
+  expect(blog).toHaveTextContent(/^blog\s*\.shipslip\.toml can't be read$/);
+  expect(within(blog).getByText(".shipslip.toml can't be read")).toHaveClass("tone-attention");
+  expect(shop).toHaveTextContent(/^shop\s*checkout not found$/);
+  const gone = within(shop).getByText("checkout not found");
+  expect(gone).toHaveClass("muted");
+  expect(gone).not.toHaveClass("tone-attention");
+});
+
 /** The fixture map with only its first `count` attention cells still needing attention. */
 function attentionMap(count: number): MapState {
   const loaded = structuredClone(fixtures.map);

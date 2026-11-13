@@ -537,6 +537,18 @@ button.side-item:hover {
   font-size: var(--text-11);
 }
 
+.checkout-state {
+  flex-shrink: 0;
+  font-size: var(--text-12);
+}
+
+.checkout-config-error {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  font-size: var(--text-12);
+}
+
 .checkout-menu-error {
   padding-top: var(--space-8);
   font-size: var(--text-12);

@@ -36,7 +36,7 @@ vi.mock("./api", () => ({
 
 const entry = vi.fn<(generation: number, row: number, env: string) => Promise<DeployEntry>>();
 const prepare = vi.fn<(generation: number, row: number, env: string, plan: unknown) => Promise<DeployReview>>();
-const openConfig = vi.fn<(generation: number, row: number, env: string) => Promise<void>>();
+const openConfig = vi.fn<(generation: number, row: number, env: string | null) => Promise<void>>();
 const openFolder = vi.fn<(generation: number, row: number) => Promise<void>>();
 const reviewTrust = vi.fn();
 const liveRuns = vi.fn<() => Promise<LiveRuns>>();
@@ -50,7 +50,7 @@ vi.mock("./deployApi", () => ({
     stop: vi.fn(),
     reviewTrust: (...args: unknown[]) => reviewTrust(...args),
     approveTrust: vi.fn(),
-    openConfig: (...args: [number, number, string]) => openConfig(...args),
+    openConfig: (...args: [number, number, string | null]) => openConfig(...args),
     openFolder: (...args: [number, number]) => openFolder(...args),
     reviewUp: vi.fn(),
     reviewAttach: vi.fn(),
@@ -375,6 +375,46 @@ test("a refused removal says why and keeps the checkout", async () => {
     "This Mac has receipts or approvals for this checkout, so it stays in the sidebar.",
   );
   expect(screen.getByRole("heading", { level: 1, name: "shop" })).toBeInTheDocument();
+});
+
+test("a checkout whose folder is gone opens its pane, not the sheet, and offers only Remove", async () => {
+  loadMap.mockResolvedValue(fixtures.cannotDeployMap);
+  await openCheckout(/^shop/);
+  expect(screen.queryByRole("dialog", { name: "Add project" })).toBeNull();
+  expect(screen.getByRole("heading", { level: 1, name: "shop" })).toHaveFocus();
+  expect(within(main()).getByText("checkout not found")).toHaveClass("muted");
+  fireEvent.click(within(main()).getByRole("button", { name: "shop actions" }));
+  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual(["Remove from sidebar"]);
+});
+
+test("a gone checkout with recorded environments offers no Deploy, check or folder", async () => {
+  await openCheckout(/^shop.*checkout not found$/);
+  expect(screen.queryByRole("dialog", { name: "Add project" })).toBeNull();
+  expect(within(main()).getByText("checkout not found")).toBeInTheDocument();
+  expect(within(main()).getAllByRole("region").length).toBeGreaterThan(1);
+  expect(within(main()).queryByRole("button", { name: /^Deploy to / })).toBeNull();
+  if (fixtures.map.kind !== "loaded") throw new Error("fixture");
+  const row = fixtures.map.map.rows.findIndex((r) => r.pathMissing);
+  expect(entry.mock.calls.filter(([, r]) => r === row)).toEqual([]);
+  expect(within(main()).queryByRole("button", { name: "shop actions" })).toBeNull();
+});
+
+test("a checkout whose config can't be read shows why and offers only to open it", async () => {
+  loadMap.mockResolvedValue(fixtures.cannotDeployMap);
+  await openCheckout(/^blog/);
+  expect(screen.queryByRole("dialog", { name: "Add project" })).toBeNull();
+  expect(within(main()).getByText(".shipslip.toml can't be read")).toHaveClass("tone-attention");
+  expect(within(main()).getByText(/unclosed table, expected `\]`/)).toBeInTheDocument();
+  expect(within(main()).queryByRole("button", { name: /^Deploy to / })).toBeNull();
+  fireEvent.click(within(main()).getByRole("button", { name: "blog actions" }));
+  expect(screen.getAllByRole("menuitem").map((item) => item.textContent)).toEqual([
+    "Open folder in Finder",
+    "Open .shipslip.toml",
+    "Remove from sidebar",
+  ]);
+  fireEvent.click(screen.getByRole("menuitem", { name: "Open .shipslip.toml" }));
+  await settle();
+  expect(openConfig).toHaveBeenCalledWith(1, 0, null);
 });
 
 test("All projects goes back to the map with its heading focused", async () => {

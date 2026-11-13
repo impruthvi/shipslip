@@ -282,8 +282,12 @@ export function Sidebar({
                       {row.label}
                       <Folder path={twinFolder(labels, row.label, row.repoRoot)} />
                     </span>
-                    {row.setupNotFinished ? (
+                    {row.pathMissing ? (
+                      <span className="side-state muted">checkout not found</span>
+                    ) : row.setupNotFinished ? (
                       <span className="side-state muted">Setup not finished</span>
+                    ) : row.configUnreadable ? (
+                      <span className="side-state tone-attention">.shipslip.toml can't be read</span>
                     ) : row.needsApproval ? (
                       <span className="side-state tone-attention">Needs approval</span>
                     ) : (

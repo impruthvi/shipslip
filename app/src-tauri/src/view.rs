@@ -2,7 +2,7 @@
 //! receipt, the trust store or the file system is escaped here, and receipt
 //! files are replaced by ids, so the UI never holds or sends a path.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -75,6 +75,9 @@ pub struct RowView {
     pub needs_approval: bool,
     /// Added in the app, and its folder has no `.shipslip.toml` yet.
     pub setup_not_finished: bool,
+    /// Its `.shipslip.toml` is there but can't be read: why, one entry per
+    /// line.
+    pub config_unreadable: Option<Vec<String>>,
     /// This Mac recorded nothing for it, so it can leave the sidebar.
     pub removable: bool,
     /// One per column in [`MapView::envs`].
@@ -304,6 +307,8 @@ pub struct CheckoutSetup {
     pub needs_approval: BTreeSet<String>,
     /// Listed with no environments and no `.shipslip.toml`.
     pub not_finished: BTreeSet<String>,
+    /// Has a `.shipslip.toml` that can't be read, with the reason.
+    pub config_unreadable: BTreeMap<String, String>,
     /// No receipt or approval names it; only the projects list does.
     pub nothing_recorded: BTreeSet<String>,
 }
@@ -372,6 +377,10 @@ fn row_view(
         path_missing: row.path_missing,
         needs_approval: setup.needs_approval.contains(row.repo_root.raw()),
         setup_not_finished: setup.not_finished.contains(row.repo_root.raw()),
+        config_unreadable: setup
+            .config_unreadable
+            .get(row.repo_root.raw())
+            .map(|message| message.lines().map(escape_field).collect()),
         removable: setup.nothing_recorded.contains(row.repo_root.raw()),
         cells: columns
             .iter()

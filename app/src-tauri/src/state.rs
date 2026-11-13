@@ -419,9 +419,9 @@ impl From<Overview> for MapRead {
 /// Adds each checkout's configured environments that have no cell yet, as
 /// never deployed, so "Review deploy…" can reach them, names checkouts no
 /// receipt names after their config's project, and notes the checkouts that
-/// need approval or whose setup is not finished. A config that can't be read
-/// adds nothing and is not judged; the environment's entry explains why when
-/// there is a cell.
+/// need approval, whose setup is not finished, or whose config can't be read.
+/// A config that can't be read adds nothing and is not judged for approval.
+/// A checkout whose folder is gone is none of these; its row says so.
 pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRead {
     let mut setup = view::CheckoutSetup {
         nothing_recorded: shipslip::projects::nothing_recorded(&overview),
@@ -430,14 +430,24 @@ pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRe
     for repo in overview.repos.iter_mut().filter(|repo| !repo.path_missing) {
         // Only the projects list names a checkout with no environments.
         let root = Path::new(repo.repo_root.raw());
-        if repo.envs.is_empty() && !root.join(".shipslip.toml").exists() {
+        let config_file = root.join(".shipslip.toml").exists();
+        if repo.envs.is_empty() && !config_file {
             setup.not_finished.insert(repo.repo_root.raw().to_string());
             continue;
         }
-        let Ok(config) = LoadedConfig::load(Path::new(repo.repo_root.raw()), None) else {
-            continue;
+        let config = match LoadedConfig::load(root, None) {
+            Ok(config) => config,
+            Err(error) => {
+                // A missing config is not "can't be read": nothing is there.
+                if config_file {
+                    setup
+                        .config_unreadable
+                        .insert(repo.repo_root.raw().to_string(), error.to_string());
+                }
+                continue;
+            }
         };
-        if config.repo_root() != Path::new(repo.repo_root.raw()) {
+        if config.repo_root() != root {
             continue;
         }
         // Known only from the projects list or approvals: no receipt names it.
@@ -708,6 +718,79 @@ mod tests {
         fx.save(&receipt);
         fs::remove_file(root.join(".shipslip.toml")).unwrap();
         assert_eq!(row(&fx), (false, false));
+    }
+
+    /// The first row's states.
+    #[derive(Debug, PartialEq)]
+    struct States {
+        path_missing: bool,
+        setup_not_finished: bool,
+        needs_approval: bool,
+        config_unreadable: Option<Vec<String>>,
+    }
+
+    fn first_row(fx: &Fixture) -> States {
+        let read = || {
+            Ok(with_checkout_configs(
+                overview(&fx.receipts(), &fx.trust())?,
+                &fx.trust(),
+            ))
+        };
+        match AppState::default().load_map(|| NOW, read) {
+            LoadResult::Loaded(loaded) => {
+                let row = &loaded.map.rows[0];
+                States {
+                    path_missing: row.path_missing,
+                    setup_not_finished: row.setup_not_finished,
+                    needs_approval: row.needs_approval,
+                    config_unreadable: row.config_unreadable.clone(),
+                }
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_listed_checkout_whose_folder_is_gone_reads_folder_missing_not_setup_not_finished() {
+        let fx = Fixture::new();
+        let root = fx.checkout("shop", "");
+        fs::remove_file(root.join(".shipslip.toml")).unwrap();
+        crate::add_project::add(&root, &fx.trust(), NOW).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let row = first_row(&fx);
+        assert!(row.path_missing);
+        assert!(!row.setup_not_finished);
+        assert!(!row.needs_approval);
+        assert_eq!(row.config_unreadable, None);
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_read_says_why_and_needs_no_approval() {
+        let fx = Fixture::new();
+        let root = fx.checkout("shop", TWO_ENVS);
+        crate::add_project::add(&root, &fx.trust(), NOW).unwrap();
+        fs::write(root.join(".shipslip.toml"), "not = [toml").unwrap();
+        let row = first_row(&fx);
+        let message = row.config_unreadable.expect("config unreadable").join("\n");
+        assert!(message.contains(".shipslip.toml"), "{message}");
+        assert!(message.contains("TOML parse error"), "{message}");
+        assert!(!row.needs_approval);
+        assert!(!row.setup_not_finished);
+        assert!(!row.path_missing);
+
+        fs::write(root.join(".shipslip.toml"), TWO_ENVS).unwrap();
+        assert_eq!(first_row(&fx).config_unreadable, None);
+    }
+
+    #[test]
+    fn a_recorded_checkout_whose_config_breaks_reads_config_unreadable() {
+        let fx = Fixture::new();
+        let root = fx.checkout("shop", TWO_ENVS);
+        let mut receipt = run(1, "production");
+        receipt["repo_root"] = json!(root.to_string_lossy());
+        fx.save(&receipt);
+        fs::write(root.join(".shipslip.toml"), "[project\n").unwrap();
+        assert!(first_row(&fx).config_unreadable.is_some());
     }
 
     #[test]

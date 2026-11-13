@@ -286,6 +286,8 @@ struct Fixtures {
     removable_map: LoadResult,
     folders: BTreeMap<&'static str, crate::add_project::FolderView>,
     setup_map: LoadResult,
+    /// A listed checkout whose folder is gone, and one whose config is broken.
+    cannot_deploy_map: LoadResult,
     config_texts: BTreeMap<&'static str, crate::add_project::ConfigText>,
     ssh_aliases: crate::ssh_alias::SshAliases,
     host_blocks: BTreeMap<&'static str, crate::ssh_alias::HostBlock>,
@@ -583,6 +585,25 @@ fn build() -> (Fixtures, Vec<String>) {
             ))
         },
     );
+    let cannot_deploy_fx = Fixture::new();
+    let cannot_deploy_trust = cannot_deploy_fx.trust();
+    let config = "[project]\nname = \"blog\"\nstack = \"laravel\"\n\
+         [env.staging]\nssh = \"web1\"\npath = \"/srv/blog\"\nbranch = \"main\"\nproduction = false\n";
+    let blog = cannot_deploy_fx.checkout("blog", config);
+    crate::add_project::add(&blog, &cannot_deploy_trust, NOW).unwrap();
+    fs::write(blog.join(".shipslip.toml"), "[project\nname = \"blog\"\n").unwrap();
+    let shop = cannot_deploy_fx.checkout("shop", config);
+    crate::add_project::add(&shop, &cannot_deploy_trust, NOW).unwrap();
+    fs::remove_dir_all(&shop).unwrap();
+    let cannot_deploy_map = AppState::default().load_map(
+        || NOW,
+        || {
+            Ok(crate::state::with_checkout_configs(
+                overview(&cannot_deploy_fx.receipts(), &cannot_deploy_trust)?,
+                &cannot_deploy_trust,
+            ))
+        },
+    );
     let answers = |env: &str, path: &str| shipslip::config::InitAnswers {
         env: env.into(),
         ssh_alias: "api-staging".into(),
@@ -613,7 +634,10 @@ fn build() -> (Fixtures, Vec<String>) {
     let added_home = fs::canonicalize(added_fx.dir()).unwrap();
     let setup_home = fs::canonicalize(setup_fx.dir()).unwrap();
     let removable_home = fs::canonicalize(removable_fx.dir()).unwrap();
+    let cannot_deploy_home = fs::canonicalize(cannot_deploy_fx.dir()).unwrap();
     let homes = [
+        cannot_deploy_home.as_path(),
+        cannot_deploy_fx.dir(),
         removable_home.as_path(),
         removable_fx.dir(),
         approval_home.as_path(),
@@ -641,6 +665,7 @@ fn build() -> (Fixtures, Vec<String>) {
             removable_map,
             folders,
             setup_map,
+            cannot_deploy_map,
             config_texts,
             ssh_aliases,
             host_blocks,
@@ -867,6 +892,12 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
         &fixtures.folders,
     );
     item(&mut out, "setupMap", "LoadResult", &fixtures.setup_map);
+    item(
+        &mut out,
+        "cannotDeployMap",
+        "LoadResult",
+        &fixtures.cannot_deploy_map,
+    );
     item(
         &mut out,
         "configTexts",

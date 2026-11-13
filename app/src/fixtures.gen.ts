@@ -43,6 +43,7 @@ export const map: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -127,6 +128,7 @@ export const map: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -193,6 +195,7 @@ export const map: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -256,6 +259,7 @@ export const map: LoadResult = {
         "pathMissing": true,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -297,6 +301,7 @@ export const map: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -408,6 +413,7 @@ export const wideMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -589,6 +595,7 @@ export const approvalMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": true,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -651,6 +658,7 @@ export const approvalMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -728,6 +736,7 @@ export const addedMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": true,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -799,6 +808,7 @@ export const removableMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": true,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": true,
         "cells": [
           {
@@ -915,6 +925,45 @@ export const setupMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": true,
+        "configUnreadable": null,
+        "removable": true,
+        "cells": []
+      }
+    ],
+    "problems": []
+  }
+};
+
+export const cannotDeployMap: LoadResult = {
+  "kind": "loaded",
+  "generation": 1,
+  "map": {
+    "screen": "map",
+    "envs": [],
+    "rows": [
+      {
+        "label": "blog",
+        "repoRoot": "/Users/you/code/blog",
+        "pathMissing": false,
+        "needsApproval": false,
+        "setupNotFinished": false,
+        "configUnreadable": [
+          "invalid `/Users/you/code/blog/.shipslip.toml`: TOML parse error at line 1, column 9",
+          "  |",
+          "1 | [project",
+          "  |         ^",
+          "unclosed table, expected `]`"
+        ],
+        "removable": true,
+        "cells": []
+      },
+      {
+        "label": "shop",
+        "repoRoot": "/Users/you/code/shop",
+        "pathMissing": true,
+        "needsApproval": false,
+        "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": true,
         "cells": []
       }
@@ -1404,6 +1453,7 @@ export const terminalMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -2972,6 +3022,7 @@ export const watchResults: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -3015,6 +3066,7 @@ export const watchResults: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -3058,6 +3110,7 @@ export const watchResults: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -3101,6 +3154,7 @@ export const watchResults: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
@@ -3144,6 +3198,7 @@ export const watchResults: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "configUnreadable": null,
         "removable": false,
         "cells": [
           {
