@@ -570,6 +570,7 @@ export interface RunBatch {
 /** One environment of a picked folder's `.shipslip.toml`, shown read only. */
 export interface FolderEnv {
   name: string;
+  sshAlias: string;
   /** `ssh_alias:path`. */
   target: string;
   branch: string;
@@ -657,4 +658,27 @@ export interface Resolved {
   hostName: string;
   user: string;
   port: number;
+}
+
+/** One connection check line's state (`check_connection`, `check_rendered`). */
+export type CheckState = "waiting" | "running" | "pass" | "fail" | "notRun";
+
+export interface CheckLine {
+  label: string;
+  state: CheckState;
+  reason: string;
+  /** A changed host key: no command, and the sheet cannot continue. */
+  hardStop: boolean;
+  /** An unknown host key: `ssh <alias> true` to run in Terminal. */
+  command: string | null;
+}
+
+/** The read-only connection check as it stands, sent as each probe moves. */
+export interface CheckView {
+  alias: string;
+  lines: CheckLine[];
+  /** Some line is a hard stop. */
+  hostKeyChanged: boolean;
+  /** Every line has its outcome. */
+  finished: boolean;
 }

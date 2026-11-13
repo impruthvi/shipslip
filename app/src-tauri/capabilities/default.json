@@ -26,6 +26,8 @@
     "allow-ssh-host-block",
     "allow-check-ssh-alias",
     "allow-open-ssh-config",
+    "allow-check-connection",
+    "allow-check-rendered",
     "allow-deploy-entry",
     "allow-open-config",
     "allow-prepare-deploy",

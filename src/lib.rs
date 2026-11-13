@@ -11,6 +11,7 @@
 //!    built from that exact preview.
 
 pub mod config;
+pub mod connection_check;
 pub mod create;
 mod engine;
 mod event;

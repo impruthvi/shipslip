@@ -51,6 +51,10 @@ A marker on the server saying which run owns the environment right now.
 A person's sign-off, kept on this Mac, on one environment's config: its server, path, log paths and recipe. Changing any of them means the environment needs approving again.
 _Avoid_: Trust (in prose; `slip trust` is the command)
 
+**Connection check**:
+A read-only look, started by a person, at whether this Mac reaches an environment: the alias resolves, ssh connects, the path is a git checkout on its branch, `php artisan --version` runs, the Laravel log reads. It needs no approval and changes nothing on the server.
+_Avoid_: Preflight (the deploy's own check), health check
+
 **Re-attach**:
 Reconnecting to watch a step that kept running on the server after the connection dropped. Re-attaching observes a step; it never runs it again.
 _Avoid_: Retry, resume

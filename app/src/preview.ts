@@ -8,7 +8,7 @@
 import type { Backend } from "./api";
 import type { DeployBackend } from "./deployApi";
 import * as fixtures from "./fixtures.gen";
-import type { LoadResult } from "./types";
+import type { CheckView, LoadResult } from "./types";
 
 const params = new URLSearchParams(window.location.search);
 const slow = Number(params.get("slow") ?? 0);
@@ -64,7 +64,18 @@ export const backend: Backend = {
   // `?alias=matches|differs|failed` picks what Check again finds.
   checkAlias: () => later(fixtures.aliasChecks[params.get("alias") ?? "differs"] ?? fixtures.aliasChecks.differs),
   openSshConfig: async () => {},
+  // `?check=pass|unknownKey|changedKey|wrongBranch` picks what the connection check finds.
+  checkConnection: (_generation, _row, _env, onLines) => previewCheck(onLines),
+  checkRendered: (onLines) => previewCheck(onLines),
 };
+
+async function previewCheck(onLines: (view: CheckView) => void): Promise<CheckView> {
+  onLines(fixtures.connectionChecks.waiting);
+  await wait(slow || 300);
+  onLines(fixtures.connectionChecks.running);
+  await wait(slow || 300);
+  return fixtures.connectionChecks[params.get("check") ?? "pass"] ?? fixtures.connectionChecks.pass;
+}
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 

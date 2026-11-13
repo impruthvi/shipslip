@@ -47,6 +47,7 @@ pub enum FolderView {
 #[serde(rename_all = "camelCase")]
 pub struct FolderEnv {
     pub name: String,
+    pub ssh_alias: String,
     /// `ssh_alias:path`.
     pub target: String,
     pub branch: String,
@@ -88,6 +89,7 @@ pub fn inspect(folder: &Path, trust_path: &Path, git: Option<&Git>) -> FolderVie
                     );
                     Some(FolderEnv {
                         name: escape_field(name),
+                        ssh_alias: escape_field(&target.ssh_alias),
                         target: escape_field(&format!("{}:{}", target.ssh_alias, target.path)),
                         branch: escape_field(&target.branch),
                         production: target.production,
@@ -322,8 +324,8 @@ mod tests {
         assert_eq!(
             json["envs"],
             serde_json::json!([
-                {"name": "production", "target": "web2:/srv/shop", "branch": "release", "production": true, "approved": false},
-                {"name": "staging", "target": "web1:/srv/shop", "branch": "main", "production": false, "approved": true},
+                {"name": "production", "sshAlias": "web2", "target": "web2:/srv/shop", "branch": "release", "production": true, "approved": false},
+                {"name": "staging", "sshAlias": "web1", "target": "web1:/srv/shop", "branch": "main", "production": false, "approved": true},
             ])
         );
     }

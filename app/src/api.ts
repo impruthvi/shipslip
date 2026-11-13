@@ -1,12 +1,13 @@
 // The only module that talks to Rust. Components call `api`; tests mock it.
 
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
   AliasCheck,
   Answers,
+  CheckView,
   CheckoutReceipts,
   CompareResult,
   ConfigAdded,
@@ -53,6 +54,16 @@ export interface Backend {
   checkAlias(draft: HostDraft): Promise<AliasCheck>;
   /** Opens `~/.ssh/config` in a text editor; rejects when it does not exist. */
   openSshConfig(): Promise<void>;
+  /** The read-only connection check for one environment of a map row,
+   * approved or not. `onLines` gets the lines as each probe moves. */
+  checkConnection(
+    generation: number,
+    row: number,
+    env: string,
+    onLines: (view: CheckView) => void,
+  ): Promise<CheckView>;
+  /** The same check for the answers last rendered in the Add project sheet. */
+  checkRendered(onLines: (view: CheckView) => void): Promise<CheckView>;
 }
 
 const tauri: Backend = {
@@ -76,6 +87,16 @@ const tauri: Backend = {
   hostBlock: (draft) => invoke<HostBlock>("ssh_host_block", { draft }),
   checkAlias: (draft) => invoke<AliasCheck>("check_ssh_alias", { draft }),
   openSshConfig: () => invoke<void>("open_ssh_config"),
+  checkConnection: (generation, row, env, onLines) => {
+    const lines = new Channel<CheckView>();
+    lines.onmessage = onLines;
+    return invoke<CheckView>("check_connection", { generation, row, env, lines });
+  },
+  checkRendered: (onLines) => {
+    const lines = new Channel<CheckView>();
+    lines.onmessage = onLines;
+    return invoke<CheckView>("check_rendered", { lines });
+  },
 };
 
 let backend: Promise<Backend> | undefined;
@@ -109,6 +130,8 @@ export const api: Backend = {
   hostBlock: async (draft) => (await getBackend()).hostBlock(draft),
   checkAlias: async (draft) => (await getBackend()).checkAlias(draft),
   openSshConfig: async () => (await getBackend()).openSshConfig(),
+  checkConnection: async (...args) => (await getBackend()).checkConnection(...args),
+  checkRendered: async (onLines) => (await getBackend()).checkRendered(onLines),
 };
 
 /** Quitting while a run is live. Separate from `Backend` so screens need not mock it. */
