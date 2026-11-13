@@ -197,6 +197,12 @@ export default function App() {
   useEffect(() => {
     if (moved > 0) heading.current?.focus();
   }, [moved]);
+  /** A checkout left the sidebar, from its pane or its reopened sheet. */
+  const onRemoved = () => {
+    setAdding(null);
+    refresh();
+    go({ kind: "all" });
+  };
   /** The toolbar's way back to a run: its cell is selected, then its run shown. */
   const follow = (run: RunInfo) => {
     const r = map?.rows.findIndex((x) => x.repoRoot === run.checkout) ?? -1;
@@ -389,10 +395,7 @@ export default function App() {
                 : null
             }
             onDeployFocused={() => setFocusEntry(null)}
-            onRemoved={() => {
-              refresh();
-              go({ kind: "all" });
-            }}
+            onRemoved={onRemoved}
             tools={drawerButton}
           />
         ) : (
@@ -468,6 +471,7 @@ export default function App() {
             refresh();
             go({ kind: "checkout", repoRoot });
           }}
+          onRemoved={onRemoved}
         />
       )}
       {regions}
