@@ -1752,7 +1752,8 @@ export const checkoutReceipts: CheckoutReceipts[] = [
         "sha": "ffffffffffffffffffffffffffffffffffffffff",
         "shortSha": "fffffff"
       }
-    ]
+    ],
+    "older": false
   },
   {
     "kind": "listed",
@@ -1783,7 +1784,8 @@ export const checkoutReceipts: CheckoutReceipts[] = [
         "sha": "dddddddddddddddddddddddddddddddddddddddd",
         "shortSha": "ddddddd"
       }
-    ]
+    ],
+    "older": false
   },
   {
     "kind": "listed",
@@ -1802,7 +1804,8 @@ export const checkoutReceipts: CheckoutReceipts[] = [
         "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
         "shortSha": "eeeeeee"
       }
-    ]
+    ],
+    "older": false
   },
   {
     "kind": "listed",
@@ -1821,7 +1824,8 @@ export const checkoutReceipts: CheckoutReceipts[] = [
         "sha": "9999999999999999999999999999999999999999",
         "shortSha": "9999999"
       }
-    ]
+    ],
+    "older": false
   },
   {
     "kind": "listed",
@@ -1864,7 +1868,8 @@ export const checkoutReceipts: CheckoutReceipts[] = [
         "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "shortSha": "bbbbbbb"
       }
-    ]
+    ],
+    "older": false
   }
 ];
 

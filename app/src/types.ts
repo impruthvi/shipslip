@@ -252,7 +252,8 @@ export interface ReceiptRowView {
 }
 
 export type CheckoutReceipts =
-  | { kind: "listed"; generation: number; row: number; receipts: ReceiptRowView[] }
+  /** `older`: the checkout has receipts older than those listed. */
+  | { kind: "listed"; generation: number; row: number; receipts: ReceiptRowView[]; older: boolean }
   /** The project's receipts folder could not be read. */
   | { kind: "unreadable"; message: string }
   | { kind: "stale" }

@@ -83,6 +83,36 @@ pub fn list(
     })
 }
 
+pub(crate) struct CheckoutListing {
+    pub(crate) rows: Vec<(PathBuf, Receipt)>,
+    /// The checkout has a receipt older than those kept.
+    pub(crate) older: bool,
+}
+
+/// Opens a project's receipts newest first, keeping those recorded from
+/// `checkout` until `limit` are kept. Files that cannot be read are skipped.
+pub(crate) fn list_checkout(
+    root: &Path,
+    project: &str,
+    checkout: &str,
+    limit: usize,
+) -> Result<CheckoutListing, ReceiptError> {
+    let mut rows = Vec::new();
+    for entry in entries(root, project)? {
+        let Ok(receipt) = read_receipt(&entry.path) else {
+            continue;
+        };
+        if receipt.repo_root != checkout {
+            continue;
+        }
+        if rows.len() == limit {
+            return Ok(CheckoutListing { rows, older: true });
+        }
+        rows.push((entry.path, receipt));
+    }
+    Ok(CheckoutListing { rows, older: false })
+}
+
 /// Finds one receipt by a run ID prefix, ignoring case.
 pub fn find(root: &Path, project: &str, query: &str) -> Result<Found, ReceiptError> {
     let query = query.to_ascii_lowercase();

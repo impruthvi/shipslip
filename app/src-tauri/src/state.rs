@@ -12,7 +12,7 @@ use shipslip::git::{Comparison, Git};
 use shipslip::receipt::{compare_envs_with, ReceiptError};
 use shipslip::records::{env_order, CodeState, EnvCell, ReceiptQueryError, Status as Overview};
 
-use shipslip::records::{receipt_at, receipts, ReceiptListRow};
+use shipslip::records::{checkout_receipts, receipt_at, CheckoutReceiptList};
 
 use crate::receipt_view::{slip, SlipView};
 use crate::view::{self, compare_view, CellView, CompareView, Locators, MapView, ReceiptRowView};
@@ -99,8 +99,7 @@ pub enum ReceiptResult {
     NotFound,
 }
 
-/// Receipt files read for one checkout's list; a project's twins share them.
-const RECEIPTS_READ: usize = 50;
+const RECEIPTS_SHOWN: usize = 50;
 
 #[derive(Debug, Serialize)]
 #[serde(
@@ -113,6 +112,8 @@ pub enum CheckoutReceipts {
         generation: u64,
         row: usize,
         receipts: Vec<ReceiptRowView>,
+        /// The checkout has receipts older than those listed.
+        older: bool,
     },
     /// The project's receipts folder could not be read.
     Unreadable {
@@ -302,32 +303,25 @@ impl AppState {
             return CheckoutReceipts::NotFound;
         };
         let listed = match &repo.project {
-            Some(project) => {
-                match receipts(
-                    receipts_root,
-                    project.raw(),
-                    None,
-                    Some(RECEIPTS_READ),
-                    None,
-                ) {
-                    Ok(list) => list.rows,
-                    Err(error) => {
-                        return CheckoutReceipts::Unreadable {
-                            message: view::load_error(&error),
-                        }
+            Some(project) => match checkout_receipts(
+                receipts_root,
+                project.raw(),
+                repo.repo_root.raw(),
+                RECEIPTS_SHOWN,
+            ) {
+                Ok(listed) => listed,
+                Err(error) => {
+                    return CheckoutReceipts::Unreadable {
+                        message: view::load_error(&error),
                     }
                 }
-            }
-            None => Vec::new(),
+            },
+            None => CheckoutReceiptList::default(),
         };
-        let own = listed.iter().filter_map(|listed| match listed {
-            ReceiptListRow::Receipt { path, receipt, .. }
-                if receipt.repo_root.raw() == repo.repo_root.raw() =>
-            {
-                Some((Path::new(path.raw()), receipt.as_ref()))
-            }
-            _ => None,
-        });
+        let own = listed
+            .rows
+            .iter()
+            .map(|(path, receipt)| (path.as_path(), receipt));
         let mut locators = snapshot
             .locators
             .lock()
@@ -336,6 +330,7 @@ impl AppState {
             generation,
             row,
             receipts: view::receipt_rows(own, now_ms, &mut locators),
+            older: listed.older,
         }
     }
 
@@ -979,8 +974,9 @@ mod tests {
                 generation: listed,
                 row,
                 receipts,
+                older,
             } => {
-                assert_eq!((listed, row), (generation, 0));
+                assert_eq!((listed, row, older), (generation, 0, false));
                 receipts
             }
             other => panic!("{other:?}"),
@@ -1010,6 +1006,53 @@ mod tests {
             } => assert_eq!(receipt.env, "production"),
             other => panic!("{other:?}"),
         }
+    }
+
+    fn listed_for(fx: &Fixture, checkout: &str) -> (usize, bool) {
+        let state = AppState::default();
+        let generation = generation(&state.load_map(|| NOW, reader(fx)));
+        let row = (0..10)
+            .find(|&row| state.resolve_checkout(generation, row) == Ok(PathBuf::from(checkout)))
+            .unwrap();
+        match state.checkout_receipts(generation, row, &fx.receipts(), NOW) {
+            CheckoutReceipts::Listed {
+                receipts, older, ..
+            } => (receipts.len(), older),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_twins_newer_receipts_do_not_hide_a_checkouts_older_one() {
+        let fx = Fixture::new();
+        fx.save(&run(1, "staging"));
+        for n in 2..=51 {
+            let mut twin = run(n, "staging");
+            twin["repo_root"] = json!("/work/twin");
+            fx.save(&twin);
+        }
+        let broken = fx.save(&run(52, "staging"));
+        fs::write(broken, "{").unwrap();
+        assert_eq!(listed_for(&fx, "/work/app"), (1, false));
+        assert_eq!(listed_for(&fx, "/work/twin"), (50, false));
+    }
+
+    #[test]
+    fn a_checkout_with_more_receipts_than_listed_says_older_ones_are_not_shown() {
+        let fx = Fixture::new();
+        for n in 1..=60 {
+            fx.save(&run(n, "staging"));
+        }
+        assert_eq!(listed_for(&fx, "/work/app"), (50, true));
+    }
+
+    #[test]
+    fn a_checkout_with_few_receipts_lists_them_all() {
+        let fx = Fixture::new();
+        for n in 1..=10 {
+            fx.save(&run(n, "staging"));
+        }
+        assert_eq!(listed_for(&fx, "/work/app"), (10, false));
     }
 
     #[test]

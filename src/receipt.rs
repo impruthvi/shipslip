@@ -19,6 +19,7 @@ mod history;
 pub(crate) mod markdown;
 mod overview;
 
+pub(crate) use history::list_checkout;
 pub use history::{find, list, Found, Listed, Listing, MIN_ID_LEN};
 pub use markdown::markdown;
 pub use overview::{
