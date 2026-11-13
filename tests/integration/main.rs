@@ -2055,6 +2055,46 @@ async fn connect_failure(server: &Server, config: &str) -> ConnectFailure {
 }
 
 #[tokio::test]
+async fn an_alias_from_an_included_file_resolves_with_ssh_g_and_connects() {
+    use shipslip::ssh_aliases::{self, HostDraft};
+
+    let server = Server::start().await;
+    let top = server.dir.join("top");
+    std::fs::write(
+        &top,
+        format!(
+            "Include {}\n\nHost *.example\n  User nobody\n",
+            server.config().display()
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(ssh_aliases::list(&top).unwrap(), ["server"]);
+    let resolved = ssh_aliases::resolve("server", Some(&top)).unwrap();
+    assert_eq!(resolved.host_name, "127.0.0.1");
+    assert_eq!(resolved.user, "deploy");
+    assert_eq!(resolved.port.to_string(), server.port);
+    let draft = HostDraft {
+        alias: "server".into(),
+        host_name: "127.0.0.1".into(),
+        user: "deploy".into(),
+        identity_file: String::new(),
+        port: server.port.clone(),
+    };
+    assert!(draft.matches(&resolved));
+    let missing = ssh_aliases::resolve("crm", Some(&top)).unwrap();
+    assert!(!HostDraft {
+        alias: "crm".into(),
+        ..draft
+    }
+    .matches(&missing));
+
+    SshTransport::connect_with_config("server", &top)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
 async fn unknown_host_key_is_refused() {
     let server = Server::start().await;
     assert_eq!(

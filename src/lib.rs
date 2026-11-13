@@ -32,6 +32,7 @@ pub mod records;
 mod runner;
 mod script;
 pub mod setup;
+pub mod ssh_aliases;
 pub mod transport;
 
 pub use engine::{

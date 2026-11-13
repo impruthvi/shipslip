@@ -2,6 +2,7 @@
 // Do not edit: real command results, typed so tsc checks them against types.ts.
 
 import type {
+  AliasCheck,
   CellView,
   CheckoutReceipts,
   CommandError,
@@ -10,6 +11,7 @@ import type {
   DeployEntry,
   DeployReview,
   FolderView,
+  HostBlock,
   LiveRuns,
   LoadResult,
   PrepareProgress,
@@ -20,6 +22,7 @@ import type {
   RunBatch,
   RunInfo,
   SlipView,
+  SshAliases,
   TrustReview,
 } from "./types";
 
@@ -798,6 +801,7 @@ export const folders: Record<string, FolderView> = {
   "newConfig": {
     "kind": "newConfig",
     "checkout": "/Users/you/code/api",
+    "project": "api",
     "branch": null
   },
   "notGit": {
@@ -886,6 +890,74 @@ export const configTexts: Record<string, ConfigText> = {
     "warnings": [
       "Found yarn.lock; automatic frontend deploy steps support only package-lock.json. Add the appropriate install and build steps to .shipslip.toml."
     ]
+  }
+};
+
+export const sshAliases: SshAliases = {
+  "aliases": [
+    {
+      "alias": "production1",
+      "user": "deploy",
+      "hostName": "203.0.113.10"
+    },
+    {
+      "alias": "staging1",
+      "user": "deploy",
+      "hostName": "203.0.113.20"
+    }
+  ],
+  "identityFiles": [
+    "~/.ssh/id_ed25519",
+    "~/.ssh/id_rsa"
+  ],
+  "error": null
+};
+
+export const hostBlocks: Record<string, HostBlock> = {
+  "block": {
+    "kind": "block",
+    "lines": [
+      "Host api",
+      "  HostName 203.0.113.7",
+      "  User forge",
+      "  IdentityFile ~/.ssh/id_ed25519"
+    ]
+  },
+  "invalid": {
+    "kind": "invalid",
+    "problems": [
+      {
+        "field": "hostName",
+        "message": "Enter the server's host name or IP address."
+      },
+      {
+        "field": "port",
+        "message": "Use a port from 1 to 65535."
+      }
+    ]
+  }
+};
+
+export const aliasChecks: Record<string, AliasCheck> = {
+  "differs": {
+    "kind": "differs",
+    "resolved": {
+      "hostName": "api",
+      "user": "you",
+      "port": 22
+    }
+  },
+  "failed": {
+    "kind": "failed",
+    "message": "ssh -G failed: /Users/you/.ssh/config line 4: Bad configuration option: hostnme"
+  },
+  "matches": {
+    "kind": "matches",
+    "resolved": {
+      "hostName": "203.0.113.7",
+      "user": "forge",
+      "port": 22
+    }
   }
 };
 

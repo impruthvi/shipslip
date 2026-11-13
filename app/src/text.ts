@@ -1,6 +1,10 @@
 import { Fragment, createElement, type ReactNode } from "react";
 
 /** Library sentences mark commands with backticks: show them as code, as text. */
+/** A rejected command's message: a `CommandError`'s, or the value itself. */
+export const errorMessage = (error: unknown) =>
+  error && typeof error === "object" && "message" in error ? String(error.message) : String(error);
+
 export function withCode(text: string): ReactNode[] {
   return text
     .split("`")

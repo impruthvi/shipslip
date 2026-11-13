@@ -2,17 +2,24 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { deploy } from "./deployApi";
 import { StepIcon } from "./Mark";
+import { errorMessage } from "./text";
+import { chosenAlias, freshChoice, SshAliasStep, type SshChoice } from "./SshAliasStep";
 import { TrustSettings } from "./TrustReview";
 import { TypedConfirm } from "./TypedConfirm";
-import type { AnswerField, Answers, FolderEnv, FolderView, Loaded, TrustReview } from "./types";
+import type { AnswerField, Answers, FolderEnv, FolderView, Loaded, SshAliases, TrustReview } from "./types";
 
-/** The ssh alias and check steps land with their own tickets; until then an
- * existing config goes folder → approval, a new one folder → environment →
+/** The check step lands with its own ticket; until then an existing config
+ * goes folder → approval, a new one folder → environment → ssh alias →
  * approval. */
-type Step = "folder" | "environment" | "approval";
-const label: Record<Step, string> = { folder: "Folder", environment: "Environment", approval: "Approval" };
+type Step = "folder" | "environment" | "ssh" | "approval";
+const label: Record<Step, string> = {
+  folder: "Folder",
+  environment: "Environment",
+  ssh: "SSH alias",
+  approval: "Approval",
+};
 const stepsFor = (folder: FolderView | null): Step[] =>
-  folder?.kind === "newConfig" ? ["folder", "environment", "approval"] : ["folder", "approval"];
+  folder?.kind === "newConfig" ? ["folder", "environment", "ssh", "approval"] : ["folder", "approval"];
 
 const freshAnswers = (branch: string | null): Answers => ({
   env: "staging",
@@ -24,8 +31,7 @@ const freshAnswers = (branch: string | null): Answers => ({
   smokeUrl: "",
 });
 
-const message = (error: unknown) =>
-  error && typeof error === "object" && "message" in error ? String(error.message) : String(error);
+const message = errorMessage;
 
 function FolderResult({ folder }: { folder: FolderView }) {
   switch (folder.kind) {
@@ -154,9 +160,6 @@ function AnswersForm({
       <Field label="Environment name" hint="Letters, digits, - and _" problem={problems.env}>
         {text("env", false)}
       </Field>
-      <Field label="SSH host alias" hint="The Host name from ~/.ssh/config, not user@host" problem={problems.sshAlias}>
-        {text("sshAlias", true)}
-      </Field>
       <Field
         label="Remote path"
         hint="Absolute path of the app's git repository on the server"
@@ -279,6 +282,9 @@ export function AddProject({
   const [writing, setWriting] = useState(false);
   /** Written, but approving failed: the checkout reads "Needs approval". */
   const [unapproved, setUnapproved] = useState<string | null>(null);
+  /** The ssh alias step: `~/.ssh/config` read once per sheet, and the pick. */
+  const [aliases, setAliases] = useState<SshAliases | null>(null);
+  const [sshChoice, setSshChoice] = useState<SshChoice>(() => freshChoice(""));
   const heading = useRef<HTMLHeadingElement>(null);
   const form = useRef<HTMLDivElement>(null);
   const alive = useRef(true);
@@ -296,6 +302,7 @@ export function AddProject({
     setAnswers(freshAnswers(view.kind === "newConfig" ? view.branch : null));
     setProblems({});
     setConfig(null);
+    setSshChoice(freshChoice(view.kind === "newConfig" ? view.project : ""));
   };
 
   const choose = () => {
@@ -369,16 +376,52 @@ export function AddProject({
     });
   };
 
-  const render = () => {
+  useEffect(() => {
+    if (step !== "ssh" || aliases !== null) return;
+    let current = true;
+    api
+      .sshAliases()
+      .then((read) => {
+        if (!current) return;
+        setAliases(read);
+        setSshChoice((choice) =>
+          choice.draft.identityFile === "" && read.identityFiles.length > 0
+            ? { ...choice, draft: { ...choice.draft, identityFile: read.identityFiles[0] } }
+            : choice,
+        );
+      })
+      .catch((error: unknown) => current && setAliases({ aliases: [], identityFiles: [], error: message(error) }));
+    return () => {
+      current = false;
+    };
+  }, [step, aliases]);
+
+  /** Renders the config. From the environment step only its own answers
+   * count: the alias is the next step's. */
+  const render = (from: "environment" | "ssh") => {
+    const asked = { ...answers, sshAlias: from === "ssh" ? (chosenAlias(sshChoice) ?? "") : answers.sshAlias };
+    setAnswers(asked);
     setRendering(true);
     setAddError(null);
     api
-      .renderConfig(answers)
+      .renderConfig(asked)
       .then((text) => {
         if (!alive.current) return;
         if (text.kind === "invalid") {
-          setProblems(Object.fromEntries(text.problems.map((p) => [p.field, p.message])));
-          setFocusField(text.problems[0]?.field ?? null);
+          const own = text.problems.filter((p) => p.field !== "sshAlias");
+          if (own.length > 0) {
+            setProblems(Object.fromEntries(own.map((p) => [p.field, p.message])));
+            setFocusField(own[0].field);
+            setStep("environment");
+          } else if (from === "environment") {
+            setStep("ssh");
+          } else {
+            setAddError(text.problems.map((p) => p.message).join(" "));
+          }
+          return;
+        }
+        if (from === "environment") {
+          setStep("ssh");
           return;
         }
         setConfig({ lines: text.lines, warnings: text.warnings });
@@ -550,6 +593,13 @@ export function AddProject({
                   <AnswersForm answers={answers} problems={problems} disabled={busy} onChange={change} />
                 </div>
               </>
+            ) : step === "ssh" ? (
+              <>
+                <h3 className="sheet-heading" ref={heading} tabIndex={-1}>
+                  Pick the ssh alias
+                </h3>
+                <SshAliasStep aliases={aliases} choice={sshChoice} disabled={busy} onChange={setSshChoice} />
+              </>
             ) : newConfig ? (
               <>
                 <h3 className="sheet-heading" ref={heading} tabIndex={-1}>
@@ -648,7 +698,21 @@ export function AddProject({
                   {adding ? "Adding…" : "Continue"}
                 </button>
               ) : step === "environment" ? (
-                <button type="button" className="button button-primary" disabled={busy} onClick={render}>
+                <button
+                  type="button"
+                  className="button button-primary"
+                  disabled={busy}
+                  onClick={() => render("environment")}
+                >
+                  {rendering ? "Checking…" : "Continue"}
+                </button>
+              ) : step === "ssh" ? (
+                <button
+                  type="button"
+                  className="button button-primary"
+                  disabled={busy || chosenAlias(sshChoice) === null}
+                  onClick={() => render("ssh")}
+                >
                   {rendering ? "Checking…" : "Continue"}
                 </button>
               ) : newConfig && unapproved !== null ? (

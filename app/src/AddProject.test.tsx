@@ -3,14 +3,18 @@ import { beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 import * as fixtures from "./fixtures.gen";
 import type {
+  AliasCheck,
   Answers,
   CheckoutReceipts,
   ConfigAdded,
   ConfigText,
   DeployEntry,
   FolderView,
+  HostBlock,
+  HostDraft,
   LiveRuns,
   LoadResult,
+  SshAliases,
   TrustReview,
 } from "./types";
 
@@ -20,6 +24,11 @@ const addCheckout = vi.fn<() => Promise<string>>();
 const reopenSetup = vi.fn<(generation: number, row: number) => Promise<FolderView>>();
 const renderConfig = vi.fn<(answers: Answers) => Promise<ConfigText>>();
 const addWithConfig = vi.fn<() => Promise<ConfigAdded>>();
+const sshAliases = vi.fn<() => Promise<SshAliases>>();
+const hostBlock = vi.fn<(draft: HostDraft) => Promise<HostBlock>>();
+const checkAlias = vi.fn<(draft: HostDraft) => Promise<AliasCheck>>();
+const openSshConfig = vi.fn<() => Promise<void>>();
+const copyText = vi.fn<(text: string) => Promise<void>>();
 vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
@@ -27,7 +36,7 @@ vi.mock("./api", () => ({
     compare: vi.fn(),
     loadReceipt: async () => ({ kind: "notFound" }),
     checkoutReceipts: async (): Promise<CheckoutReceipts> => ({ kind: "listed", generation: 1, row: 0, receipts: [] }),
-    copyText: vi.fn(),
+    copyText: (text: string) => copyText(text),
     onFocus: async () => () => {},
     receiptSeen: async () => {},
     pickFolder: () => pickFolder(),
@@ -35,6 +44,10 @@ vi.mock("./api", () => ({
     reopenSetup: (...args: [number, number]) => reopenSetup(...args),
     renderConfig: (answers: Answers) => renderConfig(answers),
     addWithConfig: () => addWithConfig(),
+    sshAliases: () => sshAliases(),
+    hostBlock: (draft: HostDraft) => hostBlock(draft),
+    checkAlias: (draft: HostDraft) => checkAlias(draft),
+    openSshConfig: () => openSshConfig(),
   },
 }));
 
@@ -85,6 +98,15 @@ beforeEach(() => {
   reopenSetup.mockReset().mockResolvedValue(fixtures.folders.newConfig);
   renderConfig.mockReset().mockResolvedValue(fixtures.configTexts.rendered);
   addWithConfig.mockReset().mockResolvedValue({ checkout: api, approvalError: null });
+  sshAliases.mockReset().mockResolvedValue(fixtures.sshAliases);
+  hostBlock
+    .mockReset()
+    .mockImplementation(async (draft) =>
+      draft.hostName.trim() === "" ? fixtures.hostBlocks.invalid : fixtures.hostBlocks.block,
+    );
+  checkAlias.mockReset().mockResolvedValue(fixtures.aliasChecks.differs);
+  openSshConfig.mockReset().mockResolvedValue(undefined);
+  copyText.mockReset().mockResolvedValue(undefined);
 });
 
 async function settle() {
@@ -334,14 +356,19 @@ async function toQuestions(folder: FolderView = { ...fixtures.folders.newConfig,
   await settle();
 }
 
-async function toConfig() {
+/** Answers the questions and continues to the ssh alias step. */
+async function toAlias() {
   await toQuestions();
-  fireEvent.change(within(sheet()).getByRole("textbox", { name: "SSH host alias" }), {
-    target: { value: "api-staging" },
-  });
   fireEvent.change(within(sheet()).getByRole("textbox", { name: "Remote path" }), {
     target: { value: "/var/www/api" },
   });
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+}
+
+async function toConfig() {
+  await toAlias();
+  fireEvent.click(within(sheet()).getByRole("radio", { name: /^staging1/ }));
   fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
   await settle();
 }
@@ -354,11 +381,10 @@ const typeEnv = (env: string) =>
 test("a checkout without a config is added and asks the seven slip init questions", async () => {
   await toQuestions();
   expect(addCheckout).toHaveBeenCalledTimes(1);
-  expect(railSteps()).toEqual(["Folder", "2Environment", "3Approval"]);
+  expect(railSteps()).toEqual(["Folder", "2Environment", "3SSH alias", "4Approval"]);
   expect(screen.getByRole("heading", { name: "Describe one environment" })).toHaveFocus();
   const field = (name: string) => within(sheet()).getByRole("textbox", { name });
   expect(field("Environment name")).toHaveValue("staging");
-  expect(field("SSH host alias")).toHaveValue("");
   expect(field("Remote path")).toHaveValue("");
   expect(field("Branch")).toHaveValue("main");
   expect(within(sheet()).getByRole("checkbox", { name: /^Production/ })).not.toBeChecked();
@@ -524,7 +550,7 @@ test("a Setup not finished checkout says so and reopens the sheet at the environ
   expect(screen.getByRole("heading", { name: "Describe one environment" })).toHaveFocus();
   expect(within(sheet()).getByText(api)).toHaveClass("sheet-path");
   // Answers are not kept between sessions.
-  expect(within(sheet()).getByRole("textbox", { name: "SSH host alias" })).toHaveValue("");
+  expect(within(sheet()).getByRole("textbox", { name: "Remote path" })).toHaveValue("");
   expect(screen.queryByRole("heading", { level: 1, name: "api" })).toBeNull();
 });
 
@@ -537,4 +563,250 @@ test("a reopened checkout that has a config now shows it on the folder step", as
   await settle();
   expect(screen.getByRole("heading", { name: "Choose the project's folder" })).toBeInTheDocument();
   expect(within(sheet()).getByRole("region", { name: "Environments in .shipslip.toml" })).toBeInTheDocument();
+});
+
+// The ssh alias step: pick from ~/.ssh/config, or paste a Host block.
+
+const continueButton = () => within(sheet()).getByRole("button", { name: "Continue" });
+const hostField = (name: string) => within(sheet()).getByRole("textbox", { name });
+
+async function noneFit() {
+  await toAlias();
+  fireEvent.click(within(sheet()).getByRole("radio", { name: "None of these fit" }));
+  await settle();
+  fireEvent.change(hostField("HostName"), { target: { value: "203.0.113.7" } });
+  fireEvent.change(hostField("User"), { target: { value: "forge" } });
+  await settle();
+}
+
+async function checkAgain() {
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Check again" }));
+  await settle();
+}
+
+test("the ssh alias step lists the config's aliases and Continue waits for a pick", async () => {
+  await toAlias();
+  expect(screen.getByRole("heading", { name: "Pick the ssh alias" })).toHaveFocus();
+  expect(within(sheet()).queryByRole("textbox", { name: "SSH host alias" })).toBeNull();
+  const group = within(sheet()).getByRole("radiogroup", { name: "SSH alias" });
+  const radios = within(group).getAllByRole("radio");
+  expect(radios.map((r) => r.closest("label")?.textContent)).toEqual([
+    "production1deploy@203.0.113.10",
+    "staging1deploy@203.0.113.20",
+    "None of these fit",
+  ]);
+  expect(continueButton()).toBeDisabled();
+
+  fireEvent.click(within(group).getByRole("radio", { name: /^staging1/ }));
+  expect(continueButton()).toBeEnabled();
+  renderConfig.mockClear();
+  fireEvent.click(continueButton());
+  await settle();
+  expect(renderConfig).toHaveBeenCalledWith(expect.objectContaining({ sshAlias: "staging1", path: "/var/www/api" }));
+  expect(screen.getByRole("heading", { name: "Approve staging" })).toHaveFocus();
+});
+
+test("an alias ssh -G could not resolve still lists, and an unreadable config says why", async () => {
+  sshAliases.mockResolvedValue({
+    aliases: [{ alias: "broken", user: null, hostName: null }],
+    identityFiles: [],
+    error: "Couldn't read /Users/you/.ssh/config: Permission denied (os error 13)",
+  });
+  await toAlias();
+  expect(within(sheet()).getByRole("radio", { name: /^broken/ }).closest("label")).toHaveTextContent(
+    "ssh -G could not resolve it",
+  );
+  expect(within(sheet()).getByRole("alert")).toHaveTextContent("Permission denied");
+});
+
+test("a failed read of the aliases leaves only None of these fit", async () => {
+  sshAliases.mockRejectedValue({ code: "local", message: "HOME is not set." });
+  await toAlias();
+  expect(within(sheet()).getByRole("alert")).toHaveTextContent("HOME is not set.");
+  expect(within(sheet()).getAllByRole("radio").map((r) => r.closest("label")?.textContent)).toEqual([
+    "None of these fit",
+  ]);
+});
+
+test("None of these fit asks for the server and shows the Host block with Copy and Open", async () => {
+  await toAlias();
+  fireEvent.click(within(sheet()).getByRole("radio", { name: "None of these fit" }));
+  await settle();
+  expect(hostField("Alias")).toHaveValue("api");
+  expect(within(sheet()).getByRole("combobox", { name: "IdentityFile" })).toHaveValue("~/.ssh/id_ed25519");
+  expect(within(sheet()).queryByRole("textbox", { name: "Port" })).toBeNull();
+  expect(within(sheet()).queryByLabelText("Host block")).toBeNull();
+  // An empty HostName is not flagged before anything is typed or checked.
+  expect(hostField("HostName")).not.toHaveAttribute("aria-invalid");
+  expect(within(sheet()).getByRole("button", { name: "Check again" })).toBeDisabled();
+
+  fireEvent.click(within(sheet()).getByRole("button", { name: "More" }));
+  expect(hostField("Port")).toHaveValue("22");
+
+  fireEvent.change(hostField("HostName"), { target: { value: "203.0.113.7" } });
+  fireEvent.change(hostField("User"), { target: { value: "forge" } });
+  await settle();
+  expect(hostBlock).toHaveBeenLastCalledWith({
+    alias: "api",
+    hostName: "203.0.113.7",
+    user: "forge",
+    identityFile: "~/.ssh/id_ed25519",
+    port: "22",
+  });
+  const block = fixtures.hostBlocks.block;
+  if (block.kind !== "block") throw new Error("fixture");
+  expect(within(sheet()).getByLabelText("Host block").textContent).toBe(block.lines.join("\n"));
+
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Copy" }));
+  await settle();
+  expect(copyText).toHaveBeenCalledWith("Host api\n  HostName 203.0.113.7\n  User forge\n  IdentityFile ~/.ssh/id_ed25519\n");
+  expect(within(sheet()).getByRole("button", { name: "Copied" })).toBeInTheDocument();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Open ~/.ssh/config" }));
+  await settle();
+  expect(openSshConfig).toHaveBeenCalledTimes(1);
+  expect(continueButton()).toBeDisabled();
+});
+
+test("a field that can't go in the block is named under it", async () => {
+  await noneFit();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "More" }));
+  fireEvent.change(hostField("HostName"), { target: { value: "" } });
+  fireEvent.change(hostField("Port"), { target: { value: "x" } });
+  await settle();
+  expect(hostField("Port")).toHaveAttribute("aria-invalid", "true");
+  expect(hostField("Port")).toHaveAccessibleDescription("Use a port from 1 to 65535.");
+  expect(hostField("HostName")).not.toHaveAttribute("aria-invalid");
+  expect(within(sheet()).queryByLabelText("Host block")).toBeNull();
+});
+
+test("Check again says the alias does not match yet and Continue stays disabled", async () => {
+  await noneFit();
+  await checkAgain();
+  expect(checkAlias).toHaveBeenCalledWith(expect.objectContaining({ alias: "api", hostName: "203.0.113.7" }));
+  const status = within(sheet()).getByRole("status");
+  expect(status).toHaveTextContent(
+    "ssh -G api resolves to you@api, not forge@203.0.113.7 yet. Paste the block into ~/.ssh/config, save the file, then check again.",
+  );
+  expect(status).toHaveClass("tone-attention");
+  expect(continueButton()).toBeDisabled();
+});
+
+test("Check again that matches enables Continue with the new alias", async () => {
+  checkAlias.mockResolvedValue(fixtures.aliasChecks.matches);
+  await noneFit();
+  await checkAgain();
+  const status = within(sheet()).getByRole("status");
+  expect(status).toHaveTextContent("Found: ssh -G api resolves to forge@203.0.113.7.");
+  expect(status).not.toHaveClass("tone-attention");
+  expect(continueButton()).toBeEnabled();
+
+  // Changing a field after the check needs another check.
+  fireEvent.change(hostField("User"), { target: { value: "deploy" } });
+  expect(continueButton()).toBeDisabled();
+  expect(within(sheet()).queryByText(/^Found:/)).toBeNull();
+  fireEvent.change(hostField("User"), { target: { value: "forge" } });
+  expect(continueButton()).toBeEnabled();
+
+  renderConfig.mockClear();
+  fireEvent.click(continueButton());
+  await settle();
+  expect(renderConfig).toHaveBeenCalledWith(expect.objectContaining({ sshAlias: "api" }));
+  expect(screen.getByRole("heading", { name: "Approve staging" })).toHaveFocus();
+});
+
+test("Check again that ssh can't run says what ssh printed", async () => {
+  checkAlias.mockResolvedValue(fixtures.aliasChecks.failed);
+  await noneFit();
+  await checkAgain();
+  expect(within(sheet()).getByRole("status")).toHaveTextContent("Bad configuration option: hostnme");
+  expect(continueButton()).toBeDisabled();
+});
+
+test("Check again rejected by the app says why", async () => {
+  checkAlias.mockRejectedValue({ code: "local", message: "the request failed inside the app" });
+  await noneFit();
+  await checkAgain();
+  expect(within(sheet()).getByRole("status")).toHaveTextContent("the request failed inside the app");
+  expect(continueButton()).toBeDisabled();
+});
+
+test("Check again refused for its fields names them", async () => {
+  checkAlias.mockResolvedValue({ kind: "invalid", problems: [{ field: "user", message: "Use only letters." }] });
+  await noneFit();
+  await checkAgain();
+  expect(hostField("User")).toHaveAccessibleDescription("Use only letters.");
+  expect(continueButton()).toBeDisabled();
+});
+
+test("Open ~/.ssh/config that fails says why", async () => {
+  openSshConfig.mockRejectedValue({ code: "notFound", message: "~/.ssh/config does not exist yet." });
+  await noneFit();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Open ~/.ssh/config" }));
+  await settle();
+  expect(within(sheet()).getByRole("alert")).toHaveTextContent("~/.ssh/config does not exist yet.");
+});
+
+test("Copy that fails says so", async () => {
+  copyText.mockRejectedValue(new Error("denied"));
+  await noneFit();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Copy" }));
+  await settle();
+  expect(within(sheet()).getByRole("button", { name: "Copy failed" })).toBeInTheDocument();
+});
+
+test("an alias the library refuses at Continue says why and keeps the step", async () => {
+  await toAlias();
+  fireEvent.click(within(sheet()).getByRole("radio", { name: /^staging1/ }));
+  renderConfig.mockResolvedValue({
+    kind: "invalid",
+    problems: [{ field: "sshAlias", message: "Use the `Host` name from ~/.ssh/config, not user@host." }],
+  });
+  fireEvent.click(continueButton());
+  await settle();
+  expect(within(sheet()).getByRole("alert")).toHaveTextContent("not user@host");
+  expect(screen.getByRole("heading", { name: "Pick the ssh alias" })).toBeInTheDocument();
+});
+
+test("going back to the ssh alias step keeps the pick", async () => {
+  await toConfig();
+  const rail = within(sheet()).getByRole("navigation", { name: "Add project steps" });
+  fireEvent.click(within(rail).getByRole("button", { name: /SSH alias/ }));
+  await settle();
+  expect(screen.getByRole("heading", { name: "Pick the ssh alias" })).toHaveFocus();
+  expect(within(sheet()).getByRole("radio", { name: /^staging1/ })).toBeChecked();
+  expect(continueButton()).toBeEnabled();
+  expect(sshAliases).toHaveBeenCalledTimes(1);
+});
+
+test("an environment answer refused at the ssh step's Continue goes back to its field", async () => {
+  await toAlias();
+  fireEvent.click(within(sheet()).getByRole("radio", { name: /^staging1/ }));
+  renderConfig.mockResolvedValue(fixtures.configTexts.invalid);
+  fireEvent.click(continueButton());
+  await settle();
+  expect(screen.getByRole("heading", { name: "Describe one environment" })).toBeInTheDocument();
+  const env = within(sheet()).getByRole("textbox", { name: "Environment name" });
+  expect(env).toHaveAttribute("aria-invalid", "true");
+  expect(env).toHaveFocus();
+});
+
+test("a miss on User alone names the user ssh resolves to", async () => {
+  checkAlias.mockResolvedValue({
+    kind: "differs",
+    resolved: { hostName: "203.0.113.7", user: "deploy", port: 22 },
+  });
+  await noneFit();
+  await checkAgain();
+  expect(within(sheet()).getByRole("status")).toHaveTextContent(
+    "ssh -G api resolves to deploy@203.0.113.7, not forge@203.0.113.7 yet.",
+  );
+  expect(continueButton()).toBeDisabled();
+});
+
+test("a Host block the app could not build leaves Copy and Check again off", async () => {
+  hostBlock.mockRejectedValue({ code: "local", message: "the request failed inside the app" });
+  await noneFit();
+  expect(within(sheet()).queryByLabelText("Host block")).toBeNull();
+  expect(within(sheet()).getByRole("button", { name: "Copy" })).toBeDisabled();
+  expect(within(sheet()).getByRole("button", { name: "Check again" })).toBeDisabled();
 });
