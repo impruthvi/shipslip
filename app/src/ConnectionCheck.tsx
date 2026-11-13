@@ -11,14 +11,23 @@ export interface CheckRun {
   view: CheckView | null;
   running: boolean;
   error: string | null;
-  run: (start: StartCheck) => void;
-  /** Forgets the result, for a different target. */
+  /** Per environment: the last finished check, or `null` for one started
+   * that did not finish. An environment never checked is absent. */
+  finished: Record<string, CheckView | null>;
+  /** Some check shown or finished met a changed host key: no approval. */
+  hostKeyChanged: boolean;
+  run: (env: string, start: StartCheck) => void;
+  /** Clears the shown check, for a different environment; `finished` stays. */
   reset: () => void;
+  /** Clears the shown check and every environment's, for a different target. */
+  forgetAll: () => void;
 }
 
-/** One check at a time; a result from a run started before `reset` is dropped. */
+/** One check at a time; a result from a run started before `reset` or
+ * `forgetAll` is dropped. */
 export function useConnectionCheck(): CheckRun {
   const [view, setView] = useState<CheckView | null>(null);
+  const [finished, setFinished] = useState<Record<string, CheckView | null>>({});
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const current = useRef(0);
@@ -28,13 +37,18 @@ export function useConnectionCheck(): CheckRun {
       at.current += 1;
     };
   }, []);
-  const run = useCallback((start: StartCheck) => {
+  const run = useCallback((env: string, start: StartCheck) => {
     const id = ++current.current;
     setRunning(true);
     setError(null);
     setView(null);
+    setFinished((results) => ({ ...results, [env]: null }));
     start((lines) => id === current.current && setView(lines))
-      .then((end) => id === current.current && setView(end))
+      .then((end) => {
+        if (id !== current.current) return;
+        setView(end);
+        if (end.finished) setFinished((results) => ({ ...results, [env]: end }));
+      })
       .catch((failure: unknown) => id === current.current && setError(errorMessage(failure)))
       .finally(() => id === current.current && setRunning(false));
   }, []);
@@ -44,7 +58,13 @@ export function useConnectionCheck(): CheckRun {
     setRunning(false);
     setError(null);
   }, []);
-  return { view, running, error, run, reset };
+  const forgetAll = useCallback(() => {
+    reset();
+    setFinished({});
+  }, [reset]);
+  const hostKeyChanged =
+    view?.hostKeyChanged === true || Object.values(finished).some((done) => done?.hostKeyChanged === true);
+  return { view, running, error, finished, hostKeyChanged, run, reset, forgetAll };
 }
 
 function LineIcon({ line }: { line: CheckLine }) {
@@ -65,10 +85,13 @@ function LineIcon({ line }: { line: CheckLine }) {
 /** The read-only connection check: a button the person presses, a boxed
  * stop for a changed host key, and one ruled line per probe. */
 export function ConnectionCheck({
+  env,
   alias,
   check,
   start,
 }: {
+  /** The environment checked; its result is kept under this name. */
+  env: string;
   /** The ssh alias, before the check names it. */
   alias: string | null;
   check: CheckRun;
@@ -97,7 +120,7 @@ export function ConnectionCheck({
           type="button"
           className="button"
           disabled={running || start === null}
-          onClick={() => start && check.run(start)}
+          onClick={() => start && check.run(env, start)}
         >
           {running ? "Checking…" : view || error ? "Check again" : "Check connection"}
         </button>
@@ -146,6 +169,45 @@ export function ConnectionCheck({
         </p>
       )}
     </div>
+  );
+}
+
+/** The check beside the approval: its lines, or that it was not run or did
+ * not finish. */
+export function CheckSummary({ env, check }: { env: string; check: CheckRun }) {
+  const titleId = useId();
+  const view = check.finished[env];
+  return (
+    <section className="check-summary" aria-labelledby={titleId}>
+      <h4 id={titleId} className="caps muted check-summary-title">
+        Connection check
+      </h4>
+      {view ? (
+        <ul className="check-summary-list">
+          {view.lines.map((line) => (
+            <li key={line.label} className="check-summary-line" data-state={line.state}>
+              <span className="check-icon">
+                <LineIcon line={line} />
+              </span>
+              <span className="check-summary-label">{line.label}</span>
+              {line.state !== "pass" && (
+                <span className={`check-summary-reason ${line.state === "fail" ? "tone-attention" : "muted"}`}>
+                  {line.reason}
+                </span>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : view === null ? (
+        <p className="muted">
+          Did not finish. Check the connection for <span className="mono">{env}</span> again from the check step.
+        </p>
+      ) : (
+        <p className="muted">
+          Not run. Shipslip did not check the connection for <span className="mono">{env}</span>.
+        </p>
+      )}
+    </section>
   );
 }
 
@@ -237,7 +299,7 @@ export function CheckConnectionDialog({
                 }}
               />
             )}
-            <ConnectionCheck alias={null} check={check} start={env ? start(env) : null} />
+            <ConnectionCheck env={env} alias={null} check={check} start={env ? start(env) : null} />
           </div>
           <div className="sheet-footer">
             <span className="sheet-footer-end">

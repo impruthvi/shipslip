@@ -1009,3 +1009,132 @@ test("changing the answers after a check forgets its result", async () => {
   expect(within(sheet()).queryByRole("list", { name: "Connection check" })).toBeNull();
   expect(within(sheet()).getByRole("button", { name: "Check connection" })).toBeEnabled();
 });
+
+// The approval step: the config and the check result side by side.
+
+const checkResult = () => within(sheet()).getByRole("region", { name: "Connection check" });
+const resultLine = (label: string) => {
+  const line = within(checkResult())
+    .getAllByRole("listitem")
+    .find((li) => li.querySelector(".check-summary-label")?.textContent === label);
+  if (!line) throw new Error(`no result line ${label}`);
+  return line;
+};
+
+test("an existing config's approval shows the check result beside its settings", async () => {
+  await toCheck();
+  await runCheck();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(screen.getByRole("heading", { name: "Approve production" })).toHaveFocus();
+  const settings = within(sheet()).getByRole("region", { name: "Settings" });
+  const result = checkResult();
+  expect(settings.parentElement).toBe(result.parentElement);
+  expect(within(result).getAllByRole("listitem")).toHaveLength(6);
+  expect(within(resultLine("ssh connects")).getByRole("img", { name: "passed" })).toBeInTheDocument();
+  expect(within(result).queryByText(/not run/i)).toBeNull();
+});
+
+test("a new config's approval shows the check result beside the rendered file", async () => {
+  await toNewCheck();
+  await runCheck();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  const config = within(sheet()).getByLabelText(".shipslip.toml");
+  const result = checkResult();
+  expect(config.parentElement).toBe(result.parentElement);
+  expect(within(resultLine("Laravel log readable")).getByRole("img", { name: "passed" })).toBeInTheDocument();
+});
+
+test("a wrong branch reaches approval with its line shown as not passed", async () => {
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.wrongBranch);
+  await toCheck();
+  await runCheck();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  const branch = resultLine("On branch main");
+  expect(within(branch).getByRole("img", { name: "did not pass" })).toBeInTheDocument();
+  expect(branch.querySelector(".check-summary-reason")).toHaveTextContent("feature/search is checked out, not main");
+  expect(branch.querySelector(".check-summary-reason")).toHaveClass("tone-attention");
+  expect(branch.querySelector(".tone-bad")).toBeNull();
+  expect(within(resultLine("ssh connects")).getByRole("img", { name: "passed" })).toBeInTheDocument();
+});
+
+test("an approval without a check run says the check was not run", async () => {
+  await toApproval();
+  const result = checkResult();
+  expect(within(result).queryByRole("list")).toBeNull();
+  expect(result).toHaveTextContent("Not run. Shipslip did not check the connection for production.");
+});
+
+test("a new config approved without a check says the check was not run", async () => {
+  await toConfig();
+  expect(checkResult()).toHaveTextContent("Not run. Shipslip did not check the connection for staging.");
+});
+
+test("a changed host key on another environment still keeps the sheet from approval", async () => {
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.changedKey);
+  await toCheck();
+  await runCheck();
+  fireEvent.change(within(sheet()).getByRole("combobox", { name: "Environment" }), { target: { value: "staging" } });
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeDisabled();
+});
+
+test("a check started again forgets the result before it, and one that fails reads did not finish", async () => {
+  await toCheck();
+  await runCheck();
+  checkConnection.mockRejectedValue({ code: "local", message: "production is no longer in .shipslip.toml." });
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Check again" }));
+  await settle();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(within(checkResult()).queryByRole("list")).toBeNull();
+  expect(checkResult()).toHaveTextContent(
+    "Did not finish. Check the connection for production again from the check step.",
+  );
+});
+
+test("a check that ends with lines still waiting is not shown as a result", async () => {
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.running);
+  await toCheck();
+  await runCheck();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(within(checkResult()).queryByRole("list")).toBeNull();
+  expect(checkResult()).toHaveTextContent("Did not finish.");
+});
+
+test("an unreadable log reaches approval with its line shown as not passed", async () => {
+  const pass = fixtures.connectionChecks.pass;
+  const unreadable: CheckView = {
+    ...pass,
+    lines: pass.lines.map((line) =>
+      line.label === "Laravel log readable"
+        ? { ...line, state: "fail", reason: "storage/logs/laravel.log is not readable" }
+        : line,
+    ),
+  };
+  checkConnection.mockResolvedValue(unreadable);
+  await toCheck();
+  await runCheck();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  const log = resultLine("Laravel log readable");
+  expect(within(log).getByRole("img", { name: "did not pass" })).toBeInTheDocument();
+  expect(log.querySelector(".check-summary-reason")).toHaveTextContent("storage/logs/laravel.log is not readable");
+});
+
+test("the result shown is the check of the environment being approved", async () => {
+  const config = fixtures.folders.config;
+  if (config.kind !== "config") throw new Error("fixture");
+  pickFolder.mockResolvedValue({ ...config, envs: config.envs.map((e) => ({ ...e, approved: false })) });
+  await toCheck();
+  fireEvent.change(within(sheet()).getByRole("combobox", { name: "Environment" }), { target: { value: "staging" } });
+  await runCheck();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(screen.getByRole("heading", { name: /^Approve / })).toHaveTextContent(
+    `Approve ${config.envs[0].name}`,
+  );
+  expect(checkResult()).toHaveTextContent(`Not run. Shipslip did not check the connection for ${config.envs[0].name}.`);
+});
