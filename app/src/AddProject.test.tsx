@@ -129,6 +129,7 @@ async function settle() {
 }
 
 const sheet = () => screen.getByRole("dialog", { name: "Add project" });
+const nothingAdded = "Nothing is added until you continue.";
 
 async function openSheet() {
   render(<App />);
@@ -266,6 +267,22 @@ test("Escape closes the sheet like Finish later", async () => {
   await settle();
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(addCheckout).not.toHaveBeenCalled();
+});
+
+test("Finish later on the folder step adds nothing, and the step says so", async () => {
+  await openSheet();
+  await chooseFolder();
+  expect(within(sheet()).getByText(nothingAdded)).toBeInTheDocument();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Finish later" }));
+  await settle();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(addCheckout).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Add project" })).toHaveFocus();
+});
+
+test("only the folder step says nothing is added", async () => {
+  await toCheck();
+  expect(within(sheet()).queryByText(nothingAdded)).toBeNull();
 });
 
 test("first launch says there are no projects and offers Add project and slip init", async () => {
@@ -536,6 +553,8 @@ test("a reopen that fails says why on the folder step", async () => {
   expect(within(sheet()).getByRole("alert")).toHaveTextContent("The map was read again");
   expect(screen.getByRole("heading", { name: "Choose the project's folder" })).toBeInTheDocument();
   expect(within(sheet()).getByRole("button", { name: "Choose folder…" })).toBeEnabled();
+  // The checkout is already listed, so the folder step's note would be wrong.
+  expect(within(sheet()).queryByText(nothingAdded)).toBeNull();
 });
 
 test("a write that fails says why and can be tried again", async () => {
@@ -560,11 +579,25 @@ test("going back to the environment step keeps the answers", async () => {
 
 test("Finish later after the folder step leaves the checkout listed", async () => {
   await toQuestions();
+  expect(within(sheet()).queryByText(nothingAdded)).toBeNull();
   fireEvent.click(within(sheet()).getByRole("button", { name: "Finish later" }));
   await settle();
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(renderConfig).not.toHaveBeenCalled();
   expect(addWithConfig).not.toHaveBeenCalled();
+});
+
+test("Finish later on the ssh alias step closes the sheet and the checkout stays listed", async () => {
+  loadMap.mockResolvedValueOnce(fixtures.map).mockResolvedValue(apiOnly);
+  await toAlias();
+  expect(screen.getByRole("heading", { name: "Pick the ssh alias" })).toBeInTheDocument();
+  expect(within(sheet()).queryByText(nothingAdded)).toBeNull();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Finish later" }));
+  await settle();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(addWithConfig).not.toHaveBeenCalled();
+  const projects = screen.getByRole("region", { name: "Projects" });
+  expect(within(projects).getByRole("button", { name: /^api/ })).toHaveTextContent("Setup not finished");
 });
 
 test("a Setup not finished checkout says so and reopens the sheet at the environment step", async () => {

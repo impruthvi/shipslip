@@ -774,6 +774,9 @@ export function AddProject({
             <button type="button" className="button" onClick={onClose} disabled={busy}>
               Finish later
             </button>
+            {step === "folder" && !reopen && (
+              <span className="muted footer-note">Nothing is added until you continue.</span>
+            )}
             {removable && (
               <button type="button" className="link" onClick={remove} disabled={busy}>
                 Remove from sidebar
