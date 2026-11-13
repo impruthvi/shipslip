@@ -1365,10 +1365,12 @@ fn ssh_refusals_are_classified_and_failed_starts_release_the_reservation() {
         };
         for (message, kind, next_step) in [
             (
-                "Host key verification failed.",
+                "No ED25519 host key is known for web1 and you have requested strict checking.\n\
+                 Host key verification failed.",
                 "hostKeyUnknown",
                 copy("ssh web1"),
             ),
+            ("Host key verification failed.", "hostKeyUnverified", None),
             (
                 "REMOTE HOST IDENTIFICATION HAS CHANGED!",
                 "hostKeyChanged",

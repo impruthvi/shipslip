@@ -253,7 +253,12 @@ async fn an_alias_that_does_not_resolve_runs_nothing_else() {
 async fn a_refused_connection_is_classified_and_the_rest_is_not_run() {
     let fx = Fixture::new();
     for (message, failure) in [
-        ("Host key verification failed.", ConnectFailure::HostKeyUnknown),
+        (
+            "No ED25519 host key is known for server and you have requested strict checking.\n\
+             Host key verification failed.",
+            ConnectFailure::HostKeyUnknown,
+        ),
+        ("Host key verification failed.", ConnectFailure::HostKeyUnverified),
         (
             "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\nHost key verification failed.",
             ConnectFailure::HostKeyChanged,

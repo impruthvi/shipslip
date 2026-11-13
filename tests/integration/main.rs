@@ -2115,6 +2115,42 @@ async fn changed_host_key_is_refused_as_changed_not_unknown() {
     );
 }
 
+/// A quiet `LogLevel` hides why ssh refused a host key. FATAL leaves only the
+/// bare verification line; QUIET leaves nothing. Neither offers a command, and
+/// neither writes to known_hosts.
+#[tokio::test]
+async fn host_key_refusals_under_a_quiet_log_level_offer_nothing_and_trust_nothing() {
+    let server = Server::start().await;
+    let other = new_key(&server, "other_host_key");
+    let changed = std::fs::read_to_string(other.with_extension("pub")).unwrap();
+    for (level, expected) in [
+        ("FATAL", ConnectFailure::HostKeyUnverified),
+        ("QUIET", ConnectFailure::Other),
+    ] {
+        for (case, host_key) in [("untrusted", ""), ("changed", changed.as_str())] {
+            let config = format!("{case}_{level}");
+            server.write_config(&config, host_key);
+            let path = server.dir.join(&config);
+            let mut text = std::fs::read_to_string(&path).unwrap();
+            text.push_str(&format!("  LogLevel {level}\n"));
+            std::fs::write(&path, text).unwrap();
+            let known_hosts = server.dir.join(format!("{config}.known_hosts"));
+            let before = std::fs::read_to_string(&known_hosts).unwrap();
+
+            assert_eq!(
+                connect_failure(&server, &config).await,
+                expected,
+                "{config}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&known_hosts).unwrap(),
+                before,
+                "{config}"
+            );
+        }
+    }
+}
+
 /// Every path under `path` with its size and modification time.
 fn tree(server: &Server, path: &str) -> String {
     server.exec(

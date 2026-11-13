@@ -65,7 +65,7 @@ export const backend: Backend = {
   // `?alias=matches|differs|failed` picks what Check again finds.
   checkAlias: () => later(fixtures.aliasChecks[params.get("alias") ?? "differs"] ?? fixtures.aliasChecks.differs),
   openSshConfig: async () => {},
-  // `?check=pass|unknownKey|changedKey|wrongBranch` picks what the connection check finds.
+  // `?check=pass|unknownKey|changedKey|unverifiedKey|wrongBranch` picks what the connection check finds.
   checkConnection: (_generation, _row, _env, onLines) => previewCheck(onLines),
   checkRendered: (onLines) => previewCheck(onLines),
 };

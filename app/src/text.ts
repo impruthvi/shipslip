@@ -1,5 +1,11 @@
 import { Fragment, createElement, type ReactNode } from "react";
 
+/** A host key ssh refused without saying why: the refusal screen and the check's stop box. */
+export const HOST_KEY_UNVERIFIED = {
+  title: "Shipslip can't verify this server's host key",
+  body: "ssh refused the host key and did not say why, often because `LogLevel` in ~/.ssh/config is QUIET or FATAL. Find out why before going on.",
+};
+
 /** Library sentences mark commands with backticks: show them as code, as text. */
 /** A rejected command's message: a `CommandError`'s, or the value itself. */
 export const errorMessage = (error: unknown) =>

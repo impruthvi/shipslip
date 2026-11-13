@@ -182,7 +182,7 @@ including `anchor.plan`, `server_marker_outcome`, and `check.reason`.
   "log.same_request.kind": ["shared", "no_id", "cut"],
   "log.same_request.key": ["request_id", "trace_id", "correlation_id", "job_id", "batch_id"],
   "log.error.kind": ["invalid_input", "unreadable", "missing", "ambiguous", "ssh_refused", "connection_lost", "log_path_not_trusted", "zone_missing", "server_read_failed", "not_approved"],
-  "log.error.reason": ["host_key_unknown", "host_key_changed", "key_not_loaded", "other"],
+  "log.error.reason": ["host_key_unknown", "host_key_changed", "host_key_unverified", "key_not_loaded", "other"],
   "receipt.error.kind": ["missing", "ambiguous", "newer_version", "unreadable"],
   "cli.early_error.kind": ["invalid_input", "unreadable"],
   "receipt.kind": ["deploy", "up"],

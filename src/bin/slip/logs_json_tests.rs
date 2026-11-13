@@ -62,7 +62,11 @@ fn every_logs_failure_has_a_schema_one_kind_and_the_text_commands_exit_code() {
         "invalid_input"
     );
     for (message, reason) in [
-        ("Host key verification failed", "host_key_unknown"),
+        (
+            "No ED25519 host key is known for server and you have requested strict checking.",
+            "host_key_unknown",
+        ),
+        ("Host key verification failed", "host_key_unverified"),
         ("REMOTE HOST IDENTIFICATION HAS CHANGED", "host_key_changed"),
         ("Permission denied (publickey)", "key_not_loaded"),
         ("ssh diagnostic", "other"),

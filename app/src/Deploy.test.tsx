@@ -845,6 +845,18 @@ test.each([
     command: null,
   },
   {
+    // Even if a command arrived, a host key ssh refused without saying why never offers one.
+    error: {
+      code: "connection",
+      connectionKind: "hostKeyUnverified",
+      message: "Host key verification failed.",
+      nextStep: { kind: "command", prefix: "", command: "ssh shop-prod", copyText: "ssh shop-prod" },
+    } as CommandError,
+    title: "Shipslip can't verify this server's host key",
+    body: "ssh refused the host key and did not say why, often because LogLevel in ~/.ssh/config is QUIET or FATAL. Find out why before going on.",
+    command: null,
+  },
+  {
     error: fixtures.lockHeld,
     title: "Another run deploying",
     body: fixtures.lockHeld.message,
@@ -877,11 +889,12 @@ test.each([
   await act(async () => pending.reject(error));
   const main = within(screen.getByRole("main"));
   expect(main.getByRole("heading", { level: 2, name: title })).toBeInTheDocument();
-  expect(main.getByText(body)).toBeInTheDocument();
+  expect(main.getByText((_, element) => element?.tagName === "P" && element.textContent === body)).toBeInTheDocument();
   expect(screen.getByTestId("announce-assertive")).toHaveTextContent(title);
   if (command) expect(main.getByText(command)).toBeInTheDocument();
   else expect(main.queryByRole("button", { name: /^Copy/ })).not.toBeInTheDocument();
-  if (error.connectionKind === "hostKeyChanged") expect(main.queryByText("ssh shop-prod")).toBeNull();
+  if (error.connectionKind === "hostKeyChanged" || error.connectionKind === "hostKeyUnverified")
+    expect(main.queryByText("ssh shop-prod")).toBeNull();
 });
 
 test.each([fixtures.lockHeld, fixtures.staleLock])(

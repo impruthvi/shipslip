@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { CommandBox } from "./CommandBox";
 import { StepIcon } from "./Mark";
-import { errorMessage } from "./text";
+import { HOST_KEY_UNVERIFIED, errorMessage, withCode } from "./text";
 import type { CheckLine, CheckView } from "./types";
 
 /** Starts one check, calling `onLines` as each probe moves; resolves to the end. */
@@ -14,8 +14,8 @@ export interface CheckRun {
   /** Per environment: the last finished check, or `null` for one started
    * that did not finish. An environment never checked is absent. */
   finished: Record<string, CheckView | null>;
-  /** Some check shown or finished met a changed host key: no approval. */
-  hostKeyChanged: boolean;
+  /** Some check shown or finished stopped at the host key: no approval. */
+  hostKeyStopped: boolean;
   run: (env: string, start: StartCheck) => void;
   /** Clears the shown check, for a different environment; `finished` stays. */
   reset: () => void;
@@ -62,9 +62,8 @@ export function useConnectionCheck(): CheckRun {
     reset();
     setFinished({});
   }, [reset]);
-  const hostKeyChanged =
-    view?.hostKeyChanged === true || Object.values(finished).some((done) => done?.hostKeyChanged === true);
-  return { view, running, error, finished, hostKeyChanged, run, reset, forgetAll };
+  const hostKeyStopped = view?.hostKeyStop != null || Object.values(finished).some((done) => done?.hostKeyStop != null);
+  return { view, running, error, finished, hostKeyStopped, run, reset, forgetAll };
 }
 
 function LineIcon({ line }: { line: CheckLine }) {
@@ -125,15 +124,19 @@ export function ConnectionCheck({
           {running ? "Checking…" : view || error ? "Check again" : "Check connection"}
         </button>
       </div>
-      {view?.hostKeyChanged && (
+      {view?.hostKeyStop && (
         <section className="check-stop" role="alert" aria-labelledby={stopId}>
           <h4 id={stopId} className="check-stop-title">
-            Host key changed. Shipslip stops here.
+            {view.hostKeyStop === "changed" ? "Host key changed. Shipslip stops here." : HOST_KEY_UNVERIFIED.title}
           </h4>
-          <p>
-            The host key for <span className="mono">{view.alias}</span> is not the one ~/.ssh/known_hosts records.
-            Find out why the key changed before going on.
-          </p>
+          {view.hostKeyStop === "changed" ? (
+            <p>
+              The host key for <span className="mono">{view.alias}</span> is not the one ~/.ssh/known_hosts records.
+              Find out why the key changed before going on.
+            </p>
+          ) : (
+            <p>{withCode(HOST_KEY_UNVERIFIED.body)}</p>
+          )}
         </section>
       )}
       {error && (

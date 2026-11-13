@@ -442,7 +442,7 @@ export type ErrorCode =
 export interface CommandError {
   code: ErrorCode;
   message: string;
-  connectionKind?: "hostKeyUnknown" | "hostKeyChanged" | "keyNotLoaded" | "other";
+  connectionKind?: "hostKeyUnknown" | "hostKeyChanged" | "hostKeyUnverified" | "keyNotLoaded" | "other";
   blockedKind?: "lockHeld" | "staleLock" | "fetchFailed" | "upToDate";
   nextStep?: Span;
 }
@@ -665,12 +665,15 @@ export interface Resolved {
 /** One connection check line's state (`check_connection`, `check_rendered`). */
 export type CheckState = "waiting" | "running" | "pass" | "fail" | "notRun";
 
+/** Why a check stopped at the host key (`HostKeyStop`). Neither gets a command. */
+export type HostKeyStop = "changed" | "unverified";
+
 export interface CheckLine {
   label: string;
   state: CheckState;
   reason: string;
-  /** A changed host key: no command, and the sheet cannot continue. */
-  hardStop: boolean;
+  /** A host key refused for any reason but "unknown": no command, and the sheet cannot continue. */
+  hardStop: HostKeyStop | null;
   /** An unknown host key: `ssh <alias> true` to run in Terminal. */
   command: string | null;
 }
@@ -679,8 +682,8 @@ export interface CheckLine {
 export interface CheckView {
   alias: string;
   lines: CheckLine[];
-  /** Some line is a hard stop. */
-  hostKeyChanged: boolean;
+  /** The first line that is a hard stop, if any. */
+  hostKeyStop: HostKeyStop | null;
   /** Every line has its outcome. */
   finished: boolean;
 }

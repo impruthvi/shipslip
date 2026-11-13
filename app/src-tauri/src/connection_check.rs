@@ -25,8 +25,9 @@ pub struct CheckLine {
     pub label: String,
     pub state: CheckState,
     pub reason: String,
-    /// A changed host key: no command, and the sheet cannot continue.
-    pub hard_stop: bool,
+    /// A host key refused for a reason other than "unknown": no command, and
+    /// the sheet cannot continue.
+    pub hard_stop: Option<HostKeyStop>,
     /// An unknown host key: `ssh <alias> true`, to run in Terminal.
     pub command: Option<String>,
 }
@@ -37,10 +38,18 @@ pub struct CheckLine {
 pub struct CheckView {
     pub alias: String,
     pub lines: Vec<CheckLine>,
-    /// Some line is a hard stop.
-    pub host_key_changed: bool,
+    /// The first line that is a hard stop, if any.
+    pub host_key_stop: Option<HostKeyStop>,
     /// Every line has its outcome.
     pub finished: bool,
+}
+
+/// Why the check stopped at the host key. Neither gets a command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum HostKeyStop {
+    Changed,
+    Unverified,
 }
 
 pub struct Lines {
@@ -67,7 +76,7 @@ impl Lines {
                 },
                 state: CheckState::Waiting,
                 reason: String::new(),
-                hard_stop: false,
+                hard_stop: None,
                 command: None,
             })
             .collect();
@@ -86,13 +95,13 @@ impl Lines {
                 CheckState::Running,
                 "Checking…".to_string(),
                 None,
-                false,
+                None,
             ),
             CheckEvent::Finished(probe, Outcome::NotRun) => {
-                (*probe, CheckState::NotRun, "Not run".into(), None, false)
+                (*probe, CheckState::NotRun, "Not run".into(), None, None)
             }
             CheckEvent::Finished(probe, Outcome::Pass(passed)) => {
-                (*probe, CheckState::Pass, self.passed(passed), None, false)
+                (*probe, CheckState::Pass, self.passed(passed), None, None)
             }
             CheckEvent::Finished(probe, Outcome::Fail(failed)) => {
                 let (reason, command, hard_stop) = self.failed(failed);
@@ -111,7 +120,7 @@ impl Lines {
         CheckView {
             alias: self.alias.clone(),
             lines: self.lines.clone(),
-            host_key_changed: self.lines.iter().any(|line| line.hard_stop),
+            host_key_stop: self.lines.iter().find_map(|line| line.hard_stop),
             finished: self
                 .lines
                 .iter()
@@ -143,7 +152,7 @@ impl Lines {
         }
     }
 
-    fn failed(&self, failed: &Failed) -> (String, Option<String>, bool) {
+    fn failed(&self, failed: &Failed) -> (String, Option<String>, Option<HostKeyStop>) {
         let alias = &self.alias;
         let reason = match failed {
             Failed::Alias(message) => format!("ssh -G could not read it: {}", last_line(message)),
@@ -155,10 +164,19 @@ impl Lines {
                              compare the fingerprint, answer yes, then check again."
                         ),
                         Some(format!("ssh {alias} true")),
-                        false,
+                        None,
                     )
                 }
-                ConnectFailure::HostKeyChanged => return ("Host key changed".into(), None, true),
+                ConnectFailure::HostKeyChanged => {
+                    return ("Host key changed".into(), None, Some(HostKeyStop::Changed))
+                }
+                ConnectFailure::HostKeyUnverified => {
+                    return (
+                        "Can't verify the host key".into(),
+                        None,
+                        Some(HostKeyStop::Unverified),
+                    )
+                }
                 ConnectFailure::KeyNotLoaded => format!(
                     "The server turned down this Mac's keys. Load the key with ssh-add, or check \
                      the IdentityFile for {alias}."
@@ -196,7 +214,7 @@ impl Lines {
                 None => format!("Ended with exit {code}"),
             },
         };
-        (reason, None, false)
+        (reason, None, None)
     }
 }
 
@@ -297,7 +315,7 @@ mod tests {
         );
         assert_eq!(view.lines[1].state, CheckState::Fail);
         assert_eq!(view.lines[1].command.as_deref(), Some("ssh web true"));
-        assert!(!view.host_key_changed);
+        assert_eq!(view.host_key_stop, None);
         assert!(view.finished);
         assert!(view.lines[2..]
             .iter()
@@ -305,12 +323,25 @@ mod tests {
     }
 
     #[test]
-    fn a_changed_host_key_is_a_hard_stop_with_no_command() {
-        let view = connect_refused(ConnectFailure::HostKeyChanged);
-        assert!(view.host_key_changed);
-        assert!(view.lines[1].hard_stop);
-        assert_eq!(view.lines[1].command, None);
-        assert!(view.lines.iter().all(|line| line.command.is_none()));
+    fn changed_and_unverified_host_keys_are_hard_stops_with_no_command() {
+        for (failure, stop, reason) in [
+            (
+                ConnectFailure::HostKeyChanged,
+                HostKeyStop::Changed,
+                "Host key changed",
+            ),
+            (
+                ConnectFailure::HostKeyUnverified,
+                HostKeyStop::Unverified,
+                "Can't verify the host key",
+            ),
+        ] {
+            let view = connect_refused(failure);
+            assert_eq!(view.host_key_stop, Some(stop));
+            assert_eq!(view.lines[1].hard_stop, Some(stop));
+            assert_eq!(view.lines[1].reason, reason);
+            assert!(view.lines.iter().all(|line| line.command.is_none()));
+        }
     }
 
     #[test]
@@ -416,7 +447,7 @@ mod tests {
             assert_eq!(line.state, CheckState::Fail);
             assert_eq!(line.reason, reason);
             assert_eq!(line.command, None);
-            assert!(!line.hard_stop);
+            assert_eq!(line.hard_stop, None);
         }
     }
 

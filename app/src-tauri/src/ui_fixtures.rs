@@ -739,7 +739,8 @@ fn connection_check_fixtures() -> BTreeMap<&'static str, crate::connection_check
             "unknownKey",
             replay(&refused(
                 ConnectFailure::HostKeyUnknown,
-                "Host key verification failed.",
+                "No ED25519 host key is known for web and you have requested strict checking.\n\
+                 Host key verification failed.",
             )),
         ),
         (
@@ -747,6 +748,13 @@ fn connection_check_fixtures() -> BTreeMap<&'static str, crate::connection_check
             replay(&refused(
                 ConnectFailure::HostKeyChanged,
                 "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.",
+            )),
+        ),
+        (
+            "unverifiedKey",
+            replay(&refused(
+                ConnectFailure::HostKeyUnverified,
+                "Host key verification failed.",
             )),
         ),
     ])

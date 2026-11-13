@@ -348,6 +348,7 @@ fn serialized_fixed_values_match_the_json_reference() {
         every!(SshRefusal {
             HostKeyUnknown,
             HostKeyChanged,
+            HostKeyUnverified,
             KeyNotLoaded,
             Other,
         }),
