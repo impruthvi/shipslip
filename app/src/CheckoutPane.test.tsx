@@ -17,6 +17,7 @@ const loadReceipt = vi.fn<(generation: number, id: number) => Promise<ReceiptRes
 const checkoutReceipts = vi.fn<(generation: number, row: number) => Promise<CheckoutReceipts>>();
 const checkConnection =
   vi.fn<(generation: number, row: number, env: string, onLines: (view: CheckView) => void) => Promise<CheckView>>();
+const removeCheckout = vi.fn<(generation: number, row: number) => Promise<void>>();
 vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
@@ -28,6 +29,7 @@ vi.mock("./api", () => ({
     onFocus: async () => () => {},
     receiptSeen: async () => {},
     checkConnection: (...args: [number, number, string, (view: CheckView) => void]) => checkConnection(...args),
+    removeCheckout: (...args: [number, number]) => removeCheckout(...args),
   },
 }));
 
@@ -71,6 +73,7 @@ beforeEach(() => {
   reviewTrust.mockReset().mockReturnValue(new Promise(() => {}));
   liveRuns.mockReset().mockResolvedValue({ runs: [], closedPreviews: [] });
   checkConnection.mockReset().mockResolvedValue(fixtures.connectionChecks.pass);
+  removeCheckout.mockReset().mockResolvedValue(undefined);
 });
 
 async function settle() {
@@ -310,6 +313,43 @@ test("Close leaves the check dialog without running anything", async () => {
   fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }));
   expect(screen.queryByRole("dialog")).toBeNull();
   expect(checkConnection).not.toHaveBeenCalled();
+});
+
+test("Remove from sidebar is not offered for a checkout with anything recorded", async () => {
+  await openCheckout(/^api/);
+  fireEvent.click(within(main()).getByRole("button", { name: "api actions" }));
+  expect(screen.getByRole("menuitem", { name: "Open folder in Finder" })).toBeInTheDocument();
+  expect(screen.queryByRole("menuitem", { name: "Remove from sidebar" })).toBeNull();
+});
+
+test("Remove from sidebar drops a checkout with nothing recorded and returns to All projects", async () => {
+  if (fixtures.addedMap.kind !== "loaded") throw new Error("fixture");
+  loadMap.mockResolvedValueOnce(fixtures.removableMap).mockResolvedValue({ ...fixtures.addedMap, generation: 2 });
+  await openCheckout(/^shop/);
+  fireEvent.click(within(main()).getByRole("button", { name: "shop actions" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Remove from sidebar" }));
+  await settle();
+  expect(removeCheckout).toHaveBeenCalledWith(1, 0);
+  expect(loadMap).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("heading", { level: 1, name: "All projects" })).toHaveFocus();
+  const projects = screen.getByRole("region", { name: "Projects" });
+  expect(within(projects).queryByRole("button", { name: /^shop/ })).toBeNull();
+});
+
+test("a refused removal says why and keeps the checkout", async () => {
+  loadMap.mockResolvedValue(fixtures.removableMap);
+  removeCheckout.mockRejectedValue({
+    code: "local",
+    message: "This Mac has receipts or approvals for this checkout, so it stays in the sidebar.",
+  });
+  await openCheckout(/^shop/);
+  fireEvent.click(within(main()).getByRole("button", { name: "shop actions" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Remove from sidebar" }));
+  await settle();
+  expect(within(main()).getByRole("status")).toHaveTextContent(
+    "This Mac has receipts or approvals for this checkout, so it stays in the sidebar.",
+  );
+  expect(screen.getByRole("heading", { level: 1, name: "shop" })).toBeInTheDocument();
 });
 
 test("All projects goes back to the map with its heading focused", async () => {

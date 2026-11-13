@@ -43,6 +43,7 @@ export const map: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -126,6 +127,7 @@ export const map: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -191,6 +193,7 @@ export const map: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -253,6 +256,7 @@ export const map: LoadResult = {
         "pathMissing": true,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "absent"
@@ -293,6 +297,7 @@ export const map: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -403,6 +408,7 @@ export const wideMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -583,6 +589,7 @@ export const approvalMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": true,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -644,6 +651,7 @@ export const approvalMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -720,6 +728,7 @@ export const addedMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": true,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -761,6 +770,75 @@ export const addedMap: LoadResult = {
             "flags": [],
             "target": "staging1:/var/www/crm",
             "approved": true,
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": null,
+            "staleReceipt": null,
+            "lastAttempt": null
+          }
+        ]
+      }
+    ],
+    "problems": []
+  }
+};
+
+export const removableMap: LoadResult = {
+  "kind": "loaded",
+  "generation": 1,
+  "map": {
+    "screen": "map",
+    "envs": [
+      "production",
+      "staging"
+    ],
+    "rows": [
+      {
+        "label": "shop",
+        "repoRoot": "/Users/you/code/shop",
+        "pathMissing": false,
+        "needsApproval": true,
+        "setupNotFinished": false,
+        "removable": true,
+        "cells": [
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "noCode",
+            "sha": null,
+            "shortSha": null,
+            "atMs": null,
+            "age": null,
+            "qualifiers": [],
+            "words": "no deploy receipt on this Mac",
+            "evidence": [],
+            "outcome": null,
+            "stepsRun": null,
+            "flags": [],
+            "target": null,
+            "approved": false,
+            "targetMoved": null,
+            "needsAttention": false,
+            "receipt": null,
+            "staleReceipt": null,
+            "lastAttempt": null
+          },
+          {
+            "kind": "present",
+            "terminalRun": null,
+            "mark": "noCode",
+            "sha": null,
+            "shortSha": null,
+            "atMs": null,
+            "age": null,
+            "qualifiers": [],
+            "words": "no deploy receipt on this Mac",
+            "evidence": [],
+            "outcome": null,
+            "stepsRun": null,
+            "flags": [],
+            "target": null,
+            "approved": false,
             "targetMoved": null,
             "needsAttention": false,
             "receipt": null,
@@ -837,6 +915,7 @@ export const setupMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": true,
+        "removable": true,
         "cells": []
       }
     ],
@@ -1276,6 +1355,7 @@ export const terminalMap: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -2838,6 +2918,7 @@ export const watchResults: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -2880,6 +2961,7 @@ export const watchResults: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -2922,6 +3004,7 @@ export const watchResults: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -2964,6 +3047,7 @@ export const watchResults: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",
@@ -3006,6 +3090,7 @@ export const watchResults: LoadResult = {
         "pathMissing": false,
         "needsApproval": false,
         "setupNotFinished": false,
+        "removable": false,
         "cells": [
           {
             "kind": "present",

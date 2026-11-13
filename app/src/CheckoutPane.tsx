@@ -139,6 +139,8 @@ interface Props {
    * its entry is known, or the heading when Deploy is off. */
   focusDeploy: string | null;
   onDeployFocused: () => void;
+  /** The checkout left the projects list. */
+  onRemoved: () => void;
   /** More toolbar buttons, e.g. the receipt drawer's. */
   tools?: ReactNode;
 }
@@ -158,6 +160,7 @@ export function CheckoutPane({
   heading,
   focusDeploy,
   onDeployFocused,
+  onRemoved,
   tools,
 }: Props) {
   const row = map.rows[rowIndex];
@@ -213,6 +216,14 @@ export function CheckoutPane({
               label: "Open .shipslip.toml",
               onSelect: () => run(() => deploy.openConfig(generation, rowIndex, env)),
             })),
+            ...(row.removable
+              ? [
+                  {
+                    label: "Remove from sidebar",
+                    onSelect: () => run(() => api.removeCheckout(generation, rowIndex).then(onRemoved)),
+                  },
+                ]
+              : []),
           ]}
         >
           <span aria-hidden>⋯</span>

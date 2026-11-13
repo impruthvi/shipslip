@@ -41,6 +41,10 @@ export interface Backend {
   addCheckout(): Promise<string>;
   /** Picks a "Setup not finished" map row's folder again for the sheet. */
   reopenSetup(generation: number, row: number): Promise<FolderView>;
+  /** Drops a map row's checkout from the projects list when this Mac
+   * recorded nothing for it; its folder is untouched. Rejects with a
+   * `CommandError`. */
+  removeCheckout(generation: number, row: number): Promise<void>;
   /** The config the answers would write for the picked folder. Rust keeps
    * it for `addWithConfig`. */
   renderConfig(answers: Answers): Promise<ConfigText>;
@@ -81,6 +85,7 @@ const tauri: Backend = {
   pickFolder: () => invoke<FolderView>("pick_folder"),
   addCheckout: () => invoke<string>("add_checkout"),
   reopenSetup: (generation, row) => invoke<FolderView>("reopen_setup", { generation, row }),
+  removeCheckout: (generation, row) => invoke<void>("remove_checkout", { generation, row }),
   renderConfig: (answers) => invoke<ConfigText>("render_config", { answers }),
   addWithConfig: () => invoke<ConfigAdded>("add_with_config"),
   sshAliases: () => invoke<SshAliases>("ssh_aliases"),
@@ -124,6 +129,7 @@ export const api: Backend = {
   pickFolder: async () => (await getBackend()).pickFolder(),
   addCheckout: async () => (await getBackend()).addCheckout(),
   reopenSetup: async (...args) => (await getBackend()).reopenSetup(...args),
+  removeCheckout: async (...args) => (await getBackend()).removeCheckout(...args),
   renderConfig: async (answers) => (await getBackend()).renderConfig(answers),
   addWithConfig: async () => (await getBackend()).addWithConfig(),
   sshAliases: async () => (await getBackend()).sshAliases(),

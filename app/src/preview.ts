@@ -48,6 +48,7 @@ export const backend: Backend = {
   pickFolder: () => later(fixtures.folders[params.get("folder") ?? "config"] ?? fixtures.folders.config),
   addCheckout: () => later("/Users/you/code/crm"),
   reopenSetup: () => later(fixtures.folders.newConfig),
+  removeCheckout: async () => {},
   renderConfig: (answers) =>
     later(answers.env.trim() === "" ? fixtures.configTexts.invalid : fixtures.configTexts.rendered),
   addWithConfig: () => later({ checkout: "/Users/you/code/api", approvalError: null }),

@@ -8,6 +8,7 @@ fn main() {
             "pick_folder",
             "add_checkout",
             "reopen_setup",
+            "remove_checkout",
             "render_config",
             "add_with_config",
             "ssh_aliases",

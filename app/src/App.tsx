@@ -379,6 +379,10 @@ export default function App() {
                 : null
             }
             onDeployFocused={() => setFocusEntry(null)}
+            onRemoved={() => {
+              refresh();
+              go({ kind: "all" });
+            }}
             tools={drawerButton}
           />
         ) : (
