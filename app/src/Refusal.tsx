@@ -1,5 +1,5 @@
 import { CommandBox } from "./CommandBox";
-import { withCode } from "./text";
+import { HOST_KEY_UNVERIFIED, withCode } from "./text";
 import type { CommandError } from "./types";
 
 interface Wording {
@@ -21,6 +21,8 @@ export function refusalWording(error: CommandError): Wording {
         title: "This server's identity changed",
         body: "Verify with your hosting provider before connecting. Shipslip will not continue.",
       };
+    case "hostKeyUnverified":
+      return HOST_KEY_UNVERIFIED;
     case "keyNotLoaded":
       return { title: "Your ssh key isn't loaded", body: "Add it to the ssh agent, then try again." };
     case "other":
@@ -72,8 +74,9 @@ export function Refusal({
   action?: { label: string; run: () => void };
 }) {
   const { title, body } = refusalWording(error);
-  // A changed host key never gets a command to run.
-  const step = error.connectionKind === "hostKeyChanged" ? undefined : error.nextStep;
+  // A host key refused for any reason but "unknown" never gets a command to run.
+  const hardStop = error.connectionKind === "hostKeyChanged" || error.connectionKind === "hostKeyUnverified";
+  const step = hardStop ? undefined : error.nextStep;
   return (
     <div className="workspace-body">
       <h2 className="refusal-title">{title}</h2>

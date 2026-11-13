@@ -1003,46 +1003,46 @@ export const connectionChecks: Record<string, CheckView> = {
         "label": "Alias api-staging resolves",
         "state": "pass",
         "reason": "api-staging → 203.0.113.7 as forge (read with ssh -G)",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "ssh connects",
         "state": "fail",
         "reason": "Host key changed",
-        "hardStop": true,
+        "hardStop": "changed",
         "command": null
       },
       {
         "label": "Remote path is a git checkout",
         "state": "notRun",
         "reason": "Not run",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "On branch main",
         "state": "notRun",
         "reason": "Not run",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "php artisan --version runs",
         "state": "notRun",
         "reason": "Not run",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "Laravel log readable",
         "state": "notRun",
         "reason": "Not run",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       }
     ],
-    "hostKeyChanged": true,
+    "hostKeyStop": "changed",
     "finished": true
   },
   "pass": {
@@ -1052,46 +1052,46 @@ export const connectionChecks: Record<string, CheckView> = {
         "label": "Alias api-staging resolves",
         "state": "pass",
         "reason": "api-staging → 203.0.113.7 as forge (read with ssh -G)",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "ssh connects",
         "state": "pass",
         "reason": "Connected with the host key this Mac knows",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "Remote path is a git checkout",
         "state": "pass",
         "reason": "/var/www/api",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "On branch main",
         "state": "pass",
         "reason": "main is checked out",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "php artisan --version runs",
         "state": "pass",
         "reason": "Laravel Framework 11.9.2",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "Laravel log readable",
         "state": "pass",
         "reason": "Reads storage/logs/laravel.log",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       }
     ],
-    "hostKeyChanged": false,
+    "hostKeyStop": null,
     "finished": true
   },
   "running": {
@@ -1101,46 +1101,46 @@ export const connectionChecks: Record<string, CheckView> = {
         "label": "Alias api-staging resolves",
         "state": "pass",
         "reason": "api-staging → 203.0.113.7 as forge (read with ssh -G)",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "ssh connects",
         "state": "pass",
         "reason": "Connected with the host key this Mac knows",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "Remote path is a git checkout",
         "state": "running",
         "reason": "Checking…",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "On branch main",
         "state": "waiting",
         "reason": "",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "php artisan --version runs",
         "state": "waiting",
         "reason": "",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "Laravel log readable",
         "state": "waiting",
         "reason": "",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       }
     ],
-    "hostKeyChanged": false,
+    "hostKeyStop": null,
     "finished": false
   },
   "unknownKey": {
@@ -1150,46 +1150,95 @@ export const connectionChecks: Record<string, CheckView> = {
         "label": "Alias api-staging resolves",
         "state": "pass",
         "reason": "api-staging → 203.0.113.7 as forge (read with ssh -G)",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "ssh connects",
         "state": "fail",
         "reason": "This Mac has not seen the host key for api-staging. Run the command in Terminal, compare the fingerprint, answer yes, then check again.",
-        "hardStop": false,
+        "hardStop": null,
         "command": "ssh api-staging true"
       },
       {
         "label": "Remote path is a git checkout",
         "state": "notRun",
         "reason": "Not run",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "On branch main",
         "state": "notRun",
         "reason": "Not run",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "php artisan --version runs",
         "state": "notRun",
         "reason": "Not run",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "Laravel log readable",
         "state": "notRun",
         "reason": "Not run",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       }
     ],
-    "hostKeyChanged": false,
+    "hostKeyStop": null,
+    "finished": true
+  },
+  "unverifiedKey": {
+    "alias": "api-staging",
+    "lines": [
+      {
+        "label": "Alias api-staging resolves",
+        "state": "pass",
+        "reason": "api-staging → 203.0.113.7 as forge (read with ssh -G)",
+        "hardStop": null,
+        "command": null
+      },
+      {
+        "label": "ssh connects",
+        "state": "fail",
+        "reason": "Can't verify the host key",
+        "hardStop": "unverified",
+        "command": null
+      },
+      {
+        "label": "Remote path is a git checkout",
+        "state": "notRun",
+        "reason": "Not run",
+        "hardStop": null,
+        "command": null
+      },
+      {
+        "label": "On branch main",
+        "state": "notRun",
+        "reason": "Not run",
+        "hardStop": null,
+        "command": null
+      },
+      {
+        "label": "php artisan --version runs",
+        "state": "notRun",
+        "reason": "Not run",
+        "hardStop": null,
+        "command": null
+      },
+      {
+        "label": "Laravel log readable",
+        "state": "notRun",
+        "reason": "Not run",
+        "hardStop": null,
+        "command": null
+      }
+    ],
+    "hostKeyStop": "unverified",
     "finished": true
   },
   "waiting": {
@@ -1199,46 +1248,46 @@ export const connectionChecks: Record<string, CheckView> = {
         "label": "Alias api-staging resolves",
         "state": "waiting",
         "reason": "",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "ssh connects",
         "state": "waiting",
         "reason": "",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "Remote path is a git checkout",
         "state": "waiting",
         "reason": "",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "On branch main",
         "state": "waiting",
         "reason": "",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "php artisan --version runs",
         "state": "waiting",
         "reason": "",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "Laravel log readable",
         "state": "waiting",
         "reason": "",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       }
     ],
-    "hostKeyChanged": false,
+    "hostKeyStop": null,
     "finished": false
   },
   "wrongBranch": {
@@ -1248,46 +1297,46 @@ export const connectionChecks: Record<string, CheckView> = {
         "label": "Alias api-staging resolves",
         "state": "pass",
         "reason": "api-staging → 203.0.113.7 as forge (read with ssh -G)",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "ssh connects",
         "state": "pass",
         "reason": "Connected with the host key this Mac knows",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "Remote path is a git checkout",
         "state": "pass",
         "reason": "/var/www/api",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "On branch main",
         "state": "fail",
         "reason": "feature/search is checked out, not main",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "php artisan --version runs",
         "state": "pass",
         "reason": "Laravel Framework 11.9.2",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       },
       {
         "label": "Laravel log readable",
         "state": "pass",
         "reason": "Reads storage/logs/laravel.log",
-        "hardStop": false,
+        "hardStop": null,
         "command": null
       }
     ],
-    "hostKeyChanged": false,
+    "hostKeyStop": null,
     "finished": true
   }
 };

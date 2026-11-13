@@ -925,6 +925,24 @@ test("an unknown host key puts ssh <alias> true with Copy under its line, in amb
   expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeEnabled();
 });
 
+test("a host key ssh refused without saying why is a boxed stop that never says changed, and Continue stays off", async () => {
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.unverifiedKey);
+  await toCheck();
+  await runCheck();
+  const stop = within(sheet()).getByRole("alert");
+  expect(
+    within(stop).getByRole("heading", { name: "Shipslip can't verify this server's host key" }),
+  ).toBeInTheDocument();
+  expect(stop).toHaveTextContent(
+    "ssh refused the host key and did not say why, often because LogLevel in ~/.ssh/config is QUIET or FATAL. Find out why before going on.",
+  );
+  expect(stop).not.toHaveTextContent(/changed/i);
+  expect(reason("ssh connects")).toHaveTextContent("Can't verify the host key");
+  expect(within(sheet()).queryByRole("button", { name: /^Copy/ })).toBeNull();
+  expect(within(checkList()).queryByText(/^ssh api-staging true$/)).toBeNull();
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeDisabled();
+});
+
 test("a changed host key is a boxed stop above the list with no command, and Continue stays off", async () => {
   checkConnection.mockResolvedValue(fixtures.connectionChecks.changedKey);
   await toCheck();

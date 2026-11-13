@@ -374,6 +374,7 @@ pub fn find_log_group<'a>(groups: &'a Groups, id: &str) -> Result<&'a logs::Grou
 pub enum SshRefusal {
     HostKeyUnknown,
     HostKeyChanged,
+    HostKeyUnverified,
     KeyNotLoaded,
     Other,
 }
@@ -403,6 +404,7 @@ impl From<TransportError> for LogsQueryError {
                 reason: match ConnectFailure::of(&message) {
                     ConnectFailure::HostKeyUnknown => SshRefusal::HostKeyUnknown,
                     ConnectFailure::HostKeyChanged => SshRefusal::HostKeyChanged,
+                    ConnectFailure::HostKeyUnverified => SshRefusal::HostKeyUnverified,
                     ConnectFailure::KeyNotLoaded => SshRefusal::KeyNotLoaded,
                     ConnectFailure::Other => SshRefusal::Other,
                 },

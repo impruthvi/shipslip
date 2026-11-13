@@ -1959,6 +1959,7 @@ fn connection(error: TransportError, alias: &str) -> CommandError {
     let kind = match failure {
         ConnectFailure::HostKeyUnknown => "hostKeyUnknown",
         ConnectFailure::HostKeyChanged => "hostKeyChanged",
+        ConnectFailure::HostKeyUnverified => "hostKeyUnverified",
         ConnectFailure::KeyNotLoaded => "keyNotLoaded",
         ConnectFailure::Other => "other",
     };

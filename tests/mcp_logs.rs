@@ -736,7 +736,7 @@ async fn ssh_refusals_are_tool_errors_with_a_reason() {
         assert_eq!(response[0]["result"]["isError"], true);
         assert_eq!(
             body(&response[0])["error"],
-            json!({"kind":"ssh_refused","reason":"host_key_unknown","message":message})
+            json!({"kind":"ssh_refused","reason":"host_key_unverified","message":message})
         );
     }
     assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);

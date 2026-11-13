@@ -30,10 +30,13 @@ impl TransportError {
 /// Why OpenSSH refused a connection. Unrecognized diagnostics stay [`Self::Other`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectFailure {
-    /// No trusted host key was found. Compare the fingerprint in Terminal.
+    /// ssh said no host key is known. Compare the fingerprint in Terminal.
     HostKeyUnknown,
     /// The trusted host key changed. Never offer a command to trust its replacement.
     HostKeyChanged,
+    /// ssh refused the host key without saying no key is known (revoked, or a
+    /// quiet `LogLevel`). A hard stop like [`Self::HostKeyChanged`].
+    HostKeyUnverified,
     /// None of the offered keys was accepted, possibly because the key is not loaded.
     KeyNotLoaded,
     /// No specific refusal was recognized; show the original diagnostic.
@@ -41,13 +44,19 @@ pub enum ConnectFailure {
 }
 
 impl ConnectFailure {
-    /// Classifies diagnostic text; the changed-key banner takes precedence
-    /// because it also includes the generic host-key verification failure.
+    /// Classifies diagnostic text. Only ssh's explicit "no host key is known"
+    /// becomes [`Self::HostKeyUnknown`]; any other host-key refusal fails closed.
     pub fn of(message: &str) -> Self {
         if message.contains("REMOTE HOST IDENTIFICATION HAS CHANGED") {
             Self::HostKeyChanged
-        } else if message.contains("Host key verification failed") {
+        } else if message.contains("REVOKED HOST KEY") {
+            Self::HostKeyUnverified
+        } else if message.contains("host key is known for")
+            && message.contains("requested strict checking")
+        {
             Self::HostKeyUnknown
+        } else if message.contains("Host key verification failed") {
+            Self::HostKeyUnverified
         } else if message.contains("Permission denied (publickey") {
             Self::KeyNotLoaded
         } else {
@@ -106,11 +115,33 @@ mod tests {
     fn connection_refusals_preserve_the_original_diagnostic() {
         for (message, expected) in [
             (
-                "Host key verification failed.",
+                "No ED25519 host key is known for [127.0.0.1]:2222 and you have \
+                 requested strict checking.\nHost key verification failed.",
                 ConnectFailure::HostKeyUnknown,
             ),
             (
+                "Host key verification failed.",
+                ConnectFailure::HostKeyUnverified,
+            ),
+            (
+                "Host key verification failed.\nPermission denied (publickey).",
+                ConnectFailure::HostKeyUnverified,
+            ),
+            (
+                "No ED25519 host key is known for server.",
+                ConnectFailure::Other,
+            ),
+            (
                 "REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed.",
+                ConnectFailure::HostKeyChanged,
+            ),
+            (
+                "@@@ WARNING: REVOKED HOST KEY DETECTED! @@@\nThe ED25519 host key for \
+                 server is marked as revoked.\nHost key verification failed.",
+                ConnectFailure::HostKeyUnverified,
+            ),
+            (
+                "WARNING: REVOKED HOST KEY DETECTED!\nREMOTE HOST IDENTIFICATION HAS CHANGED!",
                 ConnectFailure::HostKeyChanged,
             ),
             (

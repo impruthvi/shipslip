@@ -632,13 +632,15 @@ pub fn guidance(next: &NextSteps, repo_root: &str) -> Guidance {
 
 /// The command a refusal screen offers for an ssh connect failure, built from
 /// the refusal kind and the configured alias, never from ssh's message. A
-/// changed host key never gets one. An alias ssh could read as an option or
+/// host key refused for any reason but "unknown" never gets one. An alias ssh could read as an option or
 /// a shell could split is shown as text with nothing to copy.
 pub fn refusal_command(kind: ConnectFailure, alias: &str) -> Option<Span> {
     let command = match kind {
         ConnectFailure::HostKeyUnknown => format!("ssh {alias}"),
         ConnectFailure::KeyNotLoaded => "ssh-add --apple-use-keychain".into(),
-        ConnectFailure::HostKeyChanged | ConnectFailure::Other => return None,
+        ConnectFailure::HostKeyChanged
+        | ConnectFailure::HostKeyUnverified
+        | ConnectFailure::Other => return None,
     };
     if kind == ConnectFailure::HostKeyUnknown && (!is_plain_word(alias) || alias.starts_with('-')) {
         return Some(Span::Text {
@@ -1276,8 +1278,12 @@ mod span_tests {
     }
 
     #[test]
-    fn changed_host_key_and_other_failures_offer_nothing() {
-        for kind in [ConnectFailure::HostKeyChanged, ConnectFailure::Other] {
+    fn changed_or_unverified_host_keys_and_other_failures_offer_nothing() {
+        for kind in [
+            ConnectFailure::HostKeyChanged,
+            ConnectFailure::HostKeyUnverified,
+            ConnectFailure::Other,
+        ] {
             assert_eq!(refusal_command(kind, "shop-prod"), None);
         }
     }
