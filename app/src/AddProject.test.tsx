@@ -33,6 +33,7 @@ const copyText = vi.fn<(text: string) => Promise<void>>();
 const checkConnection =
   vi.fn<(generation: number, row: number, env: string, onLines: (view: CheckView) => void) => Promise<CheckView>>();
 const checkRendered = vi.fn<(onLines: (view: CheckView) => void) => Promise<CheckView>>();
+const removeCheckout = vi.fn<(generation: number, row: number) => Promise<void>>();
 vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
@@ -54,6 +55,7 @@ vi.mock("./api", () => ({
     openSshConfig: () => openSshConfig(),
     checkConnection: (...args: [number, number, string, (view: CheckView) => void]) => checkConnection(...args),
     checkRendered: (onLines: (view: CheckView) => void) => checkRendered(onLines),
+    removeCheckout: (...args: [number, number]) => removeCheckout(...args),
   },
 }));
 
@@ -84,6 +86,10 @@ const added: LoadResult = { ...fixtures.addedMap, generation: 2 };
 const crmRow = fixtures.addedMap.map.rows.findIndex((r) => r.repoRoot === crm);
 const api = "/Users/you/code/api";
 if (fixtures.setupMap.kind !== "loaded") throw new Error("fixture");
+if (fixtures.removableMap.kind !== "loaded") throw new Error("fixture");
+/** Maps read after a removal: only shop, or only api, is left. */
+const shopOnly: LoadResult = { ...fixtures.removableMap, generation: 2 };
+const apiOnly: LoadResult = { ...fixtures.setupMap, generation: 2 };
 /** The map read after the config is written: api is set up. */
 const apiAdded: LoadResult = {
   ...fixtures.setupMap,
@@ -115,6 +121,7 @@ beforeEach(() => {
   copyText.mockReset().mockResolvedValue(undefined);
   checkConnection.mockReset().mockResolvedValue(fixtures.connectionChecks.pass);
   checkRendered.mockReset().mockResolvedValue(fixtures.connectionChecks.pass);
+  removeCheckout.mockReset().mockResolvedValue(undefined);
 });
 
 async function settle() {
@@ -589,6 +596,119 @@ test("a reopened checkout that has a config now goes on to its connection check"
   await settle();
   expect(screen.getByRole("heading", { name: "Check the connection" })).toHaveFocus();
   expect(addCheckout).not.toHaveBeenCalled();
+});
+
+/** Clicks api's "Setup not finished" line; api has nothing recorded. */
+async function reopenSetupNotFinished() {
+  loadMap.mockResolvedValueOnce(fixtures.setupMap).mockResolvedValue(shopOnly);
+  render(<App />);
+  await settle();
+  fireEvent.click(within(screen.getByRole("region", { name: "Projects" })).getByRole("button", { name: /^api/ }));
+  await settle();
+}
+
+test("a reopened sheet for a checkout with nothing recorded removes it from the sidebar", async () => {
+  await reopenSetupNotFinished();
+  const remove = within(sheet()).getByRole("button", { name: "Remove from sidebar" });
+  expect(remove).not.toHaveClass("button-primary");
+  fireEvent.click(remove);
+  await settle();
+  expect(removeCheckout).toHaveBeenCalledWith(1, 0);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(loadMap).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("heading", { level: 1, name: "All projects" })).toHaveFocus();
+  const projects = screen.getByRole("region", { name: "Projects" });
+  expect(within(projects).queryByRole("button", { name: /^api/ })).toBeNull();
+});
+
+test("a reopened Needs approval sheet over its pane removes it and returns to All projects", async () => {
+  loadMap.mockResolvedValueOnce(fixtures.removableMap).mockResolvedValue(apiOnly);
+  reopenSetup.mockResolvedValue(fixtures.folders.config);
+  render(<App />);
+  await settle();
+  fireEvent.click(within(screen.getByRole("region", { name: "Projects" })).getByRole("button", { name: /^shop/ }));
+  await settle();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Remove from sidebar" }));
+  await settle();
+  expect(removeCheckout).toHaveBeenCalledWith(1, 0);
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByRole("heading", { level: 1, name: "All projects" })).toHaveFocus();
+  const projects = screen.getByRole("region", { name: "Projects" });
+  expect(within(projects).queryByRole("button", { name: /^shop/ })).toBeNull();
+});
+
+/** Reopens api's sheet and writes its config; approving fails, so the
+ * sheet stays open and reads `after` as the map. */
+async function writeFromReopened(after: LoadResult) {
+  addWithConfig.mockResolvedValue({ checkout: api, approvalError: "invalid trust store `trust.json`" });
+  loadMap.mockResolvedValue(fixtures.setupMap);
+  render(<App />);
+  await settle();
+  fireEvent.click(within(screen.getByRole("region", { name: "Projects" })).getByRole("button", { name: /^api/ }));
+  await settle();
+  fireEvent.change(within(sheet()).getByRole("textbox", { name: "Remote path" }), {
+    target: { value: "/var/www/api" },
+  });
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  fireEvent.click(within(sheet()).getByRole("radio", { name: /^staging1/ }));
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  fireEvent.click(within(sheet()).getByRole("checkbox", { name: /I read this/ }));
+  typeEnv("staging");
+  loadMap.mockResolvedValue(after);
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Approve and add" }));
+  await settle();
+  expect(within(sheet()).getByRole("alert")).toHaveTextContent("could not approve it");
+}
+
+test("Remove from a reopened sheet uses the map the sheet refreshed", async () => {
+  await writeFromReopened(apiAdded);
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Remove from sidebar" }));
+  await settle();
+  expect(removeCheckout).toHaveBeenCalledWith(2, 0);
+  expect(screen.queryByRole("dialog")).toBeNull();
+});
+
+test("Remove leaves a reopened sheet once the refreshed map has something recorded", async () => {
+  if (apiAdded.kind !== "loaded") throw new Error("fixture");
+  const recorded: LoadResult = {
+    ...apiAdded,
+    map: { ...apiAdded.map, rows: apiAdded.map.rows.map((row) => ({ ...row, removable: false })) },
+  };
+  await writeFromReopened(recorded);
+  expect(within(sheet()).queryByRole("button", { name: "Remove from sidebar" })).toBeNull();
+});
+
+test("a refused removal from the sheet says why and keeps the sheet open", async () => {
+  removeCheckout.mockRejectedValue({
+    code: "local",
+    message: "This Mac has receipts or approvals for this checkout, so it stays in the sidebar.",
+  });
+  await reopenSetupNotFinished();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Remove from sidebar" }));
+  await settle();
+  expect(within(sheet()).getByRole("alert")).toHaveTextContent(
+    "This Mac has receipts or approvals for this checkout, so it stays in the sidebar.",
+  );
+  expect(within(sheet()).getByRole("button", { name: "Remove from sidebar" })).toBeEnabled();
+  expect(loadMap).toHaveBeenCalledTimes(1);
+});
+
+test("a fresh Add project sheet offers no Remove from sidebar", async () => {
+  loadMap.mockResolvedValue(fixtures.setupMap);
+  render(<App />);
+  await settle();
+  fireEvent.click(screen.getByRole("button", { name: "Add project" }));
+  await settle();
+  expect(within(sheet()).queryByRole("button", { name: "Remove from sidebar" })).toBeNull();
+});
+
+test("a reopened checkout with something recorded offers no Remove from sidebar", async () => {
+  await reopenNeedsApproval();
+  expect(within(sheet()).queryByRole("button", { name: "Remove from sidebar" })).toBeNull();
 });
 
 /** Clicks crm's "Needs approval" line on the map read after it was added. */

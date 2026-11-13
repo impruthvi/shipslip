@@ -253,6 +253,7 @@ export function AddProject({
   onAdded,
   onClose,
   onDone,
+  onRemoved,
 }: {
   /** The map now shown; the approval reads the new checkout's row from it. */
   loaded: Loaded | null;
@@ -265,11 +266,14 @@ export function AddProject({
   onClose: () => void;
   /** Every environment approved: open the checkout. */
   onDone: (checkout: string) => void;
+  /** A reopened checkout with nothing recorded was removed from the sidebar. */
+  onRemoved: () => void;
 }) {
   const [step, setStep] = useState<Step>("folder");
   const [folder, setFolder] = useState<FolderView | null>(null);
   const [picking, setPicking] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [removing, setRemoving] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   const [checkout, setCheckout] = useState<string | null>(null);
   /** Environments still to approve, in config order; the first is shown. */
@@ -345,6 +349,8 @@ export function AddProject({
   // The sheet may open over a pane whose heading took focus, so a reopen that
   // stays on the folder step takes it back.
   const reopenRef = useRef(reopen);
+  // Found by folder on the map now shown, which the sheet itself may refresh.
+  const [reopened] = useState(() => (reopen ? (loaded?.map.rows[reopen.row]?.repoRoot ?? null) : null));
   useEffect(() => {
     const from = reopenRef.current;
     if (!from) return;
@@ -528,7 +534,7 @@ export function AddProject({
   const steps = stepsFor(folder);
   const done = (s: Step) => steps.indexOf(s) < steps.indexOf(step);
   const path = folder && folder.kind !== "cancelled" ? ("checkout" in folder ? folder.checkout : folder.folder) : null;
-  const busy = picking || adding || rendering || writing || (approval?.kind === "review" && approval.busy);
+  const busy = picking || adding || removing || rendering || writing || (approval?.kind === "review" && approval.busy);
   // Once the file is written, the answers can't change it.
   const locked = busy || unapproved !== null;
   const blockedByWarnings = config !== null && config.warnings.length > 0 && !warningsRead;
@@ -548,6 +554,22 @@ export function AddProject({
   }, [onClose]);
 
   const last = pending.length <= 1;
+
+  const reopenedRow = reopened && loaded ? loaded.map.rows.findIndex((r) => r.repoRoot === reopened) : -1;
+  const removable = loaded !== null && reopenedRow >= 0 && loaded.map.rows[reopenedRow].removable;
+  const remove = () => {
+    if (!removable) return;
+    setRemoving(true);
+    setAddError(null);
+    api
+      .removeCheckout(loaded.generation, reopenedRow)
+      .then(() => alive.current && onRemoved())
+      .catch((error: unknown) => {
+        if (!alive.current) return;
+        setRemoving(false);
+        setAddError(message(error));
+      });
+  };
 
   return (
     <div className="sheet-backdrop">
@@ -752,6 +774,11 @@ export function AddProject({
             <button type="button" className="button" onClick={onClose} disabled={busy}>
               Finish later
             </button>
+            {removable && (
+              <button type="button" className="link" onClick={remove} disabled={busy}>
+                Remove from sidebar
+              </button>
+            )}
             <span className="sheet-footer-end">
               {step === "folder" ? (
                 <button
