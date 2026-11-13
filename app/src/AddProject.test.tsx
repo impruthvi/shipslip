@@ -5,6 +5,7 @@ import * as fixtures from "./fixtures.gen";
 import type {
   AliasCheck,
   Answers,
+  CheckView,
   CheckoutReceipts,
   ConfigAdded,
   ConfigText,
@@ -29,6 +30,9 @@ const hostBlock = vi.fn<(draft: HostDraft) => Promise<HostBlock>>();
 const checkAlias = vi.fn<(draft: HostDraft) => Promise<AliasCheck>>();
 const openSshConfig = vi.fn<() => Promise<void>>();
 const copyText = vi.fn<(text: string) => Promise<void>>();
+const checkConnection =
+  vi.fn<(generation: number, row: number, env: string, onLines: (view: CheckView) => void) => Promise<CheckView>>();
+const checkRendered = vi.fn<(onLines: (view: CheckView) => void) => Promise<CheckView>>();
 vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
@@ -48,6 +52,8 @@ vi.mock("./api", () => ({
     hostBlock: (draft: HostDraft) => hostBlock(draft),
     checkAlias: (draft: HostDraft) => checkAlias(draft),
     openSshConfig: () => openSshConfig(),
+    checkConnection: (...args: [number, number, string, (view: CheckView) => void]) => checkConnection(...args),
+    checkRendered: (onLines: (view: CheckView) => void) => checkRendered(onLines),
   },
 }));
 
@@ -107,6 +113,8 @@ beforeEach(() => {
   checkAlias.mockReset().mockResolvedValue(fixtures.aliasChecks.differs);
   openSshConfig.mockReset().mockResolvedValue(undefined);
   copyText.mockReset().mockResolvedValue(undefined);
+  checkConnection.mockReset().mockResolvedValue(fixtures.connectionChecks.pass);
+  checkRendered.mockReset().mockResolvedValue(fixtures.connectionChecks.pass);
 });
 
 async function settle() {
@@ -127,8 +135,8 @@ async function chooseFolder() {
   await settle();
 }
 
-/** Picks the crm folder and continues; the map read after it lists crm. */
-async function toApproval() {
+/** Picks the crm folder and continues to the check; the map read after it lists crm. */
+async function toCheck() {
   await openSheet();
   await chooseFolder();
   loadMap.mockResolvedValue(added);
@@ -137,12 +145,19 @@ async function toApproval() {
   await settle();
 }
 
+/** Past the check without running it. */
+async function toApproval() {
+  await toCheck();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+}
+
 test("the sidebar's Add project opens the sheet on the folder step with its heading focused", async () => {
   await openSheet();
   expect(sheet()).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Choose the project's folder" })).toHaveFocus();
   const rail = within(sheet()).getByRole("navigation", { name: "Add project steps" });
-  expect(within(rail).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["1Folder", "2Approval"]);
+  expect(within(rail).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["1Folder", "2Connection check", "3Approval"]);
   expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeDisabled();
 });
 
@@ -316,9 +331,13 @@ test("a review that fails says why and Try again asks once more", async () => {
   expect(within(sheet()).getByRole("region", { name: "Settings" })).toBeInTheDocument();
 });
 
-test("until the map lists the added checkout, approval says it is waiting", async () => {
+test("until the map lists the added checkout, the check and approval say they are waiting", async () => {
   await openSheet();
   await chooseFolder();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(within(sheet()).getByRole("status")).toHaveTextContent("Waiting for the map to list this checkout…");
+  expect(within(sheet()).getByRole("button", { name: "Check connection" })).toBeDisabled();
   fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
   await settle();
   expect(within(sheet()).getByRole("status")).toHaveTextContent("Waiting for the map to list this checkout…");
@@ -366,9 +385,16 @@ async function toAlias() {
   await settle();
 }
 
-async function toConfig() {
+/** Picks staging1 and continues to the connection check. */
+async function toNewCheck() {
   await toAlias();
   fireEvent.click(within(sheet()).getByRole("radio", { name: /^staging1/ }));
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+}
+
+async function toConfig() {
+  await toNewCheck();
   fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
   await settle();
 }
@@ -381,7 +407,7 @@ const typeEnv = (env: string) =>
 test("a checkout without a config is added and asks the seven slip init questions", async () => {
   await toQuestions();
   expect(addCheckout).toHaveBeenCalledTimes(1);
-  expect(railSteps()).toEqual(["Folder", "2Environment", "3SSH alias", "4Approval"]);
+  expect(railSteps()).toEqual(["Folder", "2Environment", "3SSH alias", "4Connection check", "5Approval"]);
   expect(screen.getByRole("heading", { name: "Describe one environment" })).toHaveFocus();
   const field = (name: string) => within(sheet()).getByRole("textbox", { name });
   expect(field("Environment name")).toHaveValue("staging");
@@ -603,7 +629,7 @@ test("the ssh alias step lists the config's aliases and Continue waits for a pic
   fireEvent.click(continueButton());
   await settle();
   expect(renderConfig).toHaveBeenCalledWith(expect.objectContaining({ sshAlias: "staging1", path: "/var/www/api" }));
-  expect(screen.getByRole("heading", { name: "Approve staging" })).toHaveFocus();
+  expect(screen.getByRole("heading", { name: "Check the connection" })).toHaveFocus();
 });
 
 test("an alias ssh -G could not resolve still lists, and an unreadable config says why", async () => {
@@ -711,7 +737,7 @@ test("Check again that matches enables Continue with the new alias", async () =>
   fireEvent.click(continueButton());
   await settle();
   expect(renderConfig).toHaveBeenCalledWith(expect.objectContaining({ sshAlias: "api" }));
-  expect(screen.getByRole("heading", { name: "Approve staging" })).toHaveFocus();
+  expect(screen.getByRole("heading", { name: "Check the connection" })).toHaveFocus();
 });
 
 test("Check again that ssh can't run says what ssh printed", async () => {
@@ -809,4 +835,177 @@ test("a Host block the app could not build leaves Copy and Check again off", asy
   expect(within(sheet()).queryByLabelText("Host block")).toBeNull();
   expect(within(sheet()).getByRole("button", { name: "Copy" })).toBeDisabled();
   expect(within(sheet()).getByRole("button", { name: "Check again" })).toBeDisabled();
+});
+
+// The connection check step.
+
+const checkList = () => within(sheet()).getByRole("list", { name: "Connection check" });
+const checkLine = (label: string) => {
+  const line = within(checkList())
+    .getAllByRole("listitem")
+    .find((li) => li.querySelector(".check-label")?.textContent === label);
+  if (!line) throw new Error(`no line ${label}`);
+  return line;
+};
+const reason = (label: string) => checkLine(label).querySelector(".check-reason");
+
+async function runCheck() {
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Check connection" }));
+  await settle();
+}
+
+test("an existing config's check is read only, runs only when asked, and every line passes", async () => {
+  await toCheck();
+  expect(screen.getByRole("heading", { name: "Check the connection" })).toHaveFocus();
+  expect(within(sheet()).getByText(/nothing on the server changes\.$/)).toHaveTextContent(
+    "Read only. Connects as production1 and looks; nothing on the server changes.",
+  );
+  expect(checkConnection).not.toHaveBeenCalled();
+  expect(within(sheet()).queryByRole("list", { name: "Connection check" })).toBeNull();
+
+  await runCheck();
+  expect(checkConnection).toHaveBeenCalledWith(2, crmRow, "production", expect.any(Function));
+  const lines = within(checkList()).getAllByRole("listitem");
+  expect(lines.map((li) => li.querySelector(".check-label")?.textContent)).toEqual([
+    "Alias api-staging resolves",
+    "ssh connects",
+    "Remote path is a git checkout",
+    "On branch main",
+    "php artisan --version runs",
+    "Laravel log readable",
+  ]);
+  for (const li of lines) {
+    expect(within(li).getByRole("img", { name: "passed" })).toBeInTheDocument();
+    expect(li.querySelector(".check-reason")).not.toHaveClass("tone-attention");
+  }
+  expect(reason("php artisan --version runs")).toHaveTextContent("Laravel Framework 11.9.2");
+  expect(within(sheet()).getByRole("status")).toHaveTextContent("Connection check passed.");
+  expect(within(sheet()).getByRole("button", { name: "Check again" })).toBeEnabled();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(screen.getByRole("heading", { name: "Approve production" })).toHaveFocus();
+});
+
+test("the check shows each line as it moves and waits to be asked again", async () => {
+  let finish: (view: CheckView) => void = () => {};
+  checkConnection.mockImplementation((_generation, _row, _env, onLines) => {
+    onLines(fixtures.connectionChecks.running);
+    return new Promise((resolve) => (finish = resolve));
+  });
+  await toCheck();
+  await runCheck();
+  expect(within(sheet()).getByRole("button", { name: "Checking…" })).toBeDisabled();
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeDisabled();
+  expect(within(checkLine("Remote path is a git checkout")).getByRole("img", { name: "running" })).toBeInTheDocument();
+  expect(within(checkLine("On branch main")).getByRole("img", { name: "waiting" })).toBeInTheDocument();
+  await act(async () => finish(fixtures.connectionChecks.pass));
+  expect(within(sheet()).getByRole("button", { name: "Check again" })).toBeEnabled();
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeEnabled();
+});
+
+test("an unknown host key puts ssh <alias> true with Copy under its line, in amber", async () => {
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.unknownKey);
+  await toCheck();
+  await runCheck();
+  const line = checkLine("ssh connects");
+  expect(within(line).getByRole("img", { name: "did not pass" })).toBeInTheDocument();
+  expect(line.querySelector(".check-reason")).toHaveClass("tone-attention");
+  expect(line.querySelector(".check-reason")).toHaveTextContent(
+    "This Mac has not seen the host key for api-staging. Run the command in Terminal, compare the fingerprint, answer yes, then check again.",
+  );
+  expect(within(line).getByText("ssh api-staging true")).toBeInTheDocument();
+  fireEvent.click(within(line).getByRole("button", { name: "Copy ssh api-staging true" }));
+  await settle();
+  expect(copyText).toHaveBeenCalledWith("ssh api-staging true");
+  for (const label of ["Remote path is a git checkout", "On branch main", "php artisan --version runs", "Laravel log readable"]) {
+    expect(reason(label)).toHaveTextContent("Not run");
+    expect(within(checkLine(label)).getByRole("img", { name: "not run" })).toBeInTheDocument();
+  }
+  expect(within(sheet()).queryByRole("alert")).toBeNull();
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeEnabled();
+});
+
+test("a changed host key is a boxed stop above the list with no command, and Continue stays off", async () => {
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.changedKey);
+  await toCheck();
+  await runCheck();
+  const stop = within(sheet()).getByRole("alert");
+  expect(within(stop).getByRole("heading", { name: "Host key changed. Shipslip stops here." })).toBeInTheDocument();
+  expect(stop).toHaveTextContent(
+    "The host key for api-staging is not the one ~/.ssh/known_hosts records. Find out why the key changed before going on.",
+  );
+  expect(stop.compareDocumentPosition(checkList()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(reason("ssh connects")).toHaveTextContent("Host key changed");
+  expect(within(sheet()).queryByRole("button", { name: /^Copy/ })).toBeNull();
+  expect(within(checkList()).queryByText(/^ssh api-staging true$/)).toBeNull();
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeDisabled();
+  expect(within(sheet()).getByRole("button", { name: "Check again" })).toBeEnabled();
+
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.pass);
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Check again" }));
+  await settle();
+  expect(within(sheet()).queryByRole("alert")).toBeNull();
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeEnabled();
+});
+
+test("a wrong branch is amber, never red, and lets the person go on to approval", async () => {
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.wrongBranch);
+  await toCheck();
+  await runCheck();
+  const branch = reason("On branch main");
+  expect(branch).toHaveTextContent("feature/search is checked out, not main");
+  expect(branch).toHaveClass("tone-attention");
+  expect(sheet().querySelector(".tone-bad, .mark-bad")).toBeNull();
+  expect(within(sheet()).getByRole("status")).toHaveTextContent("Connection check done: 1 did not pass.");
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(screen.getByRole("heading", { name: "Approve production" })).toHaveFocus();
+});
+
+test("a check the app could not start says why and offers Check again", async () => {
+  checkConnection.mockRejectedValue({ code: "local", message: "production is no longer in .shipslip.toml." });
+  await toCheck();
+  await runCheck();
+  expect(within(sheet()).getByRole("alert")).toHaveTextContent("production is no longer in .shipslip.toml.");
+  expect(within(sheet()).getByRole("button", { name: "Check again" })).toBeEnabled();
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeEnabled();
+});
+
+test("an existing config with two environments checks the one picked, and a new pick forgets the result", async () => {
+  await toCheck();
+  const picker = within(sheet()).getByRole("combobox", { name: "Environment" });
+  expect(picker).toHaveValue("production");
+  await runCheck();
+  expect(within(sheet()).getByRole("list", { name: "Connection check" })).toBeInTheDocument();
+  fireEvent.change(picker, { target: { value: "staging" } });
+  expect(within(sheet()).queryByRole("list", { name: "Connection check" })).toBeNull();
+  expect(within(sheet()).getByText(/nothing on the server changes\.$/)).toHaveTextContent("Connects as staging1");
+  await runCheck();
+  expect(checkConnection).toHaveBeenLastCalledWith(2, crmRow, "staging", expect.any(Function));
+});
+
+test("a new config's check runs on the answers just given, before anything is written", async () => {
+  await toNewCheck();
+  expect(railSteps()).toEqual(["Folder", "Environment", "SSH alias", "4Connection check", "5Approval"]);
+  expect(within(sheet()).queryByRole("combobox", { name: "Environment" })).toBeNull();
+  expect(within(sheet()).getByText(/nothing on the server changes\.$/)).toHaveTextContent("Connects as staging1");
+  await runCheck();
+  expect(checkRendered).toHaveBeenCalledTimes(1);
+  expect(checkConnection).not.toHaveBeenCalled();
+  expect(addWithConfig).not.toHaveBeenCalled();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(screen.getByRole("heading", { name: "Approve staging" })).toHaveFocus();
+});
+
+test("changing the answers after a check forgets its result", async () => {
+  await toNewCheck();
+  await runCheck();
+  expect(within(sheet()).getByRole("list", { name: "Connection check" })).toBeInTheDocument();
+  fireEvent.click(within(sheet()).getByRole("button", { name: /SSH alias/ }));
+  await settle();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(within(sheet()).queryByRole("list", { name: "Connection check" })).toBeNull();
+  expect(within(sheet()).getByRole("button", { name: "Check connection" })).toBeEnabled();
 });

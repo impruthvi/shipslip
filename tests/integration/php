@@ -20,5 +20,6 @@ case "$2" in
     rm -f storage/framework/down
     echo 'up'
     ;;
+  --version) echo 'Laravel Framework 11.0.0' ;;
   *) exit 2 ;;
 esac

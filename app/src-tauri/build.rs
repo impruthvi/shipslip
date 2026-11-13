@@ -14,6 +14,8 @@ fn main() {
             "ssh_host_block",
             "check_ssh_alias",
             "open_ssh_config",
+            "check_connection",
+            "check_rendered",
             "deploy_entry",
             "open_config",
             "prepare_deploy",

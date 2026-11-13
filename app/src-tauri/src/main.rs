@@ -9,6 +9,7 @@ use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 mod add_project;
 mod awake;
 mod commands;
+mod connection_check;
 mod deploy_session;
 mod finish;
 #[cfg(test)]
@@ -95,6 +96,8 @@ fn main() {
             commands::ssh_host_block,
             commands::check_ssh_alias,
             commands::open_ssh_config,
+            commands::check_connection,
+            commands::check_rendered,
             commands::deploy_entry,
             commands::open_config,
             commands::prepare_deploy,
@@ -217,6 +220,8 @@ mod tests {
                 "allow-approve-trust",
                 "allow-cancel-deploy",
                 "allow-cancel-pending",
+                "allow-check-connection",
+                "allow-check-rendered",
                 "allow-check-ssh-alias",
                 "allow-compare",
                 "allow-confirm-deploy",

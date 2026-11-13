@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode, type Ref, type RefObject } from "react";
 import { api } from "./api";
 import { Cell } from "./Cell";
+import { CheckConnectionDialog } from "./ConnectionCheck";
 import { deploy } from "./deployApi";
 import { Menu } from "./Menu";
 import { outcomeClass } from "./Slip";
@@ -185,6 +186,7 @@ export function CheckoutPane({
     focused.current();
   }, [focusDeploy, focusEntry, heading]);
   const [menuError, setMenuError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
   const run = (action: () => Promise<void>) => {
     setMenuError(null);
     action().catch((error: unknown) => setMenuError(message(error)));
@@ -204,6 +206,7 @@ export function CheckoutPane({
           label={`${row.label} actions`}
           end
           items={[
+            ...(columns.length > 0 ? [{ label: "Check connection", onSelect: () => setChecking(true) }] : []),
             { label: "Open folder in Finder", onSelect: () => run(() => deploy.openFolder(generation, rowIndex)) },
             // The config is the checkout's; any of its environments finds it.
             ...columns.slice(0, 1).map(({ env }) => ({
@@ -215,6 +218,16 @@ export function CheckoutPane({
           <span aria-hidden>⋯</span>
         </Menu>
       </header>
+      {checking && (
+        <CheckConnectionDialog
+          envs={columns.map((c) => c.env)}
+          start={(env) => (onLines) => api.checkConnection(generation, rowIndex, env, onLines)}
+          onClose={() => {
+            setChecking(false);
+            heading.current?.focus();
+          }}
+        />
+      )}
       {menuError && (
         <p className="checkout-menu-error muted" role="status">
           {menuError}

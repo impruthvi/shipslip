@@ -3,23 +3,26 @@ import { api } from "./api";
 import { deploy } from "./deployApi";
 import { StepIcon } from "./Mark";
 import { errorMessage } from "./text";
+import { ConnectionCheck, EnvPicker, useConnectionCheck } from "./ConnectionCheck";
 import { chosenAlias, freshChoice, SshAliasStep, type SshChoice } from "./SshAliasStep";
 import { TrustSettings } from "./TrustReview";
 import { TypedConfirm } from "./TypedConfirm";
 import type { AnswerField, Answers, FolderEnv, FolderView, Loaded, SshAliases, TrustReview } from "./types";
 
-/** The check step lands with its own ticket; until then an existing config
- * goes folder → approval, a new one folder → environment → ssh alias →
- * approval. */
-type Step = "folder" | "environment" | "ssh" | "approval";
+/** An existing config goes folder → check → approval; a new one folder →
+ * environment → ssh alias → check → approval. */
+type Step = "folder" | "environment" | "ssh" | "check" | "approval";
 const label: Record<Step, string> = {
   folder: "Folder",
   environment: "Environment",
   ssh: "SSH alias",
+  check: "Connection check",
   approval: "Approval",
 };
 const stepsFor = (folder: FolderView | null): Step[] =>
-  folder?.kind === "newConfig" ? ["folder", "environment", "ssh", "approval"] : ["folder", "approval"];
+  folder?.kind === "newConfig"
+    ? ["folder", "environment", "ssh", "check", "approval"]
+    : ["folder", "check", "approval"];
 
 const freshAnswers = (branch: string | null): Answers => ({
   env: "staging",
@@ -285,6 +288,10 @@ export function AddProject({
   /** The ssh alias step: `~/.ssh/config` read once per sheet, and the pick. */
   const [aliases, setAliases] = useState<SshAliases | null>(null);
   const [sshChoice, setSshChoice] = useState<SshChoice>(() => freshChoice(""));
+  /** The read-only connection check, and for an existing config the
+   * environment it checks. */
+  const check = useConnectionCheck();
+  const [checkEnv, setCheckEnv] = useState<string | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
   const form = useRef<HTMLDivElement>(null);
   const alive = useRef(true);
@@ -349,9 +356,12 @@ export function AddProject({
         if (!alive.current) return;
         setCheckout(added);
         if (folder.kind === "config") {
-          setPending(folder.envs.filter((env) => !env.approved).map((env) => env.name));
+          const unapproved = folder.envs.filter((env) => !env.approved).map((env) => env.name);
+          setPending(unapproved);
           setApproval(null);
-          setStep("approval");
+          setCheckEnv(unapproved[0] ?? folder.envs[0]?.name ?? null);
+          check.reset();
+          setStep("check");
         } else {
           setStep("environment");
         }
@@ -426,7 +436,8 @@ export function AddProject({
         }
         setConfig({ lines: text.lines, warnings: text.warnings });
         setWarningsRead(false);
-        setStep("approval");
+        check.reset();
+        setStep("check");
       })
       .catch((error: unknown) => alive.current && setAddError(message(error)))
       .finally(() => alive.current && setRendering(false));
@@ -458,6 +469,9 @@ export function AddProject({
     heading.current?.focus();
   }, [step, env]);
   const onMap = row >= 0 && loaded !== null && env !== null && loaded.map.envs.includes(env);
+  const checkOnMap = row >= 0 && loaded !== null && checkEnv !== null && loaded.map.envs.includes(checkEnv);
+  const checkAlias =
+    folder?.kind === "config" ? folder.envs.find((e) => e.name === checkEnv)?.sshAlias : undefined;
 
   // The review asks once per environment; a newer map read keeps it open.
   const latest = useRef({ loaded, row });
@@ -600,6 +614,39 @@ export function AddProject({
                 </h3>
                 <SshAliasStep aliases={aliases} choice={sshChoice} disabled={busy} onChange={setSshChoice} />
               </>
+            ) : step === "check" ? (
+              <>
+                <h3 className="sheet-heading" ref={heading} tabIndex={-1}>
+                  Check the connection
+                </h3>
+                {folder?.kind === "config" && folder.envs.length > 1 && (
+                  <EnvPicker
+                    envs={folder.envs.map((e) => e.name)}
+                    value={checkEnv}
+                    disabled={check.running}
+                    onChange={(name) => {
+                      check.reset();
+                      setCheckEnv(name);
+                    }}
+                  />
+                )}
+                {!newConfig && !checkOnMap && (
+                  <p className="muted" role="status">
+                    Waiting for the map to list this checkout…
+                  </p>
+                )}
+                <ConnectionCheck
+                  alias={newConfig ? answers.sshAlias : (checkAlias ?? null)}
+                  check={check}
+                  start={
+                    newConfig
+                      ? (onLines) => api.checkRendered(onLines)
+                      : checkOnMap && loaded && checkEnv
+                        ? (onLines) => api.checkConnection(loaded.generation, row, checkEnv, onLines)
+                        : null
+                  }
+                />
+              </>
             ) : newConfig ? (
               <>
                 <h3 className="sheet-heading" ref={heading} tabIndex={-1}>
@@ -714,6 +761,15 @@ export function AddProject({
                   onClick={() => render("ssh")}
                 >
                   {rendering ? "Checking…" : "Continue"}
+                </button>
+              ) : step === "check" ? (
+                <button
+                  type="button"
+                  className="button button-primary"
+                  disabled={busy || check.running || check.view?.hostKeyChanged === true}
+                  onClick={() => setStep("approval")}
+                >
+                  Continue
                 </button>
               ) : newConfig && unapproved !== null ? (
                 <button

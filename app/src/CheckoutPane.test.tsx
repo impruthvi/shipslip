@@ -2,11 +2,21 @@ import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, test, vi } from "vitest";
 import App from "./App";
 import * as fixtures from "./fixtures.gen";
-import type { CheckoutReceipts, DeployEntry, DeployReview, LiveRuns, LoadResult, ReceiptResult } from "./types";
+import type {
+  CheckView,
+  CheckoutReceipts,
+  DeployEntry,
+  DeployReview,
+  LiveRuns,
+  LoadResult,
+  ReceiptResult,
+} from "./types";
 
 const loadMap = vi.fn<() => Promise<LoadResult>>();
 const loadReceipt = vi.fn<(generation: number, id: number) => Promise<ReceiptResult>>();
 const checkoutReceipts = vi.fn<(generation: number, row: number) => Promise<CheckoutReceipts>>();
+const checkConnection =
+  vi.fn<(generation: number, row: number, env: string, onLines: (view: CheckView) => void) => Promise<CheckView>>();
 vi.mock("./api", () => ({
   api: {
     loadMap: () => loadMap(),
@@ -17,6 +27,7 @@ vi.mock("./api", () => ({
     copyText: vi.fn(),
     onFocus: async () => () => {},
     receiptSeen: async () => {},
+    checkConnection: (...args: [number, number, string, (view: CheckView) => void]) => checkConnection(...args),
   },
 }));
 
@@ -59,6 +70,7 @@ beforeEach(() => {
   openFolder.mockReset().mockResolvedValue(undefined);
   reviewTrust.mockReset().mockReturnValue(new Promise(() => {}));
   liveRuns.mockReset().mockResolvedValue({ runs: [], closedPreviews: [] });
+  checkConnection.mockReset().mockResolvedValue(fixtures.connectionChecks.pass);
 });
 
 async function settle() {
@@ -261,6 +273,43 @@ test("the checkout menu opens the folder and the config, and says why when it ca
   await settle();
   expect(openConfig).toHaveBeenCalledWith(1, 0, "production");
   expect(within(main()).getByRole("status")).toHaveTextContent("This checkout has no .shipslip.toml.");
+});
+
+test("Check connection from the checkout menu runs the read-only check for the environment picked", async () => {
+  await openCheckout(/^api/);
+  fireEvent.click(within(main()).getByRole("button", { name: "api actions" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Check connection" }));
+  await settle();
+  const dialog = screen.getByRole("dialog", { name: "Check connection" });
+  expect(within(dialog).getByRole("heading", { name: "Check connection" })).toHaveFocus();
+  expect(within(dialog).getByText(/nothing on the server changes\.$/)).toBeInTheDocument();
+  expect(checkConnection).not.toHaveBeenCalled();
+
+  const picker = within(dialog).getByRole("combobox", { name: "Environment" });
+  expect(picker).toHaveValue("production");
+  fireEvent.change(picker, { target: { value: "staging" } });
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.changedKey);
+  fireEvent.click(within(dialog).getByRole("button", { name: "Check connection" }));
+  await settle();
+  expect(checkConnection).toHaveBeenCalledWith(1, 0, "staging", expect.any(Function));
+  expect(within(dialog).getByRole("alert")).toHaveTextContent("Host key changed. Shipslip stops here.");
+  expect(within(dialog).getByRole("list", { name: "Connection check" })).toBeInTheDocument();
+  expect(within(dialog).getByRole("button", { name: "Check again" })).toBeEnabled();
+
+  fireEvent.keyDown(window, { key: "Escape" });
+  await settle();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByRole("heading", { level: 1, name: "api" })).toHaveFocus();
+});
+
+test("Close leaves the check dialog without running anything", async () => {
+  await openCheckout(/^api/);
+  fireEvent.click(within(main()).getByRole("button", { name: "api actions" }));
+  fireEvent.click(screen.getByRole("menuitem", { name: "Check connection" }));
+  await settle();
+  fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Close" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(checkConnection).not.toHaveBeenCalled();
 });
 
 test("All projects goes back to the map with its heading focused", async () => {

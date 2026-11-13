@@ -13,6 +13,7 @@ use tauri::async_runtime::spawn_blocking;
 use tauri::Manager;
 
 use crate::add_project::{self, Answers, ConfigAdded, ConfigText, FolderView};
+use crate::connection_check::{self, CheckView, Lines};
 use crate::deploy_session::{
     CommandError, CurrentRuns, DeployEntry, DeployReview, Ending, ErrorCode, LiveRuns, OpenSsh,
     PrepareProgress, QuitRun, RecoveryReview, RunBatch, RunInfo, RunStop, Sessions, TrustReview,
@@ -255,6 +256,18 @@ impl App {
         Ok(added)
     }
 
+    /// The connection check for the answers last rendered.
+    fn rendered_check(&self) -> Result<shipslip::connection_check::Request, CommandError> {
+        let rendered = self.rendered.lock().unwrap_or_else(PoisonError::into_inner);
+        let (_, answers) = rendered.as_ref().ok_or_else(|| {
+            CommandError::new(
+                ErrorCode::NotFound,
+                "Answer the environment questions first.",
+            )
+        })?;
+        Ok(connection_check::request_for_answers(answers))
+    }
+
     fn checkout_receipts(&self, generation: u64, row: usize) -> Result<CheckoutReceipts, String> {
         let (root, _) = self.paths.as_ref().map_err(Clone::clone)?;
         Ok(self
@@ -403,6 +416,53 @@ pub async fn check_ssh_alias(draft: HostDraft) -> Result<AliasCheck, CommandErro
     })
     .await
     .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))
+}
+
+/// Runs the read-only connection check for one environment of a checkout
+/// on the map, approved or not, sending the lines as each probe moves.
+#[tauri::command]
+pub async fn check_connection(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+    env: String,
+    lines: tauri::ipc::Channel<CheckView>,
+) -> Result<CheckView, CommandError> {
+    let checkout = app.selection(generation, row, &env)?;
+    let request = spawn_blocking(move || connection_check::request_for(&checkout, &env))
+        .await
+        .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
+        .map_err(|message| CommandError::new(ErrorCode::Local, message))?;
+    Ok(run_check(&request, &lines).await)
+}
+
+/// Runs the read-only connection check for the answers last rendered in the
+/// Add project sheet, before anything is written or approved.
+#[tauri::command]
+pub async fn check_rendered(
+    app: tauri::State<'_, Arc<App>>,
+    lines: tauri::ipc::Channel<CheckView>,
+) -> Result<CheckView, CommandError> {
+    let request = app.rendered_check()?;
+    Ok(run_check(&request, &lines).await)
+}
+
+async fn run_check(
+    request: &shipslip::connection_check::Request,
+    channel: &tauri::ipc::Channel<CheckView>,
+) -> CheckView {
+    let mut lines = Lines::new(request);
+    let _ = channel.send(lines.view());
+    shipslip::connection_check::run(
+        &shipslip::connection_check::SystemSsh::default(),
+        request,
+        |event| {
+            lines.apply(&event);
+            let _ = channel.send(lines.view());
+        },
+    )
+    .await;
+    lines.view()
 }
 
 /// Opens `~/.ssh/config` in the default text editor for the user to paste
@@ -751,6 +811,31 @@ mod tests {
         let written = std::fs::read_to_string(crm.join(".shipslip.toml")).unwrap();
         assert!(written.contains("[env.qa]"), "{written}");
         assert!(app.add_rendered().is_err(), "spent");
+    }
+
+    #[test]
+    fn the_check_for_the_add_sheet_uses_the_answers_last_rendered() {
+        let fx = Fixture::new();
+        let app = app(&fx, None);
+        let crm = fx.dir().join("crm");
+        std::fs::create_dir_all(crm.join(".git")).unwrap();
+        assert_eq!(
+            app.rendered_check().unwrap_err().message,
+            "Answer the environment questions first."
+        );
+        app.inspect_picked(Some(std::fs::canonicalize(crm).unwrap()))
+            .unwrap();
+        app.render_config(answers("qa")).unwrap();
+        let request = app.rendered_check().unwrap();
+        assert_eq!(
+            (
+                request.alias.as_str(),
+                request.path.as_str(),
+                request.branch.as_str()
+            ),
+            ("web1", "/srv/crm", "main")
+        );
+        assert_eq!(request.log_path, "storage/logs/laravel.log");
     }
 
     #[test]

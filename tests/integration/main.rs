@@ -2115,6 +2115,94 @@ async fn changed_host_key_is_refused_as_changed_not_unknown() {
     );
 }
 
+/// Every path under `path` with its size and modification time.
+fn tree(server: &Server, path: &str) -> String {
+    server.exec(
+        &format!("find {} -printf '%p %s %T@ %m\\n' | sort", quote(path)),
+        "",
+    )
+}
+
+#[tokio::test]
+async fn connection_check_reads_a_real_checkout_and_names_host_key_refusals() {
+    use shipslip::connection_check::{self, Failed, Outcome, Passed, Probe, Request, SystemSsh};
+
+    let server = Server::start().await;
+    let path = server.app("check");
+    server.exec(
+        &format!(
+            "cd {} && touch artisan && mkdir -p storage/logs && echo x > storage/logs/laravel.log",
+            quote(&path)
+        ),
+        "",
+    );
+    let request = Request {
+        alias: "server".into(),
+        path: path.clone(),
+        branch: "main".into(),
+        log_path: "storage/logs/laravel.log".into(),
+        log_daily: false,
+    };
+    let check = |config: &str| {
+        let ssh = SystemSsh {
+            config: Some(server.dir.join(config)),
+        };
+        let request = request.clone();
+        async move { connection_check::run(&ssh, &request, |_| {}).await }
+    };
+
+    let before = tree(&server, &path);
+    let results = check("trusted").await;
+    assert_eq!(
+        results.iter().map(|(probe, _)| *probe).collect::<Vec<_>>(),
+        Probe::ALL
+    );
+    assert!(
+        matches!(&results[0].1, Outcome::Pass(Passed::Alias(resolved)) if resolved.user == "deploy"),
+        "{results:?}"
+    );
+    assert_eq!(
+        results[1..]
+            .iter()
+            .map(|(_, outcome)| outcome.clone())
+            .collect::<Vec<_>>(),
+        [
+            Outcome::Pass(Passed::Connected),
+            Outcome::Pass(Passed::Checkout),
+            Outcome::Pass(Passed::Branch),
+            Outcome::Pass(Passed::Artisan("Laravel Framework 11.0.0".into())),
+            Outcome::Pass(Passed::Log("storage/logs/laravel.log".into())),
+        ]
+    );
+    assert_eq!(
+        tree(&server, &path),
+        before,
+        "the check wrote on the server"
+    );
+
+    let other = new_key(&server, "other_host_key");
+    let public = std::fs::read_to_string(other.with_extension("pub")).unwrap();
+    server.write_config("changed", &public);
+    for (config, expected) in [
+        ("untrusted", ConnectFailure::HostKeyUnknown),
+        ("changed", ConnectFailure::HostKeyChanged),
+    ] {
+        let results = check(config).await;
+        assert!(
+            matches!(&results[1].1, Outcome::Fail(Failed::Connect { failure, .. }) if *failure == expected),
+            "{config}: {results:?}"
+        );
+        assert!(
+            results[2..]
+                .iter()
+                .all(|(_, outcome)| *outcome == Outcome::NotRun),
+            "{config}: {results:?}"
+        );
+    }
+    let known = std::fs::read_to_string(server.dir.join("untrusted.known_hosts")).unwrap();
+    assert!(known.is_empty(), "the check wrote known_hosts: {known}");
+}
+
 #[tokio::test]
 async fn a_key_the_server_does_not_accept_is_refused() {
     let server = Server::start().await;
