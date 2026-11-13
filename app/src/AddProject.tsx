@@ -256,7 +256,8 @@ export function AddProject({
 }: {
   /** The map now shown; the approval reads the new checkout's row from it. */
   loaded: Loaded | null;
-  /** A "Setup not finished" map row: opens at the environment step. */
+  /** A "Setup not finished" or "Needs approval" map row: opens past the
+   * folder step, at the environment step or the connection check. */
   reopen?: { generation: number; row: number } | null;
   /** The checkout is on the projects list: the map should be read again. */
   onAdded: () => void;
@@ -326,7 +327,23 @@ export function AddProject({
       .finally(() => alive.current && setPicking(false));
   };
 
-  // A "Setup not finished" checkout: its folder again, at the environment step.
+  const pastFolder = (view: FolderView & { kind: "config" | "newConfig" }, checkout: string) => {
+    setCheckout(checkout);
+    if (view.kind === "config") {
+      const unapproved = view.envs.filter((env) => !env.approved).map((env) => env.name);
+      setPending(unapproved);
+      setApproval(null);
+      setCheckEnv(unapproved[0] ?? view.envs[0]?.name ?? null);
+      check.forgetAll();
+      setStep("check");
+    } else {
+      setStep("environment");
+    }
+  };
+
+  // A listed checkout not set up yet: its folder again, past the folder step.
+  // The sheet may open over a pane whose heading took focus, so a reopen that
+  // stays on the folder step takes it back.
   const reopenRef = useRef(reopen);
   useEffect(() => {
     const from = reopenRef.current;
@@ -337,12 +354,14 @@ export function AddProject({
       .then((view) => {
         if (!alive.current) return;
         picked(view);
-        if (view.kind === "newConfig") {
-          setCheckout(view.checkout);
-          setStep("environment");
-        }
+        if (view.kind === "config" || view.kind === "newConfig") pastFolder(view, view.checkout);
+        else heading.current?.focus();
       })
-      .catch((error: unknown) => alive.current && setAddError(message(error)))
+      .catch((error: unknown) => {
+        if (!alive.current) return;
+        setAddError(message(error));
+        heading.current?.focus();
+      })
       .finally(() => alive.current && setPicking(false));
   }, []);
 
@@ -354,17 +373,7 @@ export function AddProject({
       .addCheckout()
       .then((added) => {
         if (!alive.current) return;
-        setCheckout(added);
-        if (folder.kind === "config") {
-          const unapproved = folder.envs.filter((env) => !env.approved).map((env) => env.name);
-          setPending(unapproved);
-          setApproval(null);
-          setCheckEnv(unapproved[0] ?? folder.envs[0]?.name ?? null);
-          check.forgetAll();
-          setStep("check");
-        } else {
-          setStep("environment");
-        }
+        pastFolder(folder, added);
         onAdded();
       })
       .catch((error: unknown) => alive.current && setAddError(message(error)))

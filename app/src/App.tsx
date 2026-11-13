@@ -67,8 +67,12 @@ export default function App() {
   const entryButton = useRef<HTMLButtonElement>(null);
   const runsButton = useRef<HTMLButtonElement>(null);
   const heading = useRef<HTMLHeadingElement>(null);
-  /** The Add project sheet; `reopen` opens a "Setup not finished" row. */
-  const [adding, setAdding] = useState<{ reopen: { generation: number; row: number } | null } | null>(null);
+  /** The Add project sheet; `reopen` opens a "Setup not finished" or "Needs
+   * approval" row, the latter over its pane. */
+  const [adding, setAdding] = useState<{
+    reopen: { generation: number; row: number } | null;
+    overPane?: boolean;
+  } | null>(null);
   const addButton = useRef<HTMLButtonElement>(null);
   /** Asks for the deploy entry again after approvals and runs. */
   const [entryVersion, setEntryVersion] = useState(0);
@@ -330,9 +334,15 @@ export default function App() {
         onAllProjects={() => go({ kind: "all" })}
         onCheckout={(repoRoot) => {
           const row = map?.rows.findIndex((r) => r.repoRoot === repoRoot) ?? -1;
-          if (loaded && row >= 0 && loaded.map.rows[row].setupNotFinished) {
-            setAdding({ reopen: { generation: loaded.generation, row } });
-          } else go({ kind: "checkout", repoRoot });
+          const mapRow = loaded && row >= 0 ? loaded.map.rows[row] : null;
+          const reopen = loaded && { generation: loaded.generation, row };
+          if (reopen && mapRow?.setupNotFinished) {
+            setAdding({ reopen });
+            return;
+          }
+          go({ kind: "checkout", repoRoot });
+          // Over the pane, so Finish later leaves the pane and its Remove from sidebar.
+          if (reopen && mapRow?.needsApproval) setAdding({ reopen, overPane: true });
         }}
         onAddProject={() => setAdding({ reopen: null })}
         addButton={addButton}
@@ -451,7 +461,7 @@ export default function App() {
           onAdded={refresh}
           onClose={() => {
             setAdding(null);
-            addButton.current?.focus();
+            (adding.overPane ? heading : addButton).current?.focus();
           }}
           onDone={(repoRoot) => {
             setAdding(null);

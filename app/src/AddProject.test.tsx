@@ -580,15 +580,127 @@ test("a Setup not finished checkout says so and reopens the sheet at the environ
   expect(screen.queryByRole("heading", { level: 1, name: "api" })).toBeNull();
 });
 
-test("a reopened checkout that has a config now shows it on the folder step", async () => {
+test("a reopened checkout that has a config now goes on to its connection check", async () => {
   loadMap.mockResolvedValue(fixtures.setupMap);
   reopenSetup.mockResolvedValue(fixtures.folders.config);
   render(<App />);
   await settle();
   fireEvent.click(within(screen.getByRole("region", { name: "Projects" })).getByRole("button", { name: /^api/ }));
   await settle();
-  expect(screen.getByRole("heading", { name: "Choose the project's folder" })).toBeInTheDocument();
-  expect(within(sheet()).getByRole("region", { name: "Environments in .shipslip.toml" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "Check the connection" })).toHaveFocus();
+  expect(addCheckout).not.toHaveBeenCalled();
+});
+
+/** Clicks crm's "Needs approval" line on the map read after it was added. */
+async function reopenNeedsApproval(folder: FolderView = fixtures.folders.config) {
+  loadMap.mockResolvedValue(fixtures.addedMap);
+  reopenSetup.mockResolvedValue(folder);
+  render(<App />);
+  await settle();
+  const line = within(screen.getByRole("region", { name: "Projects" })).getByRole("button", { name: /^crm/ });
+  expect(line).toHaveTextContent("Needs approval");
+  fireEvent.click(line);
+  await settle();
+}
+
+test("a Needs approval checkout opens the sheet at the connection check over its pane", async () => {
+  await reopenNeedsApproval();
+  expect(reopenSetup).toHaveBeenCalledWith(1, crmRow);
+  expect(pickFolder).not.toHaveBeenCalled();
+  expect(addCheckout).not.toHaveBeenCalled();
+  expect(screen.getByRole("heading", { name: "Check the connection" })).toHaveFocus();
+  expect(within(sheet()).getByRole("combobox", { name: "Environment" })).toHaveValue("production");
+  expect(railSteps()).toEqual(["Folder", "2Connection check", "3Approval"]);
+  const rail = within(sheet()).getByRole("navigation", { name: "Add project steps" });
+  const folder = within(rail).getByRole("button", { name: /Folder/ });
+  expect(within(folder).getByRole("img", { name: "done" })).toBeInTheDocument();
+  expect(screen.getByRole("heading", { level: 1, name: "crm" })).toBeInTheDocument();
+
+  await runCheck();
+  expect(checkConnection).toHaveBeenCalledWith(1, crmRow, "production", expect.any(Function));
+});
+
+test("a reopened config checks the first environment that needs approval, not the first listed", async () => {
+  const config = fixtures.folders.config;
+  if (config.kind !== "config") throw new Error("fixture");
+  await reopenNeedsApproval({ ...config, envs: [...config.envs].reverse() });
+  expect(within(sheet()).getByRole("combobox", { name: "Environment" })).toHaveValue("production");
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(screen.getByRole("heading", { name: "Approve production" })).toHaveFocus();
+});
+
+test("a Needs approval reopen that fails says why in the sheet and takes focus from the pane", async () => {
+  reopenSetup.mockRejectedValue({ code: "stale", message: "The map was read again since this was selected." });
+  loadMap.mockResolvedValue(fixtures.addedMap);
+  render(<App />);
+  await settle();
+  fireEvent.click(within(screen.getByRole("region", { name: "Projects" })).getByRole("button", { name: /^crm/ }));
+  await settle();
+  expect(within(sheet()).getByRole("alert")).toHaveTextContent("The map was read again");
+  expect(screen.getByRole("heading", { name: "Choose the project's folder" })).toHaveFocus();
+});
+
+test("a reopened Needs approval checkout approves from the sheet and lands on its pane", async () => {
+  await reopenNeedsApproval();
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+  await settle();
+  expect(screen.getByRole("heading", { name: "Approve production" })).toHaveFocus();
+  expect(reviewTrust).toHaveBeenCalledWith(1, crmRow, "production");
+  typeEnv("production");
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Approve and add" }));
+  await settle();
+  await settle();
+  expect(approveTrust).toHaveBeenCalledWith(fixtures.trustReview.handle, "production");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.getByRole("heading", { level: 1, name: "crm" })).toHaveFocus();
+});
+
+test.each(["check", "approval"])(
+  "Finish later on a reopened checkout's %s step writes nothing and leaves its pane",
+  async (at) => {
+    await reopenNeedsApproval();
+    if (at === "approval") {
+      fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+      await settle();
+      expect(screen.getByRole("heading", { name: "Approve production" })).toBeInTheDocument();
+    }
+    fireEvent.click(within(sheet()).getByRole("button", { name: "Finish later" }));
+    await settle();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(approveTrust).not.toHaveBeenCalled();
+    expect(addCheckout).not.toHaveBeenCalled();
+    expect(addWithConfig).not.toHaveBeenCalled();
+    const projects = screen.getByRole("region", { name: "Projects" });
+    expect(within(projects).getByRole("button", { name: /^crm/ })).toHaveTextContent("Needs approval");
+    expect(screen.getByRole("heading", { level: 1, name: "crm" })).toHaveFocus();
+  },
+);
+
+test.each(["check", "approval"])("Finish later on a new project's %s step closes the sheet", async (at) => {
+  await toCheck();
+  if (at === "approval") {
+    fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
+    await settle();
+  }
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Finish later" }));
+  await settle();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(approveTrust).not.toHaveBeenCalled();
+  expect(addWithConfig).not.toHaveBeenCalled();
+  expect(screen.getByRole("button", { name: "Add project" })).toHaveFocus();
+});
+
+test("done steps on a new config's rail are ticked and go back", async () => {
+  await toNewCheck();
+  const rail = within(sheet()).getByRole("navigation", { name: "Add project steps" });
+  for (const name of [/Folder/, /Environment/, /SSH alias/]) {
+    expect(within(within(rail).getByRole("button", { name })).getByRole("img", { name: "done" })).toBeInTheDocument();
+  }
+  expect(within(rail).queryByRole("button", { name: /Connection check/ })).toBeNull();
+  fireEvent.click(within(rail).getByRole("button", { name: /SSH alias/ }));
+  await settle();
+  expect(screen.getByRole("heading", { name: "Pick the ssh alias" })).toHaveFocus();
 });
 
 // The ssh alias step: pick from ~/.ssh/config, or paste a Host block.

@@ -30,6 +30,7 @@ vi.mock("./api", () => ({
     receiptSeen: async () => {},
     checkConnection: (...args: [number, number, string, (view: CheckView) => void]) => checkConnection(...args),
     removeCheckout: (...args: [number, number]) => removeCheckout(...args),
+    reopenSetup: async () => fixtures.folders.config,
   },
 }));
 
@@ -87,6 +88,13 @@ async function openCheckout(name: RegExp) {
   await settle();
   const projects = screen.getByRole("region", { name: "Projects" });
   fireEvent.click(within(projects).getByRole("button", { name }));
+  await settle();
+}
+
+/** A "Needs approval" line opens the setup sheet over its pane; Finish later leaves the pane. */
+async function openNeedsApproval(name: RegExp) {
+  await openCheckout(name);
+  fireEvent.click(within(screen.getByRole("dialog", { name: "Add project" })).getByRole("button", { name: "Finish later" }));
   await settle();
 }
 
@@ -325,7 +333,7 @@ test("Remove from sidebar is not offered for a checkout with anything recorded",
 test("Remove from sidebar drops a checkout with nothing recorded and returns to All projects", async () => {
   if (fixtures.addedMap.kind !== "loaded") throw new Error("fixture");
   loadMap.mockResolvedValueOnce(fixtures.removableMap).mockResolvedValue({ ...fixtures.addedMap, generation: 2 });
-  await openCheckout(/^shop/);
+  await openNeedsApproval(/^shop/);
   fireEvent.click(within(main()).getByRole("button", { name: "shop actions" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Remove from sidebar" }));
   await settle();
@@ -342,7 +350,7 @@ test("a refused removal says why and keeps the checkout", async () => {
     code: "local",
     message: "This Mac has receipts or approvals for this checkout, so it stays in the sidebar.",
   });
-  await openCheckout(/^shop/);
+  await openNeedsApproval(/^shop/);
   fireEvent.click(within(main()).getByRole("button", { name: "shop actions" }));
   fireEvent.click(screen.getByRole("menuitem", { name: "Remove from sidebar" }));
   await settle();
