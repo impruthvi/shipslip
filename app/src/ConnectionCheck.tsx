@@ -1,11 +1,17 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { CommandBox } from "./CommandBox";
 import { StepIcon } from "./Mark";
-import { HOST_KEY_UNVERIFIED, errorMessage, withCode } from "./text";
+import { errorMessage, hostKeyUnverifiedBody, withCode } from "./text";
 import type { CheckLine, CheckView } from "./types";
 
 /** Starts one check, calling `onLines` as each probe moves; resolves to the end. */
 export type StartCheck = (onLines: (view: CheckView) => void) => Promise<CheckView>;
+
+/** An environment whose check stopped at the host key. */
+export interface EnvHostKeyStop {
+  env: string;
+  view: CheckView;
+}
 
 export interface CheckRun {
   view: CheckView | null;
@@ -14,8 +20,9 @@ export interface CheckRun {
   /** Per environment: the last finished check, or `null` for one started
    * that did not finish. An environment never checked is absent. */
   finished: Record<string, CheckView | null>;
-  /** Some check shown or finished stopped at the host key: no approval. */
-  hostKeyStopped: boolean;
+  /** Per environment, its shown or last finished check that stopped at the
+   * host key: no approval while any. */
+  hostKeyStops: EnvHostKeyStop[];
   run: (env: string, start: StartCheck) => void;
   /** Clears the shown check, for a different environment; `finished` stays. */
   reset: () => void;
@@ -27,6 +34,7 @@ export interface CheckRun {
  * `forgetAll` is dropped. */
 export function useConnectionCheck(): CheckRun {
   const [view, setView] = useState<CheckView | null>(null);
+  const [shownEnv, setShownEnv] = useState<string | null>(null);
   const [finished, setFinished] = useState<Record<string, CheckView | null>>({});
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +50,7 @@ export function useConnectionCheck(): CheckRun {
     setRunning(true);
     setError(null);
     setView(null);
+    setShownEnv(env);
     setFinished((results) => ({ ...results, [env]: null }));
     start((lines) => id === current.current && setView(lines))
       .then((end) => {
@@ -55,6 +64,7 @@ export function useConnectionCheck(): CheckRun {
   const reset = useCallback(() => {
     current.current += 1;
     setView(null);
+    setShownEnv(null);
     setRunning(false);
     setError(null);
   }, []);
@@ -62,8 +72,11 @@ export function useConnectionCheck(): CheckRun {
     reset();
     setFinished({});
   }, [reset]);
-  const hostKeyStopped = view?.hostKeyStop != null || Object.values(finished).some((done) => done?.hostKeyStop != null);
-  return { view, running, error, finished, hostKeyStopped, run, reset, forgetAll };
+  const hostKeyStops = Object.keys(finished).flatMap((env) => {
+    const shown = env === shownEnv ? view : finished[env];
+    return shown?.hostKeyStop ? [{ env, view: shown }] : [];
+  });
+  return { view, running, error, finished, hostKeyStops, run, reset, forgetAll };
 }
 
 function LineIcon({ line }: { line: CheckLine }) {
@@ -81,8 +94,29 @@ function LineIcon({ line }: { line: CheckLine }) {
   }
 }
 
+function HostKeyStopBox({ stop: { env, view } }: { stop: EnvHostKeyStop }) {
+  const titleId = useId();
+  return (
+    <section className="check-stop" role="alert" aria-labelledby={titleId}>
+      <h4 id={titleId} className="check-stop-title">
+        {view.hostKeyStop === "changed"
+          ? `Host key changed for ${env}. Shipslip stops here.`
+          : `Shipslip can't verify the host key for ${env}`}
+      </h4>
+      {view.hostKeyStop === "changed" ? (
+        <p>
+          The host key for <span className="mono">{view.alias}</span> is not the one ~/.ssh/known_hosts records. Find out why the key changed before
+          going on.
+        </p>
+      ) : (
+        <p>{withCode(hostKeyUnverifiedBody(view.alias))}</p>
+      )}
+    </section>
+  );
+}
+
 /** The read-only connection check: a button the person presses, a boxed
- * stop for a changed host key, and one ruled line per probe. */
+ * stop for each environment stopped at the host key, and one ruled line per probe. */
 export function ConnectionCheck({
   env,
   alias,
@@ -97,7 +131,6 @@ export function ConnectionCheck({
   /** `null`: the check can't start yet. */
   start: StartCheck | null;
 }) {
-  const stopId = useId();
   const { view, running, error } = check;
   const shown = view?.alias ?? alias;
   return (
@@ -124,21 +157,9 @@ export function ConnectionCheck({
           {running ? "Checking…" : view || error ? "Check again" : "Check connection"}
         </button>
       </div>
-      {view?.hostKeyStop && (
-        <section className="check-stop" role="alert" aria-labelledby={stopId}>
-          <h4 id={stopId} className="check-stop-title">
-            {view.hostKeyStop === "changed" ? "Host key changed. Shipslip stops here." : HOST_KEY_UNVERIFIED.title}
-          </h4>
-          {view.hostKeyStop === "changed" ? (
-            <p>
-              The host key for <span className="mono">{view.alias}</span> is not the one ~/.ssh/known_hosts records.
-              Find out why the key changed before going on.
-            </p>
-          ) : (
-            <p>{withCode(HOST_KEY_UNVERIFIED.body)}</p>
-          )}
-        </section>
-      )}
+      {check.hostKeyStops.map((stop) => (
+        <HostKeyStopBox key={stop.env} stop={stop} />
+      ))}
       {error && (
         <p className="sheet-refusal" role="alert">
           {error}

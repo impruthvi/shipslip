@@ -1,9 +1,13 @@
 import { Fragment, createElement, type ReactNode } from "react";
 
+/** Why ssh refused a host key it gave no reason for; names the alias when known. */
+export const hostKeyUnverifiedBody = (alias?: string) =>
+  `ssh refused the host key${alias ? ` for \`${alias}\`` : ""} and did not say why, often because \`LogLevel\` in ~/.ssh/config is QUIET or FATAL. Find out why before going on.`;
+
 /** A host key ssh refused without saying why: the refusal screen and the check's stop box. */
 export const HOST_KEY_UNVERIFIED = {
   title: "Shipslip can't verify this server's host key",
-  body: "ssh refused the host key and did not say why, often because `LogLevel` in ~/.ssh/config is QUIET or FATAL. Find out why before going on.",
+  body: hostKeyUnverifiedBody(),
 };
 
 /** Library sentences mark commands with backticks: show them as code, as text. */

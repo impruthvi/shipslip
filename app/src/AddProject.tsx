@@ -775,7 +775,7 @@ export function AddProject({
                 <button
                   type="button"
                   className="button button-primary"
-                  disabled={busy || check.running || check.hostKeyStopped}
+                  disabled={busy || check.running || check.hostKeyStops.length > 0}
                   onClick={() => setStep("approval")}
                 >
                   Continue
