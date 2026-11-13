@@ -52,7 +52,7 @@ A person's sign-off, kept on this Mac, on one environment's config: its server, 
 _Avoid_: Trust (in prose; `slip trust` is the command)
 
 **Connection check**:
-A read-only look, started by a person, at whether this Mac reaches an environment: the alias resolves, ssh connects, the path is a git checkout on its branch, `php artisan --version` runs, the Laravel log reads. It needs no approval and changes nothing on the server.
+A read-only look, started by a person, at whether this Mac reaches an environment: the alias resolves, ssh connects, the path is a git checkout on its branch, `php artisan --version` runs, the Laravel log reads. It needs no approval. Shipslip's commands only read; booting `php artisan` may let Laravel refresh its own cache files (ADR 0005).
 _Avoid_: Preflight (the deploy's own check), health check
 
 **Re-attach**:

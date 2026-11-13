@@ -293,7 +293,7 @@ test("Check connection from the checkout menu runs the read-only check for the e
   await settle();
   const dialog = screen.getByRole("dialog", { name: "Check connection" });
   expect(within(dialog).getByRole("heading", { name: "Check connection" })).toHaveFocus();
-  expect(within(dialog).getByText(/nothing on the server changes\.$/)).toBeInTheDocument();
+  expect(within(dialog).getByText(/refresh its own cache files\.$/)).toBeInTheDocument();
   expect(checkConnection).not.toHaveBeenCalled();
 
   const picker = within(dialog).getByRole("combobox", { name: "Environment" });

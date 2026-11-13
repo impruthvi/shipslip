@@ -1122,9 +1122,11 @@ async function runCheck() {
 test("an existing config's check is read only, runs only when asked, and every line passes", async () => {
   await toCheck();
   expect(screen.getByRole("heading", { name: "Check the connection" })).toHaveFocus();
-  expect(within(sheet()).getByText(/nothing on the server changes\.$/)).toHaveTextContent(
-    "Read only. Connects as production1 and looks; nothing on the server changes.",
+  const banner = within(sheet()).getByText(/refresh its own cache files\.$/);
+  expect(banner).toHaveTextContent(
+    "Read only. Connects as production1 and looks. Shipslip's commands only read; starting php artisan can let Laravel refresh its own cache files.",
   );
+  expect(banner).not.toHaveTextContent("nothing on the server changes");
   expect(checkConnection).not.toHaveBeenCalled();
   expect(within(sheet()).queryByRole("list", { name: "Connection check" })).toBeNull();
 
@@ -1262,7 +1264,7 @@ test("an existing config with two environments checks the one picked, and a new 
   expect(within(sheet()).getByRole("list", { name: "Connection check" })).toBeInTheDocument();
   fireEvent.change(picker, { target: { value: "staging" } });
   expect(within(sheet()).queryByRole("list", { name: "Connection check" })).toBeNull();
-  expect(within(sheet()).getByText(/nothing on the server changes\.$/)).toHaveTextContent("Connects as staging1");
+  expect(within(sheet()).getByText(/refresh its own cache files\.$/)).toHaveTextContent("Connects as staging1");
   await runCheck();
   expect(checkConnection).toHaveBeenLastCalledWith(2, crmRow, "staging", expect.any(Function));
 });
@@ -1271,7 +1273,7 @@ test("a new config's check runs on the answers just given, before anything is wr
   await toNewCheck();
   expect(railSteps()).toEqual(["Folder", "Environment", "SSH alias", "4Connection check", "5Approval"]);
   expect(within(sheet()).queryByRole("combobox", { name: "Environment" })).toBeNull();
-  expect(within(sheet()).getByText(/nothing on the server changes\.$/)).toHaveTextContent("Connects as staging1");
+  expect(within(sheet()).getByText(/refresh its own cache files\.$/)).toHaveTextContent("Connects as staging1");
   await runCheck();
   expect(checkRendered).toHaveBeenCalledTimes(1);
   expect(checkConnection).not.toHaveBeenCalled();

@@ -44,6 +44,8 @@ pub enum Probe {
     Connect,
     Checkout,
     Branch,
+    /// Boots the app with `php artisan --version`. Laravel may refresh its own
+    /// cache files while booting: the one accepted side effect (ADR 0005).
     Artisan,
     Log,
 }
@@ -247,7 +249,8 @@ fn error_text(error: &TransportError) -> String {
 }
 
 /// The probe's script. Every command in it reads: none writes a file, the
-/// git index, or the server's state.
+/// git index, or the server's state. Booting Laravel for [`Probe::Artisan`]
+/// is the one exception Shipslip doesn't control (ADR 0005).
 fn script(probe: Probe, request: &Request) -> String {
     let mut s = format!(
         "cd -- {} 2>/dev/null || {{ echo '@no_folder'; exit 0; }}\n",
