@@ -209,10 +209,27 @@ test("an approved environment with nothing deployed from this Mac says so plainl
 });
 
 test("a checkout with no receipts says so", async () => {
-  checkoutReceipts.mockResolvedValue({ kind: "listed", generation: 1, row: 2, receipts: [] });
+  checkoutReceipts.mockResolvedValue({ kind: "listed", generation: 1, row: 2, receipts: [], older: false });
   await openCheckout(/^blog/);
   const table = within(main()).getByRole("region", { name: "Receipts" });
   expect(within(table).getByText("No receipts for this checkout on this Mac yet.")).toBeInTheDocument();
+});
+
+test("a receipts list without older receipts does not say any are hidden", async () => {
+  await openCheckout(/^api/);
+  const table = within(main()).getByRole("region", { name: "Receipts" });
+  expect(within(table).getByRole("list")).toBeInTheDocument();
+  expect(within(table).queryByText("Older receipts not shown")).toBeNull();
+});
+
+test("a receipts list with older receipts says they are not shown", async () => {
+  checkoutReceipts.mockImplementation(async (_generation, row) => {
+    const listed = fixtures.checkoutReceipts[row];
+    return listed.kind === "listed" ? { ...listed, older: true } : listed;
+  });
+  await openCheckout(/^api/);
+  const table = within(main()).getByRole("region", { name: "Receipts" });
+  expect(within(table).getByText("Older receipts not shown")).toBeInTheDocument();
 });
 
 test("a receipts list that cannot be read says why", async () => {

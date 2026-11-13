@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -125,6 +125,33 @@ impl From<Listed> for ReceiptListRow {
             },
         }
     }
+}
+
+/// One checkout's receipts, newest first.
+#[derive(Debug, Default)]
+pub struct CheckoutReceiptList {
+    pub rows: Vec<(PathBuf, ReceiptSummary)>,
+    /// The checkout has a receipt older than those listed.
+    pub older: bool,
+}
+
+/// Lists the newest `limit` receipts recorded from `checkout`, opening files
+/// until they are found. Receipts that cannot be read are left out.
+pub fn checkout_receipts(
+    root: &Path,
+    project: &str,
+    checkout: &str,
+    limit: usize,
+) -> Result<CheckoutReceiptList, ReceiptQueryError> {
+    let listing = receipt::list_checkout(root, project, checkout, limit)?;
+    Ok(CheckoutReceiptList {
+        rows: listing
+            .rows
+            .into_iter()
+            .map(|(path, receipt)| (path, ReceiptSummary::from(&receipt)))
+            .collect(),
+        older: listing.older,
+    })
 }
 
 /// Lists local runs newest first. The limit bounds the files read before

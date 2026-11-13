@@ -224,6 +224,37 @@ fn list_shows_unreadable_and_newer_receipts_and_skips_other_files() {
 }
 
 #[test]
+fn list_checkout_keeps_its_own_receipts_up_to_the_limit() {
+    let root = TempRoot::new();
+    write_receipt(&root.0, &receipt_json("aaaa0001-0", 1000, "staging"));
+    write_receipt(&root.0, &receipt_json("bbbb0002-0", 2000, "staging"));
+    let mut twin = receipt_json("cccc0003-0", 3000, "production");
+    twin["repo_root"] = json!("/twin");
+    write_receipt(&root.0, &twin);
+    write(&root.0, "staging", "4000-dddd0004-0.json", b"{ not json");
+    let run_ids = |listing: &history::CheckoutListing| -> Vec<String> {
+        listing.rows.iter().map(|(_, r)| r.run_id.clone()).collect()
+    };
+
+    let all = list_checkout(&root.0, "app", "/repo", 2).unwrap();
+    assert_eq!(run_ids(&all), ["bbbb0002-0", "aaaa0001-0"]);
+    assert!(!all.older);
+
+    let newest = list_checkout(&root.0, "app", "/repo", 1).unwrap();
+    assert_eq!(run_ids(&newest), ["bbbb0002-0"]);
+    assert!(newest.older);
+
+    // Files left unread are another checkout's, so none of the twin's are hidden.
+    let twin = list_checkout(&root.0, "app", "/twin", 1).unwrap();
+    assert_eq!(run_ids(&twin), ["cccc0003-0"]);
+    assert!(!twin.older);
+    assert!(list_checkout(&root.0, "other", "/repo", 5)
+        .unwrap()
+        .rows
+        .is_empty());
+}
+
+#[test]
 fn find_matches_unique_prefixes_only() {
     let root = TempRoot::new();
     let first = write_receipt(

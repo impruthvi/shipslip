@@ -38,7 +38,9 @@ function useEntries(generation: number, row: number, repoRoot: string, envs: str
 
 /** The checkout's receipts, newest first; null until the first answer. */
 function useReceipts(generation: number, row: number, repoRoot: string) {
-  const [answer, setAnswer] = useState<{ repoRoot: string; receipts: ReceiptRowView[] } | null>(null);
+  const [answer, setAnswer] = useState<{ repoRoot: string; receipts: ReceiptRowView[]; older: boolean } | null>(
+    null,
+  );
   const [failed, setFailed] = useState<string | null>(null);
   useEffect(() => {
     let gone = false;
@@ -48,7 +50,7 @@ function useReceipts(generation: number, row: number, repoRoot: string) {
         if (result.kind === "unreadable") setFailed(result.message);
         else if (result.kind === "listed") {
           setFailed(null);
-          setAnswer({ repoRoot, receipts: result.receipts });
+          setAnswer({ repoRoot, receipts: result.receipts, older: result.older });
         }
         // Stale or gone: the map is read again, and that asks again.
       },
@@ -58,7 +60,8 @@ function useReceipts(generation: number, row: number, repoRoot: string) {
       gone = true;
     };
   }, [generation, row, repoRoot]);
-  return { receipts: answer?.repoRoot === repoRoot ? answer.receipts : null, failed };
+  const current = answer?.repoRoot === repoRoot ? answer : null;
+  return { receipts: current?.receipts ?? null, older: current?.older ?? false, failed };
 }
 
 function message(error: unknown): string {
@@ -174,7 +177,7 @@ export function CheckoutPane({
     columns.map((c) => c.env),
     entryVersion,
   );
-  const { receipts, failed } = useReceipts(generation, rowIndex, row.repoRoot);
+  const { receipts, older, failed } = useReceipts(generation, rowIndex, row.repoRoot);
   const buttons = useRef<Record<string, HTMLButtonElement | null>>({});
   const focused = useRef(onDeployFocused);
   useEffect(() => {
@@ -292,6 +295,7 @@ export function CheckoutPane({
               ))}
             </ul>
           )}
+          {!failed && older && <p className="muted">Older receipts not shown</p>}
         </section>
       </div>
     </div>

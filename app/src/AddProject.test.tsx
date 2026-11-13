@@ -40,7 +40,7 @@ vi.mock("./api", () => ({
     receiptsChanged: async () => false,
     compare: vi.fn(),
     loadReceipt: async () => ({ kind: "notFound" }),
-    checkoutReceipts: async (): Promise<CheckoutReceipts> => ({ kind: "listed", generation: 1, row: 0, receipts: [] }),
+    checkoutReceipts: async (): Promise<CheckoutReceipts> => ({ kind: "listed", generation: 1, row: 0, receipts: [], older: false }),
     copyText: (text: string) => copyText(text),
     onFocus: async () => () => {},
     receiptSeen: async () => {},
