@@ -84,7 +84,7 @@ function LineIcon({ line }: { line: CheckLine }) {
     case "pass":
       return <StepIcon kind="ok" label="passed" />;
     case "fail":
-      return <StepIcon kind="unknown" label="did not pass" />;
+      return <StepIcon kind="attention" />;
     case "running":
       return <StepIcon kind="running" label="running" />;
     case "notRun":

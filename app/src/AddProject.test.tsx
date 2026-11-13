@@ -1241,6 +1241,9 @@ test("a wrong branch is amber, never red, and lets the person go on to approval"
   expect(branch).toHaveTextContent("feature/search is checked out, not main");
   expect(branch).toHaveClass("tone-attention");
   expect(sheet().querySelector(".tone-bad, .mark-bad")).toBeNull();
+  const icon = within(checkLine("On branch main")).getByRole("img", { name: "did not pass" });
+  expect(icon).toHaveClass("step-icon-attention", "mark-attention");
+  expect(checkLine("On branch main").querySelector(".step-icon-unknown")).toBeNull();
   expect(within(sheet()).getByRole("status")).toHaveTextContent("Connection check done: 1 did not pass.");
   fireEvent.click(within(sheet()).getByRole("button", { name: "Continue" }));
   await settle();
