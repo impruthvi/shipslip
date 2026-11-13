@@ -111,16 +111,22 @@ fn the_list_is_written_owner_only_with_no_temp_file_left() {
     let fx = Fixture::new();
     add(&fx.list_path(), &fx.checkout("shop"), 1_000).unwrap();
 
-    let names: Vec<_> = fs::read_dir(fx.list_path().parent().unwrap())
+    let names: BTreeSet<_> = fs::read_dir(fx.list_path().parent().unwrap())
         .unwrap()
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .collect();
-    assert_eq!(names, vec!["projects.json"]);
+    assert_eq!(
+        names,
+        BTreeSet::from(["projects.json".into(), "projects.json.lock".into()])
+    );
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(fx.list_path()).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
+        for name in names {
+            let path = fx.list_path().with_file_name(&name);
+            let mode = fs::metadata(path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{name}");
+        }
     }
 }
 
@@ -482,4 +488,96 @@ fn remove_refuses_when_a_receipt_cannot_be_read() {
 
     assert!(matches!(error, RemoveError::Unreadable { .. }), "{error:?}");
     assert_eq!(fs::read(fx.list_path()).unwrap(), before);
+}
+
+#[test]
+fn concurrent_adds_all_land() {
+    let fx = Fixture::new();
+    let batches: Vec<Vec<PathBuf>> = ["a", "b"]
+        .iter()
+        .map(|side| {
+            (0..50)
+                .map(|i| fx.checkout(&format!("{side}{i}")))
+                .collect()
+        })
+        .collect();
+
+    std::thread::scope(|scope| {
+        for batch in &batches {
+            let list_path = fx.list_path();
+            scope.spawn(move || {
+                for (i, checkout) in batch.iter().enumerate() {
+                    add(&list_path, checkout, i as u128).unwrap();
+                }
+            });
+        }
+    });
+
+    let listed: BTreeSet<PathBuf> = list(&fx.list_path())
+        .unwrap()
+        .into_iter()
+        .map(|checkout| checkout.path)
+        .collect();
+    assert_eq!(listed, batches.into_iter().flatten().collect());
+}
+
+#[test]
+fn remove_concurrent_with_add_keeps_both_changes() {
+    for round in 0..20 {
+        let fx = Fixture::new();
+        let a = fx.checkout("a");
+        let b = fx.checkout(&format!("b{round}"));
+        add(&fx.list_path(), &a, 1).unwrap();
+
+        std::thread::scope(|scope| {
+            scope.spawn(|| remove(&fx.trust_path(), &fx.receipts(), &a).unwrap());
+            scope.spawn(|| add(&fx.list_path(), &b, 2).unwrap());
+        });
+
+        let listed: Vec<PathBuf> = list(&fx.list_path())
+            .unwrap()
+            .into_iter()
+            .map(|checkout| checkout.path)
+            .collect();
+        assert_eq!(listed, [b], "round {round}");
+    }
+}
+
+#[test]
+fn add_and_remove_change_nothing_when_the_lock_cannot_be_opened() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let blog = fx.checkout("blog");
+    add(&fx.list_path(), &shop, 1).unwrap();
+    let before = fs::read(fx.list_path()).unwrap();
+    let lock_path = fx.list_path().with_file_name("projects.json.lock");
+    fs::remove_file(&lock_path).unwrap();
+    fs::create_dir(&lock_path).unwrap();
+
+    let added = add(&fx.list_path(), &blog, 2).unwrap_err();
+    let removed = remove(&fx.trust_path(), &fx.receipts(), &shop).unwrap_err();
+
+    assert!(matches!(added, ProjectsError::Io { path, .. } if path == lock_path));
+    assert!(matches!(
+        removed,
+        RemoveError::List(ProjectsError::Io { path, .. }) if path == lock_path
+    ));
+    assert_eq!(fs::read(fx.list_path()).unwrap(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlinked_lock_is_refused() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let lock_path = fx.list_path().with_file_name("projects.json.lock");
+    let elsewhere = fx.0.join("elsewhere");
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &lock_path).unwrap();
+
+    let error = add(&fx.list_path(), &shop, 1).unwrap_err();
+
+    assert!(matches!(error, ProjectsError::Io { path, .. } if path == lock_path));
+    assert!(!elsewhere.exists());
+    assert!(!fx.list_path().exists());
 }

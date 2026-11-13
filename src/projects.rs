@@ -4,10 +4,11 @@
 //! its approvals and its receipts.
 
 use std::collections::BTreeSet;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::config::{approve_trust, ConfigError, InitAnswers, InitPlan, LoadedConfig};
@@ -74,6 +75,7 @@ pub fn list(path: &Path) -> Result<Vec<Checkout>, ProjectsError> {
 /// listed checkout again keeps its first date.
 pub fn add(path: &Path, folder: &Path, now_ms: u128) -> Result<PathBuf, ProjectsError> {
     let checkout = checkout_root(folder)?;
+    let _lock = lock(path)?;
     let mut checkouts = list(path)?;
     if checkouts.iter().any(|listed| listed.path == checkout) {
         return Ok(checkout);
@@ -124,6 +126,7 @@ fn unread(overview: &Overview) -> Option<&Problem> {
 /// listed is left as it is.
 pub fn remove(trust_path: &Path, receipts_root: &Path, checkout: &Path) -> Result<(), RemoveError> {
     let path = path_beside(trust_path);
+    let _lock = lock(&path)?;
     let mut checkouts = list(&path)?;
     let Some(at) = checkouts.iter().position(|listed| listed.path == checkout) else {
         return Ok(());
@@ -145,7 +148,28 @@ pub fn remove(trust_path: &Path, receipts_root: &Path, checkout: &Path) -> Resul
     Ok(())
 }
 
-fn save(path: &Path, checkouts: Vec<Checkout>) -> Result<(), ProjectsError> {
+/// Blocks until this caller holds `projects.json.lock` beside the list, so
+/// one read-change-save can't drop another's change. Released on drop.
+fn lock(path: &Path) -> Result<File, ProjectsError> {
+    create_parent(path)?;
+    let lock_path = path.with_extension("json.lock");
+    let io_error = |source| ProjectsError::Io {
+        path: lock_path.clone(),
+        source,
+    };
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(&lock_path).map_err(io_error)?;
+    file.lock_exclusive().map_err(io_error)?;
+    Ok(file)
+}
+
+fn create_parent(path: &Path) -> Result<(), ProjectsError> {
     let parent = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(|source| ProjectsError::Io {
         path: parent.to_path_buf(),
@@ -161,6 +185,11 @@ fn save(path: &Path, checkouts: Vec<Checkout>) -> Result<(), ProjectsError> {
             }
         })?;
     }
+    Ok(())
+}
+
+fn save(path: &Path, checkouts: Vec<Checkout>) -> Result<(), ProjectsError> {
+    create_parent(path)?;
     let mut bytes = serde_json::to_vec_pretty(&List {
         version: VERSION,
         checkouts,
