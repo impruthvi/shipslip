@@ -74,11 +74,12 @@ function Ring() {
   );
 }
 
-export type StepIconKind = "ok" | "failed" | "unknown" | "running" | "notRun" | "skipped";
+export type StepIconKind = "ok" | "failed" | "attention" | "unknown" | "running" | "notRun" | "skipped";
 
 const stepIconLabel: Record<StepIconKind, string> = {
   ok: "done",
   failed: "failed",
+  attention: "did not pass",
   unknown: "result unknown",
   running: "running",
   notRun: "did not run",
@@ -88,6 +89,7 @@ const stepIconLabel: Record<StepIconKind, string> = {
 const stepIconTone: Record<StepIconKind, string> = {
   ok: "mark-good",
   failed: "mark-bad",
+  attention: "mark-attention",
   unknown: "mark-attention",
   running: "mark-running",
   notRun: "mark-muted",
@@ -95,11 +97,12 @@ const stepIconTone: Record<StepIconKind, string> = {
 };
 
 /** A step's outcome in receipts and the run screen, drawn on the same ramp as
- * the map marks. */
+ * the map marks. `attention` is a check that did not pass; the diamond stays
+ * for not known. */
 export function StepIcon({ kind, label = stepIconLabel[kind] }: { kind: StepIconKind; label?: string }) {
   return (
     <svg
-      className={`mark step-icon ${stepIconTone[kind]}`}
+      className={`mark step-icon step-icon-${kind} ${stepIconTone[kind]}`}
       width="12"
       height="12"
       viewBox="0 0 10 10"
@@ -110,6 +113,12 @@ export function StepIcon({ kind, label = stepIconLabel[kind] }: { kind: StepIcon
         <path d="M1.5 5.2 L4 7.6 L8.6 2.6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
       )}
       {kind === "failed" && <rect x="1.5" y="1.5" width="7" height="7" rx="1" fill="currentColor" />}
+      {kind === "attention" && (
+        <>
+          <path d="M5 1.2 V6" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          <circle cx="5" cy="8.3" r="0.95" fill="currentColor" />
+        </>
+      )}
       {kind === "unknown" && <Diamond />}
       {kind === "running" && <Ring />}
       {kind === "notRun" && <path d="M2.5 5 H7.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />}
