@@ -19,6 +19,8 @@ export interface RowView {
   needsApproval: boolean;
   /** Added in the app; its folder has no `.shipslip.toml` yet. */
   setupNotFinished: boolean;
+  /** Its `.shipslip.toml` is there but can't be read: why, one entry per line. */
+  configUnreadable: string[] | null;
   /** This Mac recorded nothing for it, so it can leave the sidebar. */
   removable: boolean;
   cells: CellView[];

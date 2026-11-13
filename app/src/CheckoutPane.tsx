@@ -167,6 +167,10 @@ export function CheckoutPane({
   tools,
 }: Props) {
   const row = map.rows[rowIndex];
+  const gone = row.pathMissing;
+  const unreadable = gone ? null : row.configUnreadable;
+  // Deploy can't work from a gone folder or a config that can't be read.
+  const canDeploy = !gone && !unreadable;
   const columns = row.cells.flatMap((cell, col) =>
     cell.kind === "present" ? [{ env: map.envs[col], cell }] : [],
   );
@@ -174,7 +178,7 @@ export function CheckoutPane({
     generation,
     rowIndex,
     row.repoRoot,
-    columns.map((c) => c.env),
+    canDeploy ? columns.map((c) => c.env) : [],
     entryVersion,
   );
   const { receipts, older, failed } = useReceipts(generation, rowIndex, row.repoRoot);
@@ -197,6 +201,31 @@ export function CheckoutPane({
     setMenuError(null);
     action().catch((error: unknown) => setMenuError(message(error)));
   };
+  const menu = [
+    ...(canDeploy && columns.length > 0 ? [{ label: "Check connection", onSelect: () => setChecking(true) }] : []),
+    ...(gone
+      ? []
+      : [{ label: "Open folder in Finder", onSelect: () => run(() => deploy.openFolder(generation, rowIndex)) }]),
+    ...(!gone && (unreadable || columns.length > 0)
+      ? [
+          {
+            label: "Open .shipslip.toml",
+            // The config is the checkout's; any of its environments finds it,
+            // and the checkout alone does when it can't be read.
+            onSelect: () =>
+              run(() => deploy.openConfig(generation, rowIndex, unreadable ? null : columns[0].env)),
+          },
+        ]
+      : []),
+    ...(row.removable
+      ? [
+          {
+            label: "Remove from sidebar",
+            onSelect: () => run(() => api.removeCheckout(generation, rowIndex).then(onRemoved)),
+          },
+        ]
+      : []),
+  ];
   return (
     <div className="checkout">
       <header className="toolbar" data-tauri-drag-region>
@@ -207,30 +236,17 @@ export function CheckoutPane({
           {folder ? `in ${folder} · ` : ""}
           {row.repoRoot}
         </p>
+        {gone ? (
+          <span className="checkout-state muted">checkout not found</span>
+        ) : unreadable ? (
+          <span className="checkout-state tone-attention">.shipslip.toml can't be read</span>
+        ) : null}
         {tools}
-        <Menu
-          label={`${row.label} actions`}
-          end
-          items={[
-            ...(columns.length > 0 ? [{ label: "Check connection", onSelect: () => setChecking(true) }] : []),
-            { label: "Open folder in Finder", onSelect: () => run(() => deploy.openFolder(generation, rowIndex)) },
-            // The config is the checkout's; any of its environments finds it.
-            ...columns.slice(0, 1).map(({ env }) => ({
-              label: "Open .shipslip.toml",
-              onSelect: () => run(() => deploy.openConfig(generation, rowIndex, env)),
-            })),
-            ...(row.removable
-              ? [
-                  {
-                    label: "Remove from sidebar",
-                    onSelect: () => run(() => api.removeCheckout(generation, rowIndex).then(onRemoved)),
-                  },
-                ]
-              : []),
-          ]}
-        >
-          <span aria-hidden>⋯</span>
-        </Menu>
+        {menu.length > 0 && (
+          <Menu label={`${row.label} actions`} end items={menu}>
+            <span aria-hidden>⋯</span>
+          </Menu>
+        )}
       </header>
       {checking && (
         <CheckConnectionDialog
@@ -248,15 +264,21 @@ export function CheckoutPane({
         </p>
       )}
       <div className="checkout-body">
+        {unreadable && (
+          <section className="checkout-config-error" aria-label="Why .shipslip.toml can't be read">
+            <p>Shipslip can't read this checkout's .shipslip.toml. Edit it to deploy again.</p>
+            <pre className="sheet-detail mono">{unreadable.join("\n")}</pre>
+          </section>
+        )}
         <div className="checkout-envs">
           {columns.map(({ env, cell }) => (
             <EnvColumn
               key={env}
               env={env}
               cell={cell}
-              entry={entries[env]}
+              entry={canDeploy ? entries[env] : { kind: "hidden" }}
               live={live[`${row.repoRoot}\n${env}`]}
-              approved={cell.approved && !row.needsApproval}
+              approved={cell.approved && !row.needsApproval && !unreadable}
               onDeploy={(entry) => onDeploy(env, entry)}
               buttonRef={(button) => {
                 buttons.current[env] = button;

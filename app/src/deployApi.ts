@@ -28,7 +28,7 @@ export interface DeployBackend {
   /** The env's settings, each with the value approved before. */
   reviewTrust(generation: number, row: number, env: string): Promise<TrustReview>;
   /** Opens the checkout's `.shipslip.toml` in the user's editor. */
-  openConfig(generation: number, row: number, env: string): Promise<void>;
+  openConfig(generation: number, row: number, env: string | null): Promise<void>;
   /** Shows the checkout's folder in Finder. */
   openFolder(generation: number, row: number): Promise<void>;
   /** Approves exactly the reviewed settings; the env name must be typed. */
