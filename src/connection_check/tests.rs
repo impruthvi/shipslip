@@ -484,6 +484,8 @@ fn snapshot(root: &Path) -> BTreeMap<PathBuf, (Vec<u8>, u32, std::time::SystemTi
     files
 }
 
+/// Covers Shipslip's commands only: the fake `php` doesn't boot Laravel,
+/// which may refresh its own cache files (ADR 0005).
 #[tokio::test]
 async fn no_probe_writes_anything_on_the_server() {
     let fx = Fixture::new();

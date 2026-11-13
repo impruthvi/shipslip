@@ -146,7 +146,8 @@ export function ConnectionCheck({
           ) : (
             " with the environment's ssh alias"
           )}{" "}
-          and looks; nothing on the server changes.
+          and looks. Shipslip's commands only read; starting <code className="mono">php artisan</code> can let Laravel refresh its own cache
+          files.
         </p>
         <button
           type="button"
