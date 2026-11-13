@@ -25,6 +25,8 @@ pub enum FolderView {
     /// questions.
     NewConfig {
         checkout: String,
+        /// The project name the config would write, the new alias's default.
+        project: String,
         /// The branch checked out now, the branch question's default.
         branch: Option<String>,
     },
@@ -63,6 +65,7 @@ pub fn inspect(folder: &Path, trust_path: &Path, git: Option<&Git>) -> FolderVie
         },
         Folder::NewConfig(plan) => FolderView::NewConfig {
             checkout: field(plan.repo_root()),
+            project: escape_field(plan.project_name()),
             branch: git
                 .and_then(|git| git.current_branch(plan.repo_root()).ok())
                 .filter(|branch| InitField::Branch.check(branch).is_ok()),
@@ -346,6 +349,7 @@ mod tests {
         let json = serde_json::to_value(inspect(&shop, &fx.trust(), None)).unwrap();
         assert_eq!(json["kind"], "newConfig");
         assert_eq!(json["checkout"], shop.to_string_lossy().as_ref());
+        assert_eq!(json["project"], "shop");
         assert_eq!(add(&shop, &fx.trust(), 1).unwrap(), shop.to_string_lossy());
         assert!(!shop.join(".shipslip.toml").exists());
     }

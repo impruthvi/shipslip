@@ -584,7 +584,7 @@ export type FolderView =
   | { kind: "notGit"; folder: string }
   /** No `.shipslip.toml`: the sheet asks the `slip init` questions. `branch`
    * is the one checked out now. */
-  | { kind: "newConfig"; checkout: string; branch: string | null }
+  | { kind: "newConfig"; checkout: string; project: string; branch: string | null }
   /** `message` is the config error, one entry per line. */
   | { kind: "unreadable"; checkout: string; message: string[] }
   | { kind: "config"; checkout: string; project: string; envs: FolderEnv[] };
@@ -614,4 +614,47 @@ export interface ConfigAdded {
   checkout: string;
   /** Written, but approving failed: the checkout reads "Needs approval". */
   approvalError: string | null;
+}
+
+/** The `Host` aliases in `~/.ssh/config` (`ssh_aliases`). `user` and
+ * `hostName` are what `ssh -G` resolves each to, null when it could not say. */
+export interface SshAliases {
+  aliases: { alias: string; user: string | null; hostName: string | null }[];
+  /** `~/.ssh/id_*` private keys, as `~/.ssh/<name>`. */
+  identityFiles: string[];
+  /** `~/.ssh/config` could not be read. */
+  error: string | null;
+}
+
+/** "None of these fit": the fields for a new `Host` block, as typed. An
+ * empty `user` or `identityFile` is left out; an empty `port` is 22. */
+export interface HostDraft {
+  alias: string;
+  hostName: string;
+  user: string;
+  identityFile: string;
+  port: string;
+}
+
+export type HostField = "alias" | "hostName" | "user" | "identityFile" | "port";
+
+export interface HostProblem {
+  field: HostField;
+  message: string;
+}
+
+/** The `Host` block the fields make (`ssh_host_block`), one entry per line. */
+export type HostBlock = { kind: "block"; lines: string[] } | { kind: "invalid"; problems: HostProblem[] };
+
+/** Check again (`check_ssh_alias`): what `ssh -G <alias>` resolves to now. */
+export type AliasCheck =
+  | { kind: "invalid"; problems: HostProblem[] }
+  | { kind: "matches"; resolved: Resolved }
+  | { kind: "differs"; resolved: Resolved }
+  | { kind: "failed"; message: string };
+
+export interface Resolved {
+  hostName: string;
+  user: string;
+  port: number;
 }

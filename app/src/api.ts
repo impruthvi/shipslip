@@ -5,15 +5,19 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import type {
+  AliasCheck,
   Answers,
   CheckoutReceipts,
   CompareResult,
   ConfigAdded,
   ConfigText,
   FolderView,
+  HostBlock,
+  HostDraft,
   LoadResult,
   QuitRun,
   ReceiptResult,
+  SshAliases,
 } from "./types";
 
 export interface Backend {
@@ -42,6 +46,13 @@ export interface Backend {
   /** Writes the config last rendered, approves it and adds the checkout.
    * Rejects with a `CommandError` when nothing was written. */
   addWithConfig(): Promise<ConfigAdded>;
+  /** The aliases in `~/.ssh/config`. Reads only; Shipslip never writes ssh files. */
+  sshAliases(): Promise<SshAliases>;
+  hostBlock(draft: HostDraft): Promise<HostBlock>;
+  /** Check again: resolves the draft's alias with `ssh -G`. */
+  checkAlias(draft: HostDraft): Promise<AliasCheck>;
+  /** Opens `~/.ssh/config` in a text editor; rejects when it does not exist. */
+  openSshConfig(): Promise<void>;
 }
 
 const tauri: Backend = {
@@ -61,6 +72,10 @@ const tauri: Backend = {
   reopenSetup: (generation, row) => invoke<FolderView>("reopen_setup", { generation, row }),
   renderConfig: (answers) => invoke<ConfigText>("render_config", { answers }),
   addWithConfig: () => invoke<ConfigAdded>("add_with_config"),
+  sshAliases: () => invoke<SshAliases>("ssh_aliases"),
+  hostBlock: (draft) => invoke<HostBlock>("ssh_host_block", { draft }),
+  checkAlias: (draft) => invoke<AliasCheck>("check_ssh_alias", { draft }),
+  openSshConfig: () => invoke<void>("open_ssh_config"),
 };
 
 let backend: Promise<Backend> | undefined;
@@ -90,6 +105,10 @@ export const api: Backend = {
   reopenSetup: async (...args) => (await getBackend()).reopenSetup(...args),
   renderConfig: async (answers) => (await getBackend()).renderConfig(answers),
   addWithConfig: async () => (await getBackend()).addWithConfig(),
+  sshAliases: async () => (await getBackend()).sshAliases(),
+  hostBlock: async (draft) => (await getBackend()).hostBlock(draft),
+  checkAlias: async (draft) => (await getBackend()).checkAlias(draft),
+  openSshConfig: async () => (await getBackend()).openSshConfig(),
 };
 
 /** Quitting while a run is live. Separate from `Backend` so screens need not mock it. */

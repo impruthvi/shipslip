@@ -18,6 +18,7 @@ mod receipt_changes;
 mod receipt_view;
 mod receipt_words;
 mod recovery;
+mod ssh_alias;
 mod state;
 mod terminate;
 #[cfg(test)]
@@ -90,6 +91,10 @@ fn main() {
             commands::reopen_setup,
             commands::render_config,
             commands::add_with_config,
+            commands::ssh_aliases,
+            commands::ssh_host_block,
+            commands::check_ssh_alias,
+            commands::open_ssh_config,
             commands::deploy_entry,
             commands::open_config,
             commands::prepare_deploy,
@@ -212,6 +217,7 @@ mod tests {
                 "allow-approve-trust",
                 "allow-cancel-deploy",
                 "allow-cancel-pending",
+                "allow-check-ssh-alias",
                 "allow-compare",
                 "allow-confirm-deploy",
                 "allow-current-runs",
@@ -221,6 +227,7 @@ mod tests {
                 "allow-load-map",
                 "allow-load-receipt",
                 "allow-open-config",
+                "allow-open-ssh-config",
                 "allow-pick-folder",
                 "allow-prepare-deploy",
                 "allow-quit-now",
@@ -232,6 +239,8 @@ mod tests {
                 "allow-review-attach",
                 "allow-review-trust",
                 "allow-review-up",
+                "allow-ssh-aliases",
+                "allow-ssh-host-block",
                 "allow-stop-run",
                 "allow-subscribe-run",
                 "allow-unsubscribe-run",

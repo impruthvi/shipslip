@@ -51,6 +51,19 @@ export const backend: Backend = {
   renderConfig: (answers) =>
     later(answers.env.trim() === "" ? fixtures.configTexts.invalid : fixtures.configTexts.rendered),
   addWithConfig: () => later({ checkout: "/Users/you/code/api", approvalError: null }),
+  sshAliases: () => later(fixtures.sshAliases),
+  hostBlock: (draft) =>
+    later(
+      draft.hostName.trim() === ""
+        ? fixtures.hostBlocks.invalid
+        : {
+            kind: "block",
+            lines: [`Host ${draft.alias}`, `  HostName ${draft.hostName}`, ...(draft.user ? [`  User ${draft.user}`] : [])],
+          },
+    ),
+  // `?alias=matches|differs|failed` picks what Check again finds.
+  checkAlias: () => later(fixtures.aliasChecks[params.get("alias") ?? "differs"] ?? fixtures.aliasChecks.differs),
+  openSshConfig: async () => {},
 };
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));

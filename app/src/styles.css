@@ -2535,6 +2535,65 @@ p.sheet-refusal {
   overflow-wrap: anywhere;
 }
 
+/* The ssh alias step: aliases from ~/.ssh/config as ruled radio rows. */
+.sheet-choices {
+  display: flex;
+  flex-direction: column;
+  max-width: 560px;
+  overflow: hidden;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-md);
+}
+
+.sheet-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--space-8);
+  align-items: center;
+  padding: var(--space-8) var(--space-12);
+  border-top: 1px solid var(--color-rule);
+  background: var(--color-surface-raised);
+  cursor: pointer;
+}
+
+.sheet-choice:first-child {
+  border-top: 0;
+}
+
+.sheet-choice:has(input:checked) {
+  background: var(--color-selection);
+}
+
+.sheet-choice-end {
+  font-size: var(--text-12);
+  overflow-wrap: anywhere;
+}
+
+/* "None of these fit": the fields beside the Host block they make. */
+.sheet-host {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-24);
+  align-items: start;
+}
+
+.sheet-host-block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  min-width: 0;
+}
+
+.sheet-host-block p {
+  margin: 0;
+}
+
+.sheet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-8);
+}
+
 .sheet-footer {
   display: flex;
   align-items: center;

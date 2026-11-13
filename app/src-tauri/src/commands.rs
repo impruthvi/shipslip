@@ -20,11 +20,13 @@ use crate::deploy_session::{
 use crate::finish::{self, Unseen};
 use crate::git_path;
 use crate::receipt_changes::{self, ReceiptStamp};
+use crate::ssh_alias::{self, AliasCheck, HostBlock, SshAliases};
 use crate::state::SelectionError;
 use crate::state::{
     with_git, AppState, CheckoutReceipts, CompareResult, LoadResult, ReceiptResult,
 };
 use shipslip::config::{InitAnswers, InitPlan};
+use shipslip::ssh_aliases::HostDraft;
 
 fn selection_error(error: SelectionError) -> CommandError {
     match error {
@@ -367,6 +369,78 @@ pub async fn add_with_config(app: tauri::State<'_, Arc<App>>) -> Result<ConfigAd
         .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
 }
 
+/// The aliases in `~/.ssh/config` with what each resolves to, and the
+/// `~/.ssh/id_*` keys. Reads only.
+#[tauri::command]
+pub async fn ssh_aliases() -> Result<SshAliases, CommandError> {
+    spawn_blocking(|| {
+        let dir = shipslip::ssh_aliases::ssh_dir()
+            .ok_or_else(|| CommandError::new(ErrorCode::Local, "HOME is not set."))?;
+        Ok(ssh_alias::aliases(&dir.join("config"), &dir, |alias| {
+            shipslip::ssh_aliases::resolve(alias, None)
+        }))
+    })
+    .await
+    .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
+}
+
+/// The `Host` block the "None of these fit" fields make.
+#[tauri::command]
+pub fn ssh_host_block(draft: HostDraft) -> HostBlock {
+    ssh_alias::host_block(&draft)
+}
+
+/// Check again: resolves the draft's alias with `ssh -G`.
+#[tauri::command]
+pub async fn check_ssh_alias(draft: HostDraft) -> Result<AliasCheck, CommandError> {
+    spawn_blocking(move || {
+        let listed = shipslip::ssh_aliases::user_config()
+            .and_then(|config| shipslip::ssh_aliases::list(&config).ok())
+            .unwrap_or_default();
+        ssh_alias::check(&draft, &listed, |alias| {
+            shipslip::ssh_aliases::resolve(alias, None)
+        })
+    })
+    .await
+    .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))
+}
+
+/// Opens `~/.ssh/config` in the default text editor for the user to paste
+/// the block. Shipslip never creates or writes it.
+#[tauri::command]
+pub async fn open_ssh_config() -> Result<(), CommandError> {
+    spawn_blocking(|| {
+        let config = shipslip::ssh_aliases::user_config()
+            .ok_or_else(|| CommandError::new(ErrorCode::Local, "HOME is not set."))?;
+        open_ssh_config_with(&config, |path| {
+            std::process::Command::new("/usr/bin/open")
+                .arg("-t")
+                .arg(path)
+                .status()
+                .is_ok_and(|status| status.success())
+        })
+    })
+    .await
+    .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
+}
+
+fn open_ssh_config_with(config: &Path, open: impl Fn(&Path) -> bool) -> Result<(), CommandError> {
+    if !config.is_file() {
+        return Err(CommandError::new(
+            ErrorCode::NotFound,
+            "~/.ssh/config does not exist yet. Create it in a text editor, paste the block, save, then check again.",
+        ));
+    }
+    if open(config) {
+        Ok(())
+    } else {
+        Err(CommandError::new(
+            ErrorCode::Local,
+            "Couldn't open ~/.ssh/config in a text editor.",
+        ))
+    }
+}
+
 /// Shows the checkout's folder in Finder.
 #[tauri::command]
 pub async fn open_folder(
@@ -569,6 +643,21 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn open_ssh_config_opens_the_file_and_never_creates_it() {
+        let fx = Fixture::new();
+        let config = fx.dir().join("config");
+        let error = open_ssh_config_with(&config, |_| panic!("nothing to open")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::NotFound);
+        assert!(!config.exists());
+
+        std::fs::write(&config, "Host web1\n").unwrap();
+        assert!(open_ssh_config_with(&config, |path| path == config).is_ok());
+        let error = open_ssh_config_with(&config, |_| false).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Local);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "Host web1\n");
     }
 
     #[test]
