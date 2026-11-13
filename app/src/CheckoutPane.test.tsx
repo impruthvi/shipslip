@@ -295,7 +295,7 @@ test("Check connection from the checkout menu runs the read-only check for the e
   fireEvent.click(within(dialog).getByRole("button", { name: "Check connection" }));
   await settle();
   expect(checkConnection).toHaveBeenCalledWith(1, 0, "staging", expect.any(Function));
-  expect(within(dialog).getByRole("alert")).toHaveTextContent("Host key changed. Shipslip stops here.");
+  expect(within(dialog).getByRole("alert")).toHaveTextContent("Host key changed for staging. Shipslip stops here.");
   expect(within(dialog).getByRole("list", { name: "Connection check" })).toBeInTheDocument();
   expect(within(dialog).getByRole("button", { name: "Check again" })).toBeEnabled();
 

@@ -931,10 +931,10 @@ test("a host key ssh refused without saying why is a boxed stop that never says 
   await runCheck();
   const stop = within(sheet()).getByRole("alert");
   expect(
-    within(stop).getByRole("heading", { name: "Shipslip can't verify this server's host key" }),
+    within(stop).getByRole("heading", { name: "Shipslip can't verify the host key for production" }),
   ).toBeInTheDocument();
   expect(stop).toHaveTextContent(
-    "ssh refused the host key and did not say why, often because LogLevel in ~/.ssh/config is QUIET or FATAL. Find out why before going on.",
+    "ssh refused the host key for api-staging and did not say why, often because LogLevel in ~/.ssh/config is QUIET or FATAL. Find out why before going on.",
   );
   expect(stop).not.toHaveTextContent(/changed/i);
   expect(reason("ssh connects")).toHaveTextContent("Can't verify the host key");
@@ -948,7 +948,7 @@ test("a changed host key is a boxed stop above the list with no command, and Con
   await toCheck();
   await runCheck();
   const stop = within(sheet()).getByRole("alert");
-  expect(within(stop).getByRole("heading", { name: "Host key changed. Shipslip stops here." })).toBeInTheDocument();
+  expect(within(stop).getByRole("heading", { name: "Host key changed for production. Shipslip stops here." })).toBeInTheDocument();
   expect(stop).toHaveTextContent(
     "The host key for api-staging is not the one ~/.ssh/known_hosts records. Find out why the key changed before going on.",
   );
@@ -1090,12 +1090,59 @@ test("a new config approved without a check says the check was not run", async (
   expect(checkResult()).toHaveTextContent("Not run. Shipslip did not check the connection for staging.");
 });
 
-test("a changed host key on another environment still keeps the sheet from approval", async () => {
+test("a changed host key on another environment stays on screen while it keeps the sheet from approval", async () => {
   checkConnection.mockResolvedValue(fixtures.connectionChecks.changedKey);
   await toCheck();
   await runCheck();
   fireEvent.change(within(sheet()).getByRole("combobox", { name: "Environment" }), { target: { value: "staging" } });
+  const stop = within(sheet()).getByRole("alert");
+  expect(
+    within(stop).getByRole("heading", { name: "Host key changed for production. Shipslip stops here." }),
+  ).toBeInTheDocument();
+  expect(stop).toHaveTextContent("The host key for api-staging is not the one ~/.ssh/known_hosts records.");
+  expect(within(sheet()).queryByRole("list", { name: "Connection check" })).toBeNull();
   expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeDisabled();
+});
+
+test("a host key stop on each of two environments shows a box for each", async () => {
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.changedKey);
+  await toCheck();
+  await runCheck();
+  fireEvent.change(within(sheet()).getByRole("combobox", { name: "Environment" }), { target: { value: "staging" } });
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.unverifiedKey);
+  await runCheck();
+  const stops = within(sheet()).getAllByRole("alert");
+  expect(stops.map((stop) => within(stop).getByRole("heading").textContent)).toEqual([
+    "Host key changed for production. Shipslip stops here.",
+    "Shipslip can't verify the host key for staging",
+  ]);
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeDisabled();
+});
+
+test("a host key stop shows while its check is still running, and Continue stays off", async () => {
+  checkConnection.mockImplementation((_generation, _row, _env, onLines) => {
+    onLines({ ...fixtures.connectionChecks.changedKey, finished: false });
+    return new Promise<CheckView>(() => {});
+  });
+  await toCheck();
+  await runCheck();
+  expect(
+    within(within(sheet()).getByRole("alert")).getByRole("heading", {
+      name: "Host key changed for production. Shipslip stops here.",
+    }),
+  ).toBeInTheDocument();
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeDisabled();
+});
+
+test("a host key stop on one environment that passes when checked again is gone", async () => {
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.changedKey);
+  await toCheck();
+  await runCheck();
+  checkConnection.mockResolvedValue(fixtures.connectionChecks.pass);
+  fireEvent.click(within(sheet()).getByRole("button", { name: "Check again" }));
+  await settle();
+  expect(within(sheet()).queryByRole("alert")).toBeNull();
+  expect(within(sheet()).getByRole("button", { name: "Continue" })).toBeEnabled();
 });
 
 test("a check started again forgets the result before it, and one that fails reads did not finish", async () => {
