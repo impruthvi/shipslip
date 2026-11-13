@@ -3,7 +3,7 @@ import { api } from "./api";
 import { deploy } from "./deployApi";
 import { StepIcon } from "./Mark";
 import { errorMessage } from "./text";
-import { ConnectionCheck, EnvPicker, useConnectionCheck } from "./ConnectionCheck";
+import { CheckSummary, ConnectionCheck, EnvPicker, useConnectionCheck } from "./ConnectionCheck";
 import { chosenAlias, freshChoice, SshAliasStep, type SshChoice } from "./SshAliasStep";
 import { TrustSettings } from "./TrustReview";
 import { TypedConfirm } from "./TypedConfirm";
@@ -360,7 +360,7 @@ export function AddProject({
           setPending(unapproved);
           setApproval(null);
           setCheckEnv(unapproved[0] ?? folder.envs[0]?.name ?? null);
-          check.reset();
+          check.forgetAll();
           setStep("check");
         } else {
           setStep("environment");
@@ -436,7 +436,7 @@ export function AddProject({
         }
         setConfig({ lines: text.lines, warnings: text.warnings });
         setWarningsRead(false);
-        check.reset();
+        check.forgetAll();
         setStep("check");
       })
       .catch((error: unknown) => alive.current && setAddError(message(error)))
@@ -462,6 +462,7 @@ export function AddProject({
       .finally(() => alive.current && setWriting(false));
   };
 
+  const newConfig = folder?.kind === "newConfig";
   const row = checkout && loaded ? loaded.map.rows.findIndex((r) => r.repoRoot === checkout) : -1;
   const env = pending[0] ?? null;
   // Each step, and each environment approved in turn, focuses its heading.
@@ -472,6 +473,8 @@ export function AddProject({
   const checkOnMap = row >= 0 && loaded !== null && checkEnv !== null && loaded.map.envs.includes(checkEnv);
   const checkAlias =
     folder?.kind === "config" ? folder.envs.find((e) => e.name === checkEnv)?.sshAlias : undefined;
+  const newEnv = answers.env.trim();
+  const checkedEnv = newConfig ? newEnv : checkEnv;
 
   // The review asks once per environment; a newer map read keeps it open.
   const latest = useRef({ loaded, row });
@@ -516,7 +519,6 @@ export function AddProject({
   const steps = stepsFor(folder);
   const done = (s: Step) => steps.indexOf(s) < steps.indexOf(step);
   const path = folder && folder.kind !== "cancelled" ? ("checkout" in folder ? folder.checkout : folder.folder) : null;
-  const newConfig = folder?.kind === "newConfig";
   const busy = picking || adding || rendering || writing || (approval?.kind === "review" && approval.busy);
   // Once the file is written, the answers can't change it.
   const locked = busy || unapproved !== null;
@@ -636,6 +638,7 @@ export function AddProject({
                   </p>
                 )}
                 <ConnectionCheck
+                  env={checkedEnv ?? ""}
                   alias={newConfig ? answers.sshAlias : (checkAlias ?? null)}
                   check={check}
                   start={
@@ -650,7 +653,7 @@ export function AddProject({
             ) : newConfig ? (
               <>
                 <h3 className="sheet-heading" ref={heading} tabIndex={-1}>
-                  Approve {answers.env.trim()}
+                  Approve {newEnv}
                 </h3>
                 <p className="muted">
                   Shipslip writes this .shipslip.toml to the checkout, then approves it. Deploys use these settings
@@ -665,9 +668,12 @@ export function AddProject({
                   />
                 )}
                 {config && (
-                  <pre className="sheet-config mono" aria-label=".shipslip.toml">
-                    {config.lines.join("\n")}
-                  </pre>
+                  <div className="sheet-approval">
+                    <pre className="sheet-config mono" aria-label=".shipslip.toml">
+                      {config.lines.join("\n")}
+                    </pre>
+                    <CheckSummary env={newEnv} check={check} />
+                  </div>
                 )}
                 {unapproved !== null && (
                   <div className="sheet-refusal" role="alert">
@@ -706,13 +712,16 @@ export function AddProject({
                   </p>
                 )}
                 {approval?.kind === "review" && (
-                  <TrustSettings
-                    review={approval.review}
-                    headingId="sheet-settings"
-                    onEdit={() =>
-                      loaded && row >= 0 && env ? deploy.openConfig(loaded.generation, row, env) : Promise.resolve()
-                    }
-                  />
+                  <div className="sheet-approval">
+                    <TrustSettings
+                      review={approval.review}
+                      headingId="sheet-settings"
+                      onEdit={() =>
+                        loaded && row >= 0 && env ? deploy.openConfig(loaded.generation, row, env) : Promise.resolve()
+                      }
+                    />
+                    <CheckSummary env={approval.review.env} check={check} />
+                  </div>
                 )}
                 {approval?.kind === "review" && approval.error && (
                   <p className="sheet-refusal" role="alert">
@@ -766,7 +775,7 @@ export function AddProject({
                 <button
                   type="button"
                   className="button button-primary"
-                  disabled={busy || check.running || check.view?.hostKeyChanged === true}
+                  disabled={busy || check.running || check.hostKeyChanged}
                   onClick={() => setStep("approval")}
                 >
                   Continue
@@ -782,7 +791,7 @@ export function AddProject({
                 </button>
               ) : newConfig ? (
                 <TypedConfirm
-                  expected={answers.env.trim()}
+                  expected={newEnv}
                   verb="approve"
                   action={writing ? "Approving…" : "Approve and add"}
                   busy={busy}
