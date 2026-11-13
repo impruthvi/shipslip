@@ -75,6 +75,8 @@ pub struct RowView {
     pub needs_approval: bool,
     /// Added in the app, and its folder has no `.shipslip.toml` yet.
     pub setup_not_finished: bool,
+    /// This Mac recorded nothing for it, so it can leave the sidebar.
+    pub removable: bool,
     /// One per column in [`MapView::envs`].
     pub cells: Vec<CellView>,
 }
@@ -294,13 +296,16 @@ pub fn compare_view(a: &str, b: &str, comparison: &EnvComparison) -> CompareView
     }
 }
 
-/// Checkouts, as the overview spells them, that can't deploy yet.
+/// Checkouts, as the overview spells them, that can't deploy yet or have
+/// nothing recorded.
 #[derive(Debug, Default)]
 pub struct CheckoutSetup {
     /// An environment in `.shipslip.toml` has no current approval.
     pub needs_approval: BTreeSet<String>,
     /// Listed with no environments and no `.shipslip.toml`.
     pub not_finished: BTreeSet<String>,
+    /// No receipt or approval names it; only the projects list does.
+    pub nothing_recorded: BTreeSet<String>,
 }
 
 pub fn map(
@@ -367,6 +372,7 @@ fn row_view(
         path_missing: row.path_missing,
         needs_approval: setup.needs_approval.contains(row.repo_root.raw()),
         setup_not_finished: setup.not_finished.contains(row.repo_root.raw()),
+        removable: setup.nothing_recorded.contains(row.repo_root.raw()),
         cells: columns
             .iter()
             .map(

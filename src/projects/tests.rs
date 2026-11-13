@@ -349,3 +349,137 @@ fn inspect_says_when_the_config_is_invalid() {
         Folder::Unreadable { checkout, .. } if checkout == shop
     ));
 }
+
+impl Fixture {
+    fn receipts(&self) -> PathBuf {
+        self.0.join("support/receipts")
+    }
+
+    /// A finished receipt of `checkout`'s staging environment.
+    fn save_receipt(&self, checkout: &Path) {
+        let dir = self.receipts().join("shop/staging");
+        fs::create_dir_all(&dir).unwrap();
+        let receipt = serde_json::json!({
+            "status": "Final",
+            "repo_root": checkout.to_string_lossy(),
+            "project": "shop",
+        });
+        fs::write(
+            dir.join("1000-00000001-0.json"),
+            serde_json::to_vec(&receipt).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn remove_drops_a_checkout_with_nothing_recorded_and_leaves_its_folder() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let blog = fx.checkout("blog");
+    fs::write(shop.join(".shipslip.toml"), CONFIG).unwrap();
+    add(&fx.list_path(), &shop, 1).unwrap();
+    add(&fx.list_path(), &blog, 2).unwrap();
+
+    remove(&fx.trust_path(), &fx.receipts(), &shop).unwrap();
+
+    let listed: Vec<PathBuf> = list(&fx.list_path())
+        .unwrap()
+        .into_iter()
+        .map(|checkout| checkout.path)
+        .collect();
+    assert_eq!(listed, [blog]);
+    assert_eq!(
+        fs::read_to_string(shop.join(".shipslip.toml")).unwrap(),
+        CONFIG
+    );
+    assert!(shop.join(".git").is_dir());
+}
+
+#[test]
+fn remove_refuses_a_checkout_with_an_approval() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let plan = fx.plan(&shop);
+    add_with_config(&fx.trust_path(), &plan, &answers("staging"), 1).unwrap();
+    let before = fs::read(fx.list_path()).unwrap();
+
+    let error = remove(&fx.trust_path(), &fx.receipts(), &shop).unwrap_err();
+
+    assert!(
+        matches!(error, RemoveError::Recorded(ref path) if *path == shop),
+        "{error:?}"
+    );
+    assert_eq!(fs::read(fx.list_path()).unwrap(), before);
+}
+
+#[test]
+fn remove_refuses_a_checkout_with_a_receipt() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    add(&fx.list_path(), &shop, 1).unwrap();
+    fx.save_receipt(&shop);
+    let before = fs::read(fx.list_path()).unwrap();
+
+    let error = remove(&fx.trust_path(), &fx.receipts(), &shop).unwrap_err();
+
+    assert!(matches!(error, RemoveError::Recorded(_)), "{error:?}");
+    assert_eq!(fs::read(fx.list_path()).unwrap(), before);
+}
+
+#[test]
+fn remove_refuses_when_the_approvals_cannot_be_read() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    add(&fx.list_path(), &shop, 1).unwrap();
+    fs::write(fx.trust_path(), b"{ not json").unwrap();
+    let before = fs::read(fx.list_path()).unwrap();
+
+    let error = remove(&fx.trust_path(), &fx.receipts(), &shop).unwrap_err();
+
+    assert!(matches!(error, RemoveError::Unreadable { .. }), "{error:?}");
+    assert_eq!(fs::read(fx.list_path()).unwrap(), before);
+}
+
+#[test]
+fn remove_refuses_when_the_receipts_cannot_be_read() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    add(&fx.list_path(), &shop, 1).unwrap();
+    fs::write(fx.receipts(), b"not a folder").unwrap();
+    let before = fs::read(fx.list_path()).unwrap();
+
+    let error = remove(&fx.trust_path(), &fx.receipts(), &shop).unwrap_err();
+
+    assert!(matches!(error, RemoveError::Unreadable { .. }), "{error:?}");
+    assert_eq!(fs::read(fx.list_path()).unwrap(), before);
+}
+
+#[test]
+fn removing_a_checkout_not_listed_changes_nothing() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    let blog = fx.checkout("blog");
+    add(&fx.list_path(), &blog, 2).unwrap();
+    let before = fs::read(fx.list_path()).unwrap();
+
+    remove(&fx.trust_path(), &fx.receipts(), &shop).unwrap();
+
+    assert_eq!(fs::read(fx.list_path()).unwrap(), before);
+}
+
+#[test]
+fn remove_refuses_when_a_receipt_cannot_be_read() {
+    let fx = Fixture::new();
+    let shop = fx.checkout("shop");
+    add(&fx.list_path(), &shop, 1).unwrap();
+    let dir = fx.receipts().join("shop/staging");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("1000-00000001-0.json"), b"{ cut short").unwrap();
+    let before = fs::read(fx.list_path()).unwrap();
+
+    let error = remove(&fx.trust_path(), &fx.receipts(), &shop).unwrap_err();
+
+    assert!(matches!(error, RemoveError::Unreadable { .. }), "{error:?}");
+    assert_eq!(fs::read(fx.list_path()).unwrap(), before);
+}

@@ -283,6 +283,7 @@ struct Fixtures {
     wide_map: LoadResult,
     approval_map: LoadResult,
     added_map: LoadResult,
+    removable_map: LoadResult,
     folders: BTreeMap<&'static str, crate::add_project::FolderView>,
     setup_map: LoadResult,
     config_texts: BTreeMap<&'static str, crate::add_project::ConfigText>,
@@ -525,6 +526,20 @@ fn build() -> (Fixtures, Vec<String>) {
             ))
         },
     );
+    // shop: added in the app with its config, nothing approved or deployed.
+    let removable_fx = Fixture::new();
+    let shop = removable_fx.checkout("shop", &config("shop"));
+    let removable_trust = removable_fx.trust();
+    crate::add_project::add(&shop, &removable_trust, NOW).unwrap();
+    let removable_map = AppState::default().load_map(
+        || NOW,
+        || {
+            Ok(crate::state::with_checkout_configs(
+                overview(&removable_fx.receipts(), &removable_trust)?,
+                &removable_trust,
+            ))
+        },
+    );
     let loose = added_fx.dir().join("Downloads");
     fs::create_dir_all(&loose).unwrap();
     let bare = added_fx.checkout("api", "");
@@ -597,7 +612,10 @@ fn build() -> (Fixtures, Vec<String>) {
     let approval_home = fs::canonicalize(approval_fx.dir()).unwrap();
     let added_home = fs::canonicalize(added_fx.dir()).unwrap();
     let setup_home = fs::canonicalize(setup_fx.dir()).unwrap();
+    let removable_home = fs::canonicalize(removable_fx.dir()).unwrap();
     let homes = [
+        removable_home.as_path(),
+        removable_fx.dir(),
         approval_home.as_path(),
         approval_fx.dir(),
         added_home.as_path(),
@@ -620,6 +638,7 @@ fn build() -> (Fixtures, Vec<String>) {
             wide_map,
             approval_map,
             added_map,
+            removable_map,
             folders,
             setup_map,
             config_texts,
@@ -827,6 +846,12 @@ fn render(fixtures: &Fixtures, homes: &[String]) -> String {
         &fixtures.approval_map,
     );
     item(&mut out, "addedMap", "LoadResult", &fixtures.added_map);
+    item(
+        &mut out,
+        "removableMap",
+        "LoadResult",
+        &fixtures.removable_map,
+    );
     item(
         &mut out,
         "folders",

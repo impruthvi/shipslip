@@ -428,7 +428,10 @@ impl From<Overview> for MapRead {
 /// adds nothing and is not judged; the environment's entry explains why when
 /// there is a cell.
 pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRead {
-    let mut setup = view::CheckoutSetup::default();
+    let mut setup = view::CheckoutSetup {
+        nothing_recorded: shipslip::projects::nothing_recorded(&overview),
+        ..Default::default()
+    };
     for repo in overview.repos.iter_mut().filter(|repo| !repo.path_missing) {
         // Only the projects list names a checkout with no environments.
         let root = Path::new(repo.repo_root.raw());
@@ -661,6 +664,44 @@ mod tests {
 
         fs::write(root.join(".shipslip.toml"), TWO_ENVS).unwrap();
         assert_eq!(row(&fx), (true, false));
+    }
+
+    fn removable(fx: &Fixture) -> bool {
+        let read = || {
+            Ok(with_checkout_configs(
+                overview(&fx.receipts(), &fx.trust())?,
+                &fx.trust(),
+            ))
+        };
+        match AppState::default().load_map(|| NOW, read) {
+            LoadResult::Loaded(loaded) => loaded.map.rows[0].removable,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_a_checkout_with_nothing_recorded_is_removable() {
+        let fx = Fixture::new();
+        let root = fx.checkout("shop", TWO_ENVS);
+        crate::add_project::add(&root, &fx.trust(), NOW).unwrap();
+        assert!(removable(&fx), "config cells are not recorded");
+
+        fx.approve_config(&root, "staging");
+        assert!(!removable(&fx));
+
+        fs::write(fx.trust(), "not json").unwrap();
+        assert!(!removable(&fx), "unreadable approvals may name it");
+        fs::remove_file(fx.trust()).unwrap();
+        let unreadable = fx.save(&run(2, "staging"));
+        fs::write(&unreadable, "cut short").unwrap();
+        assert!(!removable(&fx), "an unreadable receipt may name it");
+        fs::remove_file(&unreadable).unwrap();
+        assert!(removable(&fx));
+
+        let mut receipt = run(1, "production");
+        receipt["repo_root"] = json!(root.to_string_lossy());
+        fx.save(&receipt);
+        assert!(!removable(&fx));
     }
 
     #[test]

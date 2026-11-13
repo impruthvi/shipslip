@@ -27,6 +27,7 @@ use crate::state::{
     with_git, AppState, CheckoutReceipts, CompareResult, LoadResult, ReceiptResult,
 };
 use shipslip::config::{InitAnswers, InitPlan};
+use shipslip::projects::{self, RemoveError};
 use shipslip::ssh_aliases::HostDraft;
 
 fn selection_error(error: SelectionError) -> CommandError {
@@ -209,6 +210,29 @@ impl App {
         self.inspect_picked(Some(checkout))
     }
 
+    /// Drops a map row's checkout from the projects list when this Mac
+    /// recorded nothing for it. Nothing in its folder is touched.
+    fn remove_checkout(&self, generation: u64, row: usize) -> Result<(), CommandError> {
+        let (root, trust) = self
+            .paths
+            .as_ref()
+            .map_err(|reason| CommandError::new(ErrorCode::Local, reason.as_str()))?;
+        let checkout = self
+            .state
+            .resolve_checkout(generation, row)
+            .map_err(selection_error)?;
+        projects::remove(trust, root, &checkout).map_err(|error| match error {
+            RemoveError::Recorded(_) => CommandError::new(
+                ErrorCode::Local,
+                "This Mac has receipts or approvals for this checkout, so it stays in the sidebar.",
+            ),
+            other => CommandError::new(
+                ErrorCode::Local,
+                format!("Couldn't remove this checkout: {other}."),
+            ),
+        })
+    }
+
     fn picked(&self) -> Result<PathBuf, CommandError> {
         self.picked
             .lock()
@@ -355,6 +379,19 @@ pub async fn reopen_setup(
 ) -> Result<FolderView, CommandError> {
     let app = Arc::clone(&app);
     spawn_blocking(move || app.reopen_setup(generation, row))
+        .await
+        .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
+}
+
+/// Drops a checkout with nothing recorded from the sidebar.
+#[tauri::command]
+pub async fn remove_checkout(
+    app: tauri::State<'_, Arc<App>>,
+    generation: u64,
+    row: usize,
+) -> Result<(), CommandError> {
+    let app = Arc::clone(&app);
+    spawn_blocking(move || app.remove_checkout(generation, row))
         .await
         .map_err(|e| CommandError::new(ErrorCode::Local, e.to_string()))?
 }
@@ -861,6 +898,94 @@ mod tests {
     }
 
     #[test]
+    fn remove_checkout_drops_a_row_with_nothing_recorded_and_leaves_its_folder() {
+        let fx = Fixture::new();
+        let app = app(&fx, None);
+        let crm = fx.dir().join("crm");
+        std::fs::create_dir_all(crm.join(".git")).unwrap();
+        std::fs::write(crm.join("README.md"), "crm\n").unwrap();
+        let crm = std::fs::canonicalize(crm).unwrap();
+        add_project::add(&crm, &fx.trust(), 1).unwrap();
+        let LoadResult::Loaded(loaded) = app.load_map() else {
+            panic!("map");
+        };
+        assert!(loaded.map.rows[0].removable);
+        assert_eq!(
+            app.remove_checkout(loaded.generation + 1, 0)
+                .unwrap_err()
+                .code,
+            ErrorCode::Stale
+        );
+
+        app.remove_checkout(loaded.generation, 0).unwrap();
+
+        let LoadResult::Loaded(after) = app.load_map() else {
+            panic!("map");
+        };
+        assert!(after.map.rows.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(crm.join("README.md")).unwrap(),
+            "crm\n"
+        );
+    }
+
+    #[test]
+    fn remove_checkout_refuses_a_row_with_anything_recorded() {
+        let fx = Fixture::new();
+        let app = app(&fx, None);
+        let crm = fx.dir().join("crm");
+        std::fs::create_dir_all(crm.join(".git")).unwrap();
+        let crm = std::fs::canonicalize(crm).unwrap();
+        add_project::add(&crm, &fx.trust(), 1).unwrap();
+        fx.approve(&crm.to_string_lossy(), "staging");
+        let LoadResult::Loaded(loaded) = app.load_map() else {
+            panic!("map");
+        };
+        assert!(!loaded.map.rows[0].removable);
+
+        let error = app.remove_checkout(loaded.generation, 0).unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "This Mac has receipts or approvals for this checkout, so it stays in the sidebar."
+        );
+        let LoadResult::Loaded(after) = app.load_map() else {
+            panic!("map");
+        };
+        assert_eq!(after.map.rows.len(), 1);
+    }
+
+    #[test]
+    fn remove_checkout_says_why_when_what_was_recorded_cannot_be_read() {
+        let fx = Fixture::new();
+        let app = app(&fx, None);
+        let crm = fx.dir().join("crm");
+        std::fs::create_dir_all(crm.join(".git")).unwrap();
+        let crm = std::fs::canonicalize(crm).unwrap();
+        add_project::add(&crm, &fx.trust(), 1).unwrap();
+        let LoadResult::Loaded(loaded) = app.load_map() else {
+            panic!("map");
+        };
+        std::fs::write(fx.trust(), "not json").unwrap();
+
+        let error = app.remove_checkout(loaded.generation, 0).unwrap_err();
+
+        assert!(
+            error.message.starts_with(
+                "Couldn't remove this checkout: could not read what this Mac recorded"
+            ),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            projects::list(&projects::path_beside(&fx.trust()))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn add_project_needs_app_storage() {
         let app = App::new(Err("no home folder".into()), None);
         assert_eq!(
@@ -868,6 +993,10 @@ mod tests {
             "no home folder"
         );
         assert_eq!(app.add_picked().unwrap_err().message, "no home folder");
+        assert_eq!(
+            app.remove_checkout(1, 0).unwrap_err().message,
+            "no home folder"
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@
     "allow-pick-folder",
     "allow-add-checkout",
     "allow-reopen-setup",
+    "allow-remove-checkout",
     "allow-render-config",
     "allow-add-with-config",
     "allow-ssh-aliases",

@@ -3,6 +3,7 @@
 //! else; everything the app shows about a checkout is read from its folder,
 //! its approvals and its receipts.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{approve_trust, ConfigError, InitAnswers, InitPlan, LoadedConfig};
 use crate::private_file::write_atomic;
+use crate::receipt::{Overview, Problem, ProblemKind};
 
 const VERSION: u32 = 1;
 
@@ -80,6 +82,70 @@ pub fn add(path: &Path, folder: &Path, now_ms: u128) -> Result<PathBuf, Projects
         path: checkout.clone(),
         added_at_ms: now_ms,
     });
+    save(path, checkouts)?;
+    Ok(checkout)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RemoveError {
+    #[error("this Mac has receipts or approvals for `{0}`, so it stays")]
+    Recorded(PathBuf),
+    /// An unread file could name the checkout, so nothing was removed.
+    #[error("could not read what this Mac recorded for `{checkout}`: {reason}")]
+    Unreadable { checkout: PathBuf, reason: String },
+    #[error(transparent)]
+    List(#[from] ProjectsError),
+}
+
+/// The checkouts only the projects list names: no receipt or approval does.
+/// Empty while an approval, receipt or receipts folder can't be read, since
+/// that file could name any checkout.
+pub fn nothing_recorded(overview: &Overview) -> BTreeSet<String> {
+    if unread(overview).is_some() {
+        return BTreeSet::new();
+    }
+    overview
+        .repos
+        .iter()
+        .filter(|row| row.envs.is_empty())
+        .map(|row| row.repo_root.raw().to_string())
+        .collect()
+}
+
+fn unread(overview: &Overview) -> Option<&Problem> {
+    overview
+        .problems
+        .iter()
+        .find(|problem| problem.kind != ProblemKind::Projects)
+}
+
+/// Drops `checkout` from the list when this Mac recorded nothing for it (see
+/// [`nothing_recorded`]). Nothing in its folder is touched. A checkout not
+/// listed is left as it is.
+pub fn remove(trust_path: &Path, receipts_root: &Path, checkout: &Path) -> Result<(), RemoveError> {
+    let path = path_beside(trust_path);
+    let mut checkouts = list(&path)?;
+    let Some(at) = checkouts.iter().position(|listed| listed.path == checkout) else {
+        return Ok(());
+    };
+    let unreadable = |reason: String| RemoveError::Unreadable {
+        checkout: checkout.to_path_buf(),
+        reason,
+    };
+    let overview = crate::receipt::overview(receipts_root, trust_path)
+        .map_err(|error| unreadable(error.to_string()))?;
+    if let Some(problem) = unread(&overview) {
+        return Err(unreadable(problem.message.raw().to_string()));
+    }
+    if !nothing_recorded(&overview).contains(checkout.to_string_lossy().as_ref()) {
+        return Err(RemoveError::Recorded(checkout.to_path_buf()));
+    }
+    checkouts.remove(at);
+    save(&path, checkouts)?;
+    Ok(())
+}
+
+fn save(path: &Path, checkouts: Vec<Checkout>) -> Result<(), ProjectsError> {
     let parent = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).map_err(|source| ProjectsError::Io {
         path: parent.to_path_buf(),
@@ -107,8 +173,7 @@ pub fn add(path: &Path, folder: &Path, now_ms: u128) -> Result<PathBuf, Projects
     write_atomic(path, &bytes).map_err(|source| ProjectsError::Io {
         path: path.to_path_buf(),
         source,
-    })?;
-    Ok(checkout)
+    })
 }
 
 /// What a folder holds, read before it is added.
