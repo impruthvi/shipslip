@@ -7,9 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use shipslip::config::{
-    approve_trust, default_trust_path, is_branch_name, is_env_name, is_smoke_url, is_ssh_alias,
-    trust_changes, trust_status, InitAnswers, InitPlan, LoadedConfig, TrustError, TrustSnapshot,
-    TrustStatus, TrustedTarget,
+    approve_trust, default_trust_path, is_branch_name, trust_changes, trust_status, InitAnswers,
+    InitField, InitPlan, LoadedConfig, TrustError, TrustSnapshot, TrustStatus, TrustedTarget,
 };
 use shipslip::github_auth::discover_repository;
 use shipslip::interrupt::{next_stage, on_interrupt, Interrupt, Stage};
@@ -1376,31 +1375,20 @@ fn ask_init(
     branch: Option<&str>,
 ) -> io::Result<InitAnswers> {
     let env = ask_value(input, output, "Environment name", Some("staging"), |v| {
-        is_env_name(v)
-            .then_some(())
-            .ok_or("Use only letters, digits, `-` and `_`.")
+        InitField::Env.check(v)
     })?;
     let ssh_alias = ask_value(
         input,
         output,
         "SSH host alias from ~/.ssh/config",
         None,
-        |v| {
-            is_ssh_alias(v)
-                .then_some(())
-                .ok_or("Use the `Host` name from ~/.ssh/config, not user@host.")
-        },
+        |v| InitField::SshAlias.check(v),
     )?;
     let path = ask_value(input, output, "App path on the server", None, |v| {
-        Path::new(v)
-            .is_absolute()
-            .then_some(())
-            .ok_or("Use an absolute path, such as /var/www/app.")
+        InitField::Path.check(v)
     })?;
     let branch = ask_value(input, output, "Branch to deploy", branch, |v| {
-        is_branch_name(v)
-            .then_some(())
-            .ok_or("That is not a supported branch name.")
+        InitField::Branch.check(v)
     })?;
     let production = ask_yes_no(input, output, "Is this a production environment?", false)?;
     let maintenance = ask_yes_no(
@@ -1414,11 +1402,7 @@ fn ask_init(
         output,
         "Smoke check URL (Enter to skip)",
         Some(""),
-        |v| {
-            (v.is_empty() || is_smoke_url(v))
-                .then_some(())
-                .ok_or("Use an http:// or https:// URL.")
-        },
+        |v| InitField::SmokeUrl.check(v),
     )?;
     Ok(InitAnswers {
         env,

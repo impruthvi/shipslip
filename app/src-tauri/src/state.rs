@@ -2,7 +2,7 @@
 //! behind its ids, and git comparisons already made. Every answer carries
 //! the generation of the map it belongs to, so the UI can drop late ones.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -201,12 +201,9 @@ impl AppState {
         loop {
             let started = std::time::Instant::now();
             let built = read_overview().map(|read| {
-                let MapRead {
-                    overview,
-                    needs_approval,
-                } = read.into();
+                let MapRead { overview, setup } = read.into();
                 let mut locators = Locators::default();
-                let map = view::map(&overview, &needs_approval, now_ms(), &mut locators);
+                let map = view::map(&overview, &setup, now_ms(), &mut locators);
                 (overview, locators, map)
             });
             if cfg!(debug_assertions) {
@@ -408,19 +405,18 @@ impl Drop for ReleaseOnPanic<'_> {
     }
 }
 
-/// What one map load read: the overview, and the checkouts whose
-/// `.shipslip.toml` has an environment without a current approval.
+/// What one map load read: the overview, and the checkouts that can't
+/// deploy yet.
 pub struct MapRead {
     pub overview: Overview,
-    /// Checkout paths, as the overview spells them.
-    pub needs_approval: BTreeSet<String>,
+    pub setup: view::CheckoutSetup,
 }
 
 impl From<Overview> for MapRead {
     fn from(overview: Overview) -> Self {
         Self {
             overview,
-            needs_approval: BTreeSet::new(),
+            setup: view::CheckoutSetup::default(),
         }
     }
 }
@@ -428,11 +424,18 @@ impl From<Overview> for MapRead {
 /// Adds each checkout's configured environments that have no cell yet, as
 /// never deployed, so "Review deploy…" can reach them, names checkouts no
 /// receipt names after their config's project, and notes the checkouts that
-/// need approval. A config that can't be read adds nothing and is not
-/// judged; the environment's entry explains why when there is a cell.
+/// need approval or whose setup is not finished. A config that can't be read
+/// adds nothing and is not judged; the environment's entry explains why when
+/// there is a cell.
 pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRead {
-    let mut needs_approval = BTreeSet::new();
+    let mut setup = view::CheckoutSetup::default();
     for repo in overview.repos.iter_mut().filter(|repo| !repo.path_missing) {
+        // Only the projects list names a checkout with no environments.
+        let root = Path::new(repo.repo_root.raw());
+        if repo.envs.is_empty() && !root.join(".shipslip.toml").exists() {
+            setup.not_finished.insert(repo.repo_root.raw().to_string());
+            continue;
+        }
         let Ok(config) = LoadedConfig::load(Path::new(repo.repo_root.raw()), None) else {
             continue;
         };
@@ -462,7 +465,9 @@ pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRe
         repo.envs
             .sort_by(|a, b| env_order(a.env.raw(), b.env.raw()));
         if !approved(&config, trust_path) {
-            needs_approval.insert(repo.repo_root.raw().to_string());
+            setup
+                .needs_approval
+                .insert(repo.repo_root.raw().to_string());
         }
     }
     overview.repos.sort_by(|a, b| {
@@ -470,10 +475,7 @@ pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRe
             .cmp(&b.label)
             .then_with(|| a.repo_root.cmp(&b.repo_root))
     });
-    MapRead {
-        overview,
-        needs_approval,
-    }
+    MapRead { overview, setup }
 }
 
 /// Every configured environment has an approval that matches the config as it
@@ -630,6 +632,46 @@ mod tests {
         );
         let envs: Vec<_> = repo.envs.iter().map(|c| c.env.raw()).collect();
         assert_eq!(envs, ["production", "staging"]);
+    }
+
+    /// The first row's (needs approval, setup not finished).
+    fn row(fx: &Fixture) -> (bool, bool) {
+        let read = || {
+            Ok(with_checkout_configs(
+                overview(&fx.receipts(), &fx.trust())?,
+                &fx.trust(),
+            ))
+        };
+        match AppState::default().load_map(|| NOW, read) {
+            LoadResult::Loaded(loaded) => (
+                loaded.map.rows[0].needs_approval,
+                loaded.map.rows[0].setup_not_finished,
+            ),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_listed_checkout_without_a_config_reads_setup_not_finished_until_it_has_one() {
+        let fx = Fixture::new();
+        let root = fx.checkout("shop", "");
+        fs::remove_file(root.join(".shipslip.toml")).unwrap();
+        crate::add_project::add(&root, &fx.trust(), NOW).unwrap();
+        assert_eq!(row(&fx), (false, true));
+
+        fs::write(root.join(".shipslip.toml"), TWO_ENVS).unwrap();
+        assert_eq!(row(&fx), (true, false));
+    }
+
+    #[test]
+    fn a_recorded_checkout_whose_config_is_gone_is_not_setup_not_finished() {
+        let fx = Fixture::new();
+        let root = fx.checkout("shop", TWO_ENVS);
+        let mut receipt = run(1, "production");
+        receipt["repo_root"] = json!(root.to_string_lossy());
+        fx.save(&receipt);
+        fs::remove_file(root.join(".shipslip.toml")).unwrap();
+        assert_eq!(row(&fx), (false, false));
     }
 
     #[test]

@@ -154,7 +154,7 @@ impl LoadedConfig {
         Self::parse(&raw, path, repo_root)
     }
 
-    fn parse(raw: &str, path: PathBuf, repo_root: PathBuf) -> Result<Self, ConfigError> {
+    pub(crate) fn parse(raw: &str, path: PathBuf, repo_root: PathBuf) -> Result<Self, ConfigError> {
         let config: FileConfig = toml::from_str(raw).map_err(|source| ConfigError::Parse {
             path: path.clone(),
             source,
@@ -465,6 +465,44 @@ pub fn is_env_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 
+/// One `init` answer that has a rule, so the CLI and the app check it alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InitField {
+    Env,
+    SshAlias,
+    Path,
+    Branch,
+    /// Empty means no smoke check.
+    SmokeUrl,
+}
+
+impl InitField {
+    /// Why `value` can't be used, in one sentence.
+    pub fn check(self, value: &str) -> Result<(), &'static str> {
+        let (ok, why) = match self {
+            Self::Env => (is_env_name(value), "Use only letters, digits, `-` and `_`."),
+            Self::SshAlias => (
+                is_ssh_alias(value),
+                "Use the `Host` name from ~/.ssh/config, not user@host.",
+            ),
+            Self::Path => (
+                Path::new(value).is_absolute(),
+                "Use an absolute path, such as /var/www/app.",
+            ),
+            Self::Branch => (
+                is_branch_name(value),
+                "That is not a supported branch name.",
+            ),
+            Self::SmokeUrl => (
+                value.is_empty() || is_smoke_url(value),
+                "Use an http:// or https:// URL.",
+            ),
+        };
+        ok.then_some(()).ok_or(why)
+    }
+}
+
 /// Answers for a new `.shipslip.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitAnswers {
@@ -475,6 +513,22 @@ pub struct InitAnswers {
     pub production: bool,
     pub maintenance: bool,
     pub smoke_url: Option<String>,
+}
+
+impl InitAnswers {
+    /// Each answer that breaks its rule, in question order.
+    pub fn problems(&self) -> Vec<(InitField, &'static str)> {
+        [
+            (InitField::Env, self.env.as_str()),
+            (InitField::SshAlias, &self.ssh_alias),
+            (InitField::Path, &self.path),
+            (InitField::Branch, &self.branch),
+            (InitField::SmokeUrl, self.smoke_url.as_deref().unwrap_or("")),
+        ]
+        .into_iter()
+        .filter_map(|(field, value)| field.check(value).err().map(|why| (field, why)))
+        .collect()
+    }
 }
 
 /// Where `init` writes a new config: the git root, if no config is found.
@@ -520,6 +574,15 @@ impl InitPlan {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn repo_root(&self) -> &Path {
+        &self.repo_root
+    }
+
+    /// The git root's folder name, written as `[project] name`.
+    pub fn project_name(&self) -> &str {
+        &self.project_name
     }
 
     /// Frontend setup that needs review before writing a deploy recipe.
@@ -1555,6 +1618,42 @@ mod tests {
         assert!(is_env_name("staging_2-eu"));
         assert!(!is_env_name("env.staging"));
         assert!(!is_env_name(""));
+    }
+
+    #[test]
+    fn init_answers_name_each_field_that_breaks_its_rule() {
+        let mut answers = InitAnswers {
+            env: "env.staging".into(),
+            ssh_alias: "deploy@web1".into(),
+            path: "srv/shop".into(),
+            branch: "main".into(),
+            production: false,
+            maintenance: true,
+            smoke_url: Some("example.com".into()),
+        };
+        assert_eq!(
+            answers
+                .problems()
+                .iter()
+                .map(|(field, _)| *field)
+                .collect::<Vec<_>>(),
+            [
+                InitField::Env,
+                InitField::SshAlias,
+                InitField::Path,
+                InitField::SmokeUrl
+            ]
+        );
+        answers.env = "staging".into();
+        answers.ssh_alias = "web1".into();
+        answers.path = "/srv/shop".into();
+        answers.smoke_url = None;
+        assert!(answers.problems().is_empty());
+        assert!(InitField::SmokeUrl.check("").is_ok());
+        assert_eq!(
+            InitField::Env.check("a b"),
+            Err("Use only letters, digits, `-` and `_`.")
+        );
     }
 
     #[test]

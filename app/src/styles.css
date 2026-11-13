@@ -2449,6 +2449,92 @@ p.sheet-refusal {
   white-space: pre-wrap;
 }
 
+/* A new config's questions. */
+.sheet-form {
+  display: grid;
+  gap: var(--space-12);
+  max-width: 440px;
+}
+
+.sheet-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.sheet-label {
+  font-size: var(--text-12);
+  font-weight: var(--font-weight-semibold);
+}
+
+.sheet-input {
+  height: 28px;
+  padding: 0 var(--space-8);
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-raised);
+  font: inherit;
+  font-size: var(--text-13);
+  color: var(--color-text);
+}
+
+.sheet-input.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-12);
+}
+
+.sheet-input[aria-invalid="true"] {
+  border-color: var(--color-status-attention);
+}
+
+.sheet-hint {
+  font-size: var(--text-11);
+}
+
+.sheet-check {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-8);
+}
+
+/* Frontend warnings: must be read and ticked before approving. */
+.sheet-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+  padding: var(--space-12);
+  border: 1px solid var(--color-status-attention);
+  border-radius: var(--radius-md);
+  background: var(--color-status-attention-soft);
+  overflow-wrap: anywhere;
+}
+
+.sheet-warnings p {
+  margin: 0;
+}
+
+.sheet-warnings-title {
+  margin: 0;
+  font-size: var(--text-13);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-status-attention);
+}
+
+.sheet-config {
+  flex-shrink: 0;
+  max-height: 320px;
+  margin: 0;
+  padding: var(--space-12);
+  overflow: auto;
+  border: 1px solid var(--color-rule);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-alt);
+  font-size: var(--text-12);
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .sheet-footer {
   display: flex;
   align-items: center;

@@ -1,18 +1,28 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { api } from "./api";
 import { deploy } from "./deployApi";
 import { StepIcon } from "./Mark";
 import { TrustSettings } from "./TrustReview";
 import { TypedConfirm } from "./TypedConfirm";
-import type { FolderEnv, FolderView, Loaded, TrustReview } from "./types";
+import type { AnswerField, Answers, FolderEnv, FolderView, Loaded, TrustReview } from "./types";
 
-/** The check step lands with the connection check; until then an existing
- * config goes straight from folder to approval. */
-type Step = "folder" | "approval";
-const steps: { step: Step; label: string }[] = [
-  { step: "folder", label: "Folder" },
-  { step: "approval", label: "Approval" },
-];
+/** The ssh alias and check steps land with their own tickets; until then an
+ * existing config goes folder → approval, a new one folder → environment →
+ * approval. */
+type Step = "folder" | "environment" | "approval";
+const label: Record<Step, string> = { folder: "Folder", environment: "Environment", approval: "Approval" };
+const stepsFor = (folder: FolderView | null): Step[] =>
+  folder?.kind === "newConfig" ? ["folder", "environment", "approval"] : ["folder", "approval"];
+
+const freshAnswers = (branch: string | null): Answers => ({
+  env: "staging",
+  sshAlias: "",
+  path: "",
+  branch: branch ?? "",
+  production: false,
+  maintenance: true,
+  smokeUrl: "",
+});
 
 const message = (error: unknown) =>
   error && typeof error === "object" && "message" in error ? String(error.message) : String(error);
@@ -28,11 +38,11 @@ function FolderResult({ folder }: { folder: FolderView }) {
           from a git checkout, so choose the folder of the app's repository.
         </p>
       );
-    case "noConfig":
+    case "newConfig":
       return (
-        <p className="sheet-refusal" role="alert">
-          This checkout has no .shipslip.toml yet. Run <code className="mono">slip init</code> in{" "}
-          <span className="mono">{folder.checkout}</span>, then choose it again.
+        <p className="muted">
+          This checkout has no .shipslip.toml yet. Shipslip asks the <code className="mono">slip init</code>{" "}
+          questions for one environment and shows the file before writing it.
         </p>
       );
     case "unreadable":
@@ -72,6 +82,153 @@ function EnvLine({ env }: { env: FolderEnv }) {
   );
 }
 
+function Field({
+  label: text,
+  hint,
+  problem,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  problem?: string;
+  children: (props: { id: string; "aria-describedby"?: string; "aria-invalid"?: boolean }) => ReactNode;
+}) {
+  const id = useId();
+  const noteId = `${id}-note`;
+  return (
+    <div className="sheet-field">
+      <label htmlFor={id} className="sheet-label">
+        {text}
+      </label>
+      {children({
+        id,
+        "aria-describedby": problem || hint ? noteId : undefined,
+        "aria-invalid": problem ? true : undefined,
+      })}
+      {problem ? (
+        <span id={noteId} className="sheet-hint tone-attention">
+          {problem}
+        </span>
+      ) : (
+        hint && (
+          <span id={noteId} className="sheet-hint muted">
+            {hint}
+          </span>
+        )
+      )}
+    </div>
+  );
+}
+
+/** The seven `slip init` questions for one environment. */
+function AnswersForm({
+  answers,
+  problems,
+  disabled,
+  onChange,
+}: {
+  answers: Answers;
+  problems: Partial<Record<AnswerField, string>>;
+  disabled: boolean;
+  onChange: (change: Partial<Answers>) => void;
+}) {
+  const text =
+    (field: AnswerField & keyof Answers, mono: boolean, placeholder?: string) =>
+    // Called by Field as a function, so the input is not remounted per keystroke.
+    (props: { id: string }) => (
+        <input
+          {...props}
+          className={`sheet-input${mono ? " mono" : ""}`}
+          name={field}
+          value={answers[field]}
+          placeholder={placeholder}
+          onChange={(event) => onChange({ [field]: event.target.value })}
+          autoComplete="off"
+          autoCapitalize="off"
+          spellCheck={false}
+          disabled={disabled}
+        />
+    );
+  return (
+    <div className="sheet-form">
+      <Field label="Environment name" hint="Letters, digits, - and _" problem={problems.env}>
+        {text("env", false)}
+      </Field>
+      <Field label="SSH host alias" hint="The Host name from ~/.ssh/config, not user@host" problem={problems.sshAlias}>
+        {text("sshAlias", true)}
+      </Field>
+      <Field
+        label="Remote path"
+        hint="Absolute path of the app's git repository on the server"
+        problem={problems.path}
+      >
+        {text("path", true, "/var/www/app")}
+      </Field>
+      <Field label="Branch" hint="The branch deploys check out" problem={problems.branch}>
+        {text("branch", true)}
+      </Field>
+      <label className="sheet-check">
+        <input
+          type="checkbox"
+          checked={answers.production}
+          onChange={(event) => onChange({ production: event.target.checked })}
+          disabled={disabled}
+        />
+        <span>
+          Production <span className="muted">· deploys ask you to type the environment name</span>
+        </span>
+      </label>
+      <label className="sheet-check">
+        <input
+          type="checkbox"
+          checked={answers.maintenance}
+          onChange={(event) => onChange({ maintenance: event.target.checked })}
+          disabled={disabled}
+        />
+        <span>
+          Maintenance mode <span className="muted">· php artisan down before the steps, up once they succeed</span>
+        </span>
+      </label>
+      <Field
+        label="Smoke URL"
+        hint="Optional. Requested from this Mac after the steps; 2xx passes"
+        problem={problems.smokeUrl}
+      >
+        {text("smokeUrl", true, "https://example.com/health")}
+      </Field>
+    </div>
+  );
+}
+
+/** Frontend setup the recipe leaves out: read and ticked before approving. */
+function Warnings({
+  warnings,
+  read,
+  disabled,
+  onRead,
+}: {
+  warnings: string[];
+  read: boolean;
+  disabled: boolean;
+  onRead: (read: boolean) => void;
+}) {
+  const titleId = useId();
+  return (
+    <section className="sheet-warnings" aria-labelledby={titleId}>
+      <h4 id={titleId} className="sheet-warnings-title">
+        Read before approving
+      </h4>
+      {warnings.map((warning) => (
+        <p key={warning}>{warning}</p>
+      ))}
+      <label className="sheet-check">
+        <input type="checkbox" checked={read} onChange={(event) => onRead(event.target.checked)} disabled={disabled} />
+        <span>I read this. The recipe has no frontend steps until I add them.</span>
+      </label>
+    </section>
+  );
+}
+
 /** One environment's approval: today's settings review, typed. */
 type Approval =
   | { kind: "loading"; env: string }
@@ -79,18 +236,22 @@ type Approval =
   | { kind: "failed"; env: string; error: string };
 
 /**
- * The Add project sheet: pick a folder, then approve its `.shipslip.toml`.
- * The checkout is added when the approval step opens, so "Finish later" from
- * there leaves it listed as "Needs approval".
+ * The Add project sheet: pick a folder, then approve its `.shipslip.toml`,
+ * or answer the `slip init` questions and approve the config they render.
+ * The checkout is added when the folder step is left, so "Finish later" after
+ * it leaves the checkout listed as "Needs approval" or "Setup not finished".
  */
 export function AddProject({
   loaded,
+  reopen = null,
   onAdded,
   onClose,
   onDone,
 }: {
   /** The map now shown; the approval reads the new checkout's row from it. */
   loaded: Loaded | null;
+  /** A "Setup not finished" map row: opens at the environment step. */
+  reopen?: { generation: number; row: number } | null;
   /** The checkout is on the projects list: the map should be read again. */
   onAdded: () => void;
   /** Finish later. */
@@ -107,7 +268,19 @@ export function AddProject({
   /** Environments still to approve, in config order; the first is shown. */
   const [pending, setPending] = useState<string[]>([]);
   const [approval, setApproval] = useState<Approval | null>(null);
+  /** A new config: the answers, what Rust said about them, and the text. */
+  const [answers, setAnswers] = useState<Answers>(() => freshAnswers(null));
+  const [problems, setProblems] = useState<Partial<Record<AnswerField, string>>>({});
+  /** The first answer to fix takes focus once the fields are enabled again. */
+  const [focusField, setFocusField] = useState<AnswerField | null>(null);
+  const [rendering, setRendering] = useState(false);
+  const [config, setConfig] = useState<{ lines: string[]; warnings: string[] } | null>(null);
+  const [warningsRead, setWarningsRead] = useState(false);
+  const [writing, setWriting] = useState(false);
+  /** Written, but approving failed: the checkout reads "Needs approval". */
+  const [unapproved, setUnapproved] = useState<string | null>(null);
   const heading = useRef<HTMLHeadingElement>(null);
+  const form = useRef<HTMLDivElement>(null);
   const alive = useRef(true);
   useEffect(() => {
     alive.current = true;
@@ -118,22 +291,49 @@ export function AddProject({
 
 
 
+  const picked = (view: FolderView) => {
+    setFolder(view);
+    setAnswers(freshAnswers(view.kind === "newConfig" ? view.branch : null));
+    setProblems({});
+    setConfig(null);
+  };
+
   const choose = () => {
     setPicking(true);
     setAddError(null);
     api
       .pickFolder()
-      .then((picked) => {
+      .then((view) => {
         if (!alive.current) return;
         // Closing the panel keeps what was picked before.
-        if (picked.kind !== "cancelled") setFolder(picked);
+        if (view.kind !== "cancelled") picked(view);
       })
       .catch((error: unknown) => alive.current && setAddError(message(error)))
       .finally(() => alive.current && setPicking(false));
   };
 
+  // A "Setup not finished" checkout: its folder again, at the environment step.
+  const reopenRef = useRef(reopen);
+  useEffect(() => {
+    const from = reopenRef.current;
+    if (!from) return;
+    setPicking(true);
+    api
+      .reopenSetup(from.generation, from.row)
+      .then((view) => {
+        if (!alive.current) return;
+        picked(view);
+        if (view.kind === "newConfig") {
+          setCheckout(view.checkout);
+          setStep("environment");
+        }
+      })
+      .catch((error: unknown) => alive.current && setAddError(message(error)))
+      .finally(() => alive.current && setPicking(false));
+  }, []);
+
   const next = () => {
-    if (folder?.kind !== "config") return;
+    if (folder?.kind !== "config" && folder?.kind !== "newConfig") return;
     setAdding(true);
     setAddError(null);
     api
@@ -141,13 +341,71 @@ export function AddProject({
       .then((added) => {
         if (!alive.current) return;
         setCheckout(added);
-        setPending(folder.envs.filter((env) => !env.approved).map((env) => env.name));
-        setApproval(null);
-        setStep("approval");
+        if (folder.kind === "config") {
+          setPending(folder.envs.filter((env) => !env.approved).map((env) => env.name));
+          setApproval(null);
+          setStep("approval");
+        } else {
+          setStep("environment");
+        }
         onAdded();
       })
       .catch((error: unknown) => alive.current && setAddError(message(error)))
       .finally(() => alive.current && setAdding(false));
+  };
+
+  useEffect(() => {
+    if (focusField === null || rendering) return;
+    form.current?.querySelector<HTMLInputElement>(`input[name="${focusField}"]`)?.focus();
+    setFocusField(null);
+  }, [focusField, rendering]);
+
+  const change = (update: Partial<Answers>) => {
+    setAnswers((current) => ({ ...current, ...update }));
+    setProblems((current) => {
+      const rest = { ...current };
+      for (const field of Object.keys(update)) delete rest[field as AnswerField];
+      return rest;
+    });
+  };
+
+  const render = () => {
+    setRendering(true);
+    setAddError(null);
+    api
+      .renderConfig(answers)
+      .then((text) => {
+        if (!alive.current) return;
+        if (text.kind === "invalid") {
+          setProblems(Object.fromEntries(text.problems.map((p) => [p.field, p.message])));
+          setFocusField(text.problems[0]?.field ?? null);
+          return;
+        }
+        setConfig({ lines: text.lines, warnings: text.warnings });
+        setWarningsRead(false);
+        setStep("approval");
+      })
+      .catch((error: unknown) => alive.current && setAddError(message(error)))
+      .finally(() => alive.current && setRendering(false));
+  };
+
+  const write = () => {
+    setWriting(true);
+    setAddError(null);
+    api
+      .addWithConfig()
+      .then((added) => {
+        if (!alive.current) return;
+        if (added.approvalError === null) {
+          onDone(added.checkout);
+          return;
+        }
+        setCheckout(added.checkout);
+        setUnapproved(added.approvalError);
+        onAdded();
+      })
+      .catch((error: unknown) => alive.current && setAddError(message(error)))
+      .finally(() => alive.current && setWriting(false));
   };
 
   const row = checkout && loaded ? loaded.map.rows.findIndex((r) => r.repoRoot === checkout) : -1;
@@ -198,9 +456,14 @@ export function AddProject({
       );
   };
 
-  const done = (s: Step) => steps.findIndex((x) => x.step === s) < steps.findIndex((x) => x.step === step);
+  const steps = stepsFor(folder);
+  const done = (s: Step) => steps.indexOf(s) < steps.indexOf(step);
   const path = folder && folder.kind !== "cancelled" ? ("checkout" in folder ? folder.checkout : folder.folder) : null;
-  const busy = picking || adding || (approval?.kind === "review" && approval.busy);
+  const newConfig = folder?.kind === "newConfig";
+  const busy = picking || adding || rendering || writing || (approval?.kind === "review" && approval.busy);
+  // Once the file is written, the answers can't change it.
+  const locked = busy || unapproved !== null;
+  const blockedByWarnings = config !== null && config.warnings.length > 0 && !warningsRead;
   // Escape is Finish later, and like it waits while something is in flight.
   const busyRef = useRef(false);
   useEffect(() => {
@@ -231,19 +494,19 @@ export function AddProject({
             </p>
           )}
           <ol className="sheet-steps">
-            {steps.map(({ step: s, label }, index) => {
+            {steps.map((s, index) => {
               const isDone = done(s);
               const content = (
                 <>
                   <span className="sheet-step-icon">
                     {isDone ? <StepIcon kind="ok" label="done" /> : <span className="muted">{index + 1}</span>}
                   </span>
-                  {label}
+                  {label[s]}
                 </>
               );
               return (
                 <li key={s}>
-                  {isDone && !busy ? (
+                  {isDone && !locked ? (
                     <button type="button" className="sheet-step" onClick={() => setStep(s)}>
                       {content}
                     </button>
@@ -273,6 +536,51 @@ export function AddProject({
                   </button>
                 </p>
                 {folder && <FolderResult folder={folder} />}
+              </>
+            ) : step === "environment" ? (
+              <>
+                <h3 className="sheet-heading" ref={heading} tabIndex={-1}>
+                  Describe one environment
+                </h3>
+                <p className="muted">
+                  The same questions as <code className="mono">slip init</code>. Add more environments later in
+                  .shipslip.toml.
+                </p>
+                <div ref={form}>
+                  <AnswersForm answers={answers} problems={problems} disabled={busy} onChange={change} />
+                </div>
+              </>
+            ) : newConfig ? (
+              <>
+                <h3 className="sheet-heading" ref={heading} tabIndex={-1}>
+                  Approve {answers.env.trim()}
+                </h3>
+                <p className="muted">
+                  Shipslip writes this .shipslip.toml to the checkout, then approves it. Deploys use these settings
+                  only once they are approved.
+                </p>
+                {config && config.warnings.length > 0 && (
+                  <Warnings
+                    warnings={config.warnings}
+                    read={warningsRead}
+                    disabled={locked}
+                    onRead={setWarningsRead}
+                  />
+                )}
+                {config && (
+                  <pre className="sheet-config mono" aria-label=".shipslip.toml">
+                    {config.lines.join("\n")}
+                  </pre>
+                )}
+                {unapproved !== null && (
+                  <div className="sheet-refusal" role="alert">
+                    <p>
+                      Shipslip wrote .shipslip.toml but could not approve it. The checkout reads “Needs approval”
+                      until it is approved.
+                    </p>
+                    <pre className="sheet-detail mono">{unapproved}</pre>
+                  </div>
+                )}
               </>
             ) : (
               <>
@@ -334,11 +642,33 @@ export function AddProject({
                 <button
                   type="button"
                   className="button button-primary"
-                  disabled={folder?.kind !== "config" || busy}
+                  disabled={(folder?.kind !== "config" && !newConfig) || busy}
                   onClick={next}
                 >
                   {adding ? "Adding…" : "Continue"}
                 </button>
+              ) : step === "environment" ? (
+                <button type="button" className="button button-primary" disabled={busy} onClick={render}>
+                  {rendering ? "Checking…" : "Continue"}
+                </button>
+              ) : newConfig && unapproved !== null ? (
+                <button
+                  type="button"
+                  className="button button-primary"
+                  disabled={checkout === null}
+                  onClick={() => checkout && onDone(checkout)}
+                >
+                  Open checkout
+                </button>
+              ) : newConfig ? (
+                <TypedConfirm
+                  expected={answers.env.trim()}
+                  verb="approve"
+                  action={writing ? "Approving…" : "Approve and add"}
+                  busy={busy}
+                  blocked={config === null || blockedByWarnings}
+                  onConfirm={write}
+                />
               ) : env === null ? (
                 <button
                   type="button"

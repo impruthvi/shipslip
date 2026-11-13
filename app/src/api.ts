@@ -4,7 +4,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import type { CheckoutReceipts, CompareResult, FolderView, LoadResult, QuitRun, ReceiptResult } from "./types";
+import type {
+  Answers,
+  CheckoutReceipts,
+  CompareResult,
+  ConfigAdded,
+  ConfigText,
+  FolderView,
+  LoadResult,
+  QuitRun,
+  ReceiptResult,
+} from "./types";
 
 export interface Backend {
   loadMap(): Promise<LoadResult>;
@@ -24,6 +34,14 @@ export interface Backend {
   /** Adds the picked folder's checkout to the projects list; resolves to its
    * path as the map spells it. Rejects with a `CommandError`. */
   addCheckout(): Promise<string>;
+  /** Picks a "Setup not finished" map row's folder again for the sheet. */
+  reopenSetup(generation: number, row: number): Promise<FolderView>;
+  /** The config the answers would write for the picked folder. Rust keeps
+   * it for `addWithConfig`. */
+  renderConfig(answers: Answers): Promise<ConfigText>;
+  /** Writes the config last rendered, approves it and adds the checkout.
+   * Rejects with a `CommandError` when nothing was written. */
+  addWithConfig(): Promise<ConfigAdded>;
 }
 
 const tauri: Backend = {
@@ -40,6 +58,9 @@ const tauri: Backend = {
   receiptSeen: (runId) => invoke("receipt_seen", { runId }),
   pickFolder: () => invoke<FolderView>("pick_folder"),
   addCheckout: () => invoke<string>("add_checkout"),
+  reopenSetup: (generation, row) => invoke<FolderView>("reopen_setup", { generation, row }),
+  renderConfig: (answers) => invoke<ConfigText>("render_config", { answers }),
+  addWithConfig: () => invoke<ConfigAdded>("add_with_config"),
 };
 
 let backend: Promise<Backend> | undefined;
@@ -66,6 +87,9 @@ export const api: Backend = {
   receiptSeen: async (runId) => (await getBackend()).receiptSeen(runId),
   pickFolder: async () => (await getBackend()).pickFolder(),
   addCheckout: async () => (await getBackend()).addCheckout(),
+  reopenSetup: async (...args) => (await getBackend()).reopenSetup(...args),
+  renderConfig: async (answers) => (await getBackend()).renderConfig(answers),
+  addWithConfig: async () => (await getBackend()).addWithConfig(),
 };
 
 /** Quitting while a run is live. Separate from `Backend` so screens need not mock it. */

@@ -17,6 +17,8 @@ export interface RowView {
   pathMissing: boolean;
   /** Its `.shipslip.toml` has an environment without a current approval. */
   needsApproval: boolean;
+  /** Added in the app; its folder has no `.shipslip.toml` yet. */
+  setupNotFinished: boolean;
   cells: CellView[];
 }
 
@@ -580,7 +582,36 @@ export interface FolderEnv {
 export type FolderView =
   | { kind: "cancelled" }
   | { kind: "notGit"; folder: string }
-  | { kind: "noConfig"; checkout: string }
+  /** No `.shipslip.toml`: the sheet asks the `slip init` questions. `branch`
+   * is the one checked out now. */
+  | { kind: "newConfig"; checkout: string; branch: string | null }
   /** `message` is the config error, one entry per line. */
   | { kind: "unreadable"; checkout: string; message: string[] }
   | { kind: "config"; checkout: string; project: string; envs: FolderEnv[] };
+
+/** The `slip init` answers for one environment, as the sheet's fields hold
+ * them. An empty `smokeUrl` is no smoke check. */
+export interface Answers {
+  env: string;
+  sshAlias: string;
+  path: string;
+  branch: string;
+  production: boolean;
+  maintenance: boolean;
+  smokeUrl: string;
+}
+
+export type AnswerField = "env" | "sshAlias" | "path" | "branch" | "smokeUrl";
+
+/** The `.shipslip.toml` the answers would write (`render_config`). */
+export type ConfigText =
+  | { kind: "invalid"; problems: { field: AnswerField; message: string }[] }
+  /** `lines` is the config text; `warnings` must be read before approving. */
+  | { kind: "rendered"; lines: string[]; warnings: string[] };
+
+/** What "Approve and add" did for a new config (`add_with_config`). */
+export interface ConfigAdded {
+  checkout: string;
+  /** Written, but approving failed: the checkout reads "Needs approval". */
+  approvalError: string | null;
+}

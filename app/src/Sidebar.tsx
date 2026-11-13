@@ -282,7 +282,9 @@ export function Sidebar({
                       {row.label}
                       <Folder path={twinFolder(labels, row.label, row.repoRoot)} />
                     </span>
-                    {row.needsApproval ? (
+                    {row.setupNotFinished ? (
+                      <span className="side-state muted">Setup not finished</span>
+                    ) : row.needsApproval ? (
                       <span className="side-state tone-attention">Needs approval</span>
                     ) : (
                       <EnvMarks map={map} row={row} live={live} />
