@@ -70,6 +70,8 @@ Before UI work, read the App UI section of `CODING_STANDARDS.md`: colour, status
 - Work on a feature branch; `.githooks/pre-commit` refuses commits on `main`. Enable it once per clone: `git config core.hooksPath .githooks`.
 - Conventional Commits (`feat:`, `fix:`, `test:`, `chore:`, `docs:`).
 - Review standards: `CODING_STANDARDS.md`.
+- User docs: README holds pitch, fit check, quick start, guarantees and links only. A command's details go in its `docs/<topic>.md` page; a behaviour change updates that page and CHANGELOG, not README.
+- README's Guarantees list mirrors "Rules that must not break"; changing one means checking the other.
 
 ## Agent docs
 
