@@ -6,6 +6,62 @@ change the library API.
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-14
+
+### Added
+
+- Desktop app: a Projects section in the sidebar, one line per checkout
+  with a mark per environment, or "Needs approval" in amber. The app opens
+  on All projects, which is the release map and receipt pane. With 5 or more
+  cells needing attention, Needs attention shows the 3 worst and a "Show
+  all" link.
+- Desktop app: selecting a checkout opens its pane: Deploy per environment,
+  that checkout's receipts, and a menu to open the folder in Finder or open
+  `.shipslip.toml`.
+- Desktop app: Add project. Choose a git folder; one that has
+  `.shipslip.toml` shows its environments, one without it asks the
+  `slip init` questions for one environment and shows the rendered config.
+  Approval needs the typed environment name and, when config generation
+  warns, a ticked checkbox. The config is written only if none exists.
+  "Finish later" keeps the checkout as "Setup not finished"; on the folder
+  step it adds nothing and says so.
+- Desktop app: the ssh alias step lists `Host` aliases from
+  `~/.ssh/config` (no wildcard patterns) with user and host name. "None of
+  these fit" builds a `Host` block to copy into the file yourself, with
+  "Check again". Shipslip never writes ssh files.
+- Connection check: a read-only check, started by the person, that the
+  alias resolves, ssh connects, the remote path is a git checkout on the
+  configured branch, `php artisan --version` runs and the Laravel log is
+  readable. It runs in the Add project sheet and from the checkout menu,
+  and its result shows beside the config at approval. A changed host key
+  blocks approval; a line that did not pass has its own amber mark and does
+  not block. The check says that Shipslip's commands only read, while
+  starting `php artisan` can let Laravel refresh its own cache files.
+- Desktop app: a "Needs approval" checkout opens the setup sheet at the
+  connection check. "Remove from sidebar" drops a checkout that this Mac
+  has recorded nothing for, from the pane menu or a reopened setup sheet;
+  no file in the folder is touched.
+- Desktop app: a listed checkout whose folder is gone shows "checkout not
+  found"; one whose `.shipslip.toml` can't be read says so in amber, with
+  the error in its pane.
+- Library: `projects` (the list of checkouts added in the app, written
+  durably under a lock), `ssh_aliases` and `connection_check` modules;
+  `config::InitField` and `InitAnswers::problems()`, shared by `slip init`
+  and the app; `records::checkout_receipts()`.
+- `slip status --json`: `status.problem.kind` gains `projects` for an
+  unreadable projects list.
+
+### Changed
+
+- Host-key refusals fail closed. Only ssh's explicit "no host key is known"
+  counts as an unknown host; any other refusal (a revoked key, or a quiet
+  `LogLevel` that prints only "Host key verification failed") is a hard
+  stop with no command to run, like a changed key. Library:
+  `ConnectFailure::HostKeyUnverified`; `slip logs --json` adds the
+  `host_key_unverified` refusal reason.
+- The release map lists checkouts added in the app before anything is
+  recorded for them.
+
 ## [0.13.0] - 2026-11-12
 
 ### Added
@@ -710,6 +766,7 @@ First usable release. Version 0.0.1 only reserved the crate name.
 - A Linux server with bash and a Git checkout that can `git fetch origin`
   without a prompt.
 
+[0.14.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.14.0
 [0.13.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.13.0
 [0.12.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.12.0
 [0.11.0]: https://github.com/impruthvi/shipslip/releases/tag/v0.11.0
