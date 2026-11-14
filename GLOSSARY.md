@@ -41,7 +41,7 @@ _Avoid_: Dry run, plan
 The user's approval of one exact preview. A run cannot start without it.
 
 **Run**:
-One attempt that changes a server, identified by a run id. A **deploy** moves the code and runs the steps; a **rerun** runs the steps again on the code already there; an **Up** only takes the app out of maintenance mode.
+One attempt that changes a server, identified by a run id. A **deploy** moves the code and runs the steps; a **rerun** runs the steps again on the code already there; a **run from step** runs the recipe from a chosen step to the end on the code already there; an **Up** only takes the app out of maintenance mode.
 _Avoid_: Job, execution
 
 **Deploy lock**:

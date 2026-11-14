@@ -5,8 +5,10 @@ your own `ssh`. Before anything changes it shows exactly which commits and
 commands will run, asks you to confirm, runs the steps, watches the Laravel
 log for new errors, and saves a receipt of what happened.
 
-This guide gets you from install to a first **staging** deploy. Full details
-are in the [setup guide](setup.md).
+This guide gets you from install to a first **staging** deploy. Joining a
+project that already uses Shipslip? See [joining a project](#joining-a-project-that-already-uses-shipslip).
+Details for each step are in [configuration](config.md),
+[deploying](deploying.md) and [receipts](receipts.md).
 
 ## What you need
 
@@ -16,7 +18,8 @@ are in the [setup guide](setup.md).
   fetch.
 - A **staging** server where the app is already cloned and running, in one
   directory updated in place (not `releases/` + `current` symlink), and that
-  you can reach with `ssh` as the user who owns the app.
+  you can reach with `ssh` as the user who owns the app. See
+  [before you configure](config.md#before-you-configure) for the full list.
 
 Shipslip does not provision servers, store secrets, or forward your SSH agent.
 Your keys stay in `~/.ssh`.
@@ -32,6 +35,12 @@ Open a new terminal and check:
 ```sh
 slip --version
 ```
+
+The installer puts `slip` in `~/.local/bin` and adds that directory to your
+`PATH` in your shell's startup files. Run the installer again to upgrade. With
+Rust 1.88 or newer, `cargo install shipslip --locked` also works (add `--force`
+to upgrade). To try unreleased changes:
+`cargo install --git https://github.com/impruthvi/shipslip.git --branch main --locked --bin slip`.
 
 ## 2. Give the server an SSH alias (2 minutes)
 
@@ -64,8 +73,8 @@ your project has a `package-lock.json` with a `build` script it also runs
 Edit the steps to match how you deploy today.
 
 Then approve the config. Shipslip shows every setting and step; type the
-environment name (`staging`) to trust it. Anything else leaves it untrusted,
-and deploys stay blocked until you trust it:
+environment name (`staging`) to approve it. Anything else leaves it
+unapproved, and deploys stay blocked until you approve it:
 
 ```sh
 slip trust staging
@@ -115,6 +124,18 @@ Flags in the list tell you what needs a look: `⚠ N new error groups`,
 
 Shipslip never retries a command that changes the server, and never reports a
 guess as success or failure: when it cannot tell, it says "unknown".
+
+## Joining a project that already uses Shipslip
+
+When `.shipslip.toml` is already committed, skip `slip init`:
+
+1. Install `slip` (step 1).
+2. Add an ssh alias with the **same `Host` name** the config's `ssh` value
+   uses, pointing at the server with your own user and key (step 2). Run
+   `ssh <alias>` once to verify the host key.
+3. Read the config, then approve it: `slip trust staging`. Approvals live on
+   your Mac, so every teammate approves for themselves.
+4. `slip deploy staging`.
 
 ## Tell us how it went
 
