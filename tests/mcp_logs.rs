@@ -348,6 +348,44 @@ async fn an_unapproved_environment_in_a_listed_checkout_never_connects() {
 }
 
 #[tokio::test]
+async fn a_cloud_target_is_refused_before_connecting() {
+    let fixture = Fixture::new();
+    let config = fixture.root.join(".shipslip.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("[env.cloud]\ncloud_environment='env-1'\nproduction=false\n");
+    std::fs::write(&config, text).unwrap();
+    fixture.approve();
+    let loaded = LoadedConfig::load(&fixture.root, None).unwrap();
+    approve_trust(
+        &fixture.root.join("trust.json"),
+        loaded.repo_root(),
+        "cloud",
+        loaded.trust_snapshot("cloud").unwrap(),
+    )
+    .unwrap();
+    for tool in ["logs", "log_group"] {
+        let mut arguments = fixture.arguments();
+        arguments["environment"] = json!("cloud");
+        if tool == "log_group" {
+            arguments["id"] = json!("1");
+        }
+        let response = fixture
+            .exchange(vec![call(tool, arguments)], "", None, true)
+            .await;
+        assert_eq!(response[0]["result"]["isError"], true);
+        let error = &body(&response[0])["error"];
+        assert_eq!(error["kind"], "invalid_input", "{error}");
+        assert!(
+            error["message"].as_str().unwrap().contains(
+                "`cloud` is a Cloud target; reading logs does not support Cloud targets yet"
+            ),
+            "{error}"
+        );
+    }
+    assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn an_unresolvable_checkout_has_its_own_error_and_never_connects() {
     let fixture = Fixture::new();
     for tool in ["logs", "log_group"] {

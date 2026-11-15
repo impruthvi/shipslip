@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use serde::Serialize;
-use shipslip::config::LoadedConfig;
+use shipslip::config::{LoadedConfig, TargetError};
 use shipslip::connection_check::{CheckEvent, Failed, Outcome, Passed, Probe, Request};
 use shipslip::logs::escape_field;
 use shipslip::transport::ConnectFailure;
@@ -233,9 +233,13 @@ fn last_line(message: &str) -> String {
 /// not: the check never needs an approval.
 pub fn request_for(checkout: &Path, env: &str) -> Result<Request, String> {
     let config = LoadedConfig::load(checkout, None).map_err(|error| error.to_string())?;
-    let target = config
-        .target(env)
-        .ok_or_else(|| format!("{env} is no longer in .shipslip.toml."))?;
+    let target =
+        config
+            .server_target(env, "the connection check")
+            .map_err(|error| match error {
+                TargetError::Unknown(_) => format!("{env} is no longer in .shipslip.toml."),
+                error => error.to_string(),
+            })?;
     Ok(Request::for_target(&target))
 }
 
@@ -475,6 +479,16 @@ mod tests {
         );
         std::fs::write(root.join(".shipslip.toml"), "not toml [").unwrap();
         assert!(request_for(&root, "staging").is_err());
+
+        std::fs::write(
+            root.join(".shipslip.toml"),
+            "[project]\nname = \"crm\"\nstack = \"laravel\"\n[env.production]\ncloud_environment = \"env-1\"\nproduction = true\n",
+        )
+        .unwrap();
+        assert_eq!(
+            request_for(&root, "production").unwrap_err(),
+            "`production` is a Cloud target; the connection check does not support Cloud targets yet"
+        );
     }
 
     #[test]

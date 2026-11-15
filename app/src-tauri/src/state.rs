@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use serde::Serialize;
-use shipslip::config::LoadedConfig;
+use shipslip::config::{LoadedConfig, TrustStatus};
 use shipslip::git::{Comparison, Git};
 use shipslip::receipt::{compare_envs_with, ReceiptError};
 use shipslip::records::{env_order, CodeState, EnvCell, ReceiptQueryError, Status as Overview};
@@ -489,9 +489,12 @@ pub fn with_checkout_configs(mut overview: Overview, trust_path: &Path) -> MapRe
 /// Every configured environment has an approval that matches the config as it
 /// reads now. An approvals file that can't be read approves nothing.
 fn approved(config: &LoadedConfig, trust_path: &Path) -> bool {
-    config
-        .environment_names()
-        .all(|env| config.trusted_target(env, trust_path).is_ok())
+    config.environment_names().all(|env| {
+        matches!(
+            config.approval_status(env, trust_path),
+            Ok(Some(TrustStatus::Trusted))
+        )
+    })
 }
 
 #[cfg(test)]
@@ -610,6 +613,30 @@ mod tests {
         let changed = TWO_ENVS.replace("ssh = \"web2\"", "ssh = \"web9\"");
         fs::write(root.join(".shipslip.toml"), changed).unwrap();
         assert!(needs_approval(&fx), "staging changed since its approval");
+    }
+
+    #[test]
+    fn an_approved_cloud_target_counts_as_approved() {
+        let fx = Fixture::new();
+        let config =
+            format!("{TWO_ENVS}[env.cloud]\ncloud_environment = \"env-1\"\nproduction = false\n");
+        let root = fx.checkout("shop", &config);
+        let mut receipt = run(1, "production");
+        receipt["repo_root"] = json!(root.to_string_lossy());
+        fx.save(&receipt);
+        fx.approve_config(&root, "production");
+        fx.approve_config(&root, "staging");
+        assert!(needs_approval(&fx), "cloud has no approval");
+
+        fx.approve_config(&root, "cloud");
+        assert!(
+            !needs_approval(&fx),
+            "every environment approved as configured"
+        );
+
+        let changed = config.replace("env-1", "env-2");
+        fs::write(root.join(".shipslip.toml"), changed).unwrap();
+        assert!(needs_approval(&fx), "cloud ID changed since its approval");
     }
 
     #[test]

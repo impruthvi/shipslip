@@ -6,6 +6,15 @@ change the library API.
 
 ## [Unreleased]
 
+### Added
+
+- Config: an environment can be a Cloud target, `cloud_environment` plus
+  `production`, pointing at a Laravel Cloud environment. It needs approval
+  like any environment, and a changed ID needs approval again. Cloud targets
+  are record-only: deploy, rerun, from-step, attach, up and break-lock refuse
+  one, and `slip logs` and the connection check say they do not support Cloud
+  targets yet. See [configuration](docs/config.md#cloud-targets).
+
 ## [0.14.0] - 2026-11-14
 
 ### Added

@@ -195,6 +195,69 @@ fn prepare_requires_trust_before_ssh_and_preserves_connection_diagnostics() {
     });
 }
 
+#[test]
+fn a_cloud_target_is_approved_but_never_deployed_and_never_contacts_ssh() {
+    tauri::async_runtime::block_on(async {
+        let fx = Fixture::new();
+        let root = checkout(&fx, "cloud");
+        std::fs::write(
+            root.join(".shipslip.toml"),
+            "[project]\nname = \"example\"\nstack = \"laravel\"\n\
+             [env.production]\ncloud_environment = \"env-1\"\nproduction = true\n",
+        )
+        .unwrap();
+        let sessions = Sessions::new(fx.receipts(), fx.trust(), Refuse::default());
+        let ticket = sessions
+            .review_trust(root.clone(), "production".into())
+            .await
+            .unwrap();
+        sessions
+            .approve_trust(&ticket.handle, "production")
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions
+                .deploy_entry(root.clone(), "production".into())
+                .await,
+            DeployEntry::Unavailable {
+                reason: config::RECORD_ONLY.into()
+            }
+        );
+        let record_only = |error: CommandError| {
+            assert_eq!(error.code, ErrorCode::Local);
+            assert_eq!(
+                error.message,
+                format!("`production` is a Cloud target. {}", config::RECORD_ONLY)
+            );
+        };
+        for plan in [
+            shipslip::RunPlan::Deploy,
+            shipslip::RunPlan::Rerun,
+            shipslip::RunPlan::FromStep(1),
+        ] {
+            record_only(
+                sessions
+                    .prepare(root.clone(), "production".into(), plan)
+                    .await
+                    .unwrap_err(),
+            );
+        }
+        record_only(
+            sessions
+                .review_up(root.clone(), "production".into())
+                .await
+                .unwrap_err(),
+        );
+        record_only(
+            sessions
+                .review_attach(root, "production".into())
+                .await
+                .unwrap_err(),
+        );
+        assert_eq!(sessions.connector.0.load(Ordering::SeqCst), 0);
+    });
+}
+
 #[derive(Default)]
 struct Remote {
     refused_lock: Mutex<Option<shipslip::LockOwner>>,

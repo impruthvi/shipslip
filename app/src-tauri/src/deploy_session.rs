@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use shipslip::config::{self, LoadedConfig, TrustSnapshot, TrustStatus, TrustedTarget};
+use shipslip::config::{self, LoadedConfig, TrustError, TrustSnapshot, TrustStatus, TrustedTarget};
 use shipslip::interrupt::{on_interrupt, Interrupt, Stage};
 use shipslip::logs::escape_field;
 use shipslip::receipt::{self, ReceiptJournal, ReceiptStatus, ReceiptStepStatus};
@@ -501,6 +501,9 @@ fn entry_sync(checkout: &Path, env: &str, trust_path: &Path, receipts_root: &Pat
     let Some(snapshot) = config.trust_snapshot(env) else {
         return DeployEntry::Hidden;
     };
+    if config.cloud_target(env).is_some() {
+        return unavailable(config::RECORD_ONLY.into());
+    }
     match terminal_run(receipts_root, config.project_name(), env, &checkout) {
         Ok(Some(_)) => return unavailable(TERMINAL_RUN_REASON.into()),
         Ok(None) => {}
@@ -1732,11 +1735,14 @@ impl<C: Connector> Sessions<C> {
         blocking(move || {
             unchanged_sync(&stamp)?
                 .trusted_target(&stamp.key.env, &path)
-                .map_err(|e| {
-                    CommandError::new(
+                .map_err(|e| match e {
+                    TrustError::CloudTarget(_) => {
+                        CommandError::new(ErrorCode::Local, e.to_string())
+                    }
+                    e => CommandError::new(
                         ErrorCode::Untrusted,
                         format!("{e}. Review and approve these settings first."),
-                    )
+                    ),
                 })
         })
         .await
