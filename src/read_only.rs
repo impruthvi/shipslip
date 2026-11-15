@@ -141,11 +141,9 @@ impl<C: Connector> Reader<C> {
         if config.repo_root() != checkout {
             return Err(invalid("checkout must be the repository root".into()));
         }
-        if config.target(environment).is_none() {
-            return Err(invalid(format!(
-                "environment `{environment}` is not in the config"
-            )));
-        }
+        config
+            .server_target(environment, "reading logs")
+            .map_err(|error| invalid(error.to_string()))?;
         let target = config
             .trusted_target(environment, &self.trust_path)
             .map_err(|_| not_approved())?;

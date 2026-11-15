@@ -1090,9 +1090,9 @@ async fn logs_command(
     environment: &str,
     options: LogsOptions,
 ) -> Result<ExitCode, Box<dyn Error>> {
-    let target = config.target(environment).ok_or_else(|| {
-        invalid_input(format!("environment `{environment}` is not in the config"))
-    })?;
+    let target = config
+        .server_target(environment, "`slip logs`")
+        .map_err(|error| invalid_input(error.to_string()))?;
     if let Some(since) = &options.since {
         since.validate(target.timezone.as_deref().unwrap_or("UTC"))?;
     }

@@ -120,6 +120,24 @@ path. With `log_daily = true`, `log` is a directory and prefix (default
 You can commit `.shipslip.toml` so teammates share the same deploy settings.
 Each teammate maps the same ssh alias to their own key locally.
 
+## Cloud targets
+
+An environment can point at a Laravel Cloud environment instead of a server.
+It holds only the Cloud environment ID and `production`:
+
+```toml
+[env.cloud-production]
+cloud_environment = "env-9f2c41d0"
+production = true
+```
+
+Cloud targets are record-only ([ADR 0006](adr/0006-cloud-targets-are-record-only.md)):
+`slip deploy`, `rerun`, `from-step`, `attach`, `up` and `break-lock` refuse
+them, and `slip logs` and the app's connection check do not support them yet.
+An environment that sets `cloud_environment` together with any server setting
+(`ssh`, `path`, `branch`, `log`, `maintenance` and the rest), or sets neither,
+is refused when the config loads.
+
 ## Log channels
 
 `slip logs` discovers channels under `storage/logs`. Override channels by their
@@ -150,11 +168,11 @@ sets a default override.
 ## Approval
 
 The first use of an environment, or a change to its SSH alias, path, branch,
-production setting, recipe, or other configured settings, blocks deploys
-until you approve it with `slip trust [ENV]`. That command shows changes since
-the last approval and asks you to type each environment name. Approvals are
-stored per Git repository and environment in a local `trust.json` file under
-Shipslip's application support directory. They are not committed to Git.
+production setting, recipe, Cloud environment ID, or other configured settings,
+blocks deploys until you approve it with `slip trust [ENV]`. That command shows
+changes since the last approval and asks you to type each environment name.
+Approvals are stored per Git repository and environment in a local `trust.json`
+file under Shipslip's application support directory. They are not committed to Git.
 
 Shipslip rejects unknown config keys and checks the syntax of each generated
 step with local `bash -n` when it loads the config. The server repeats the

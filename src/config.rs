@@ -63,7 +63,7 @@ pub enum ConfigError {
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     project: Project,
-    env: BTreeMap<String, Environment>,
+    env: BTreeMap<String, RawEnvironment>,
     recipe: Option<Recipes>,
 }
 
@@ -74,23 +74,152 @@ struct Project {
     stack: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// One `[env.NAME]` as written: a server target or a Cloud target, told
+/// apart by [`RawEnvironment::classify`].
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Environment {
+struct RawEnvironment {
     #[serde(rename = "ssh")]
+    ssh_alias: Option<String>,
+    path: Option<String>,
+    branch: Option<String>,
+    production: bool,
+    cloud_environment: Option<String>,
+    log: Option<String>,
+    log_daily: Option<bool>,
+    smoke_url: Option<String>,
+    maintenance: Option<bool>,
+    timezone: Option<String>,
+    logs: Option<BTreeMap<String, ChannelSettings>>,
+}
+
+#[derive(Debug, Clone)]
+enum Environment {
+    Server(ServerEnvironment),
+    Cloud {
+        cloud_environment: String,
+        production: bool,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ServerEnvironment {
     ssh_alias: String,
     path: String,
     branch: String,
     production: bool,
     log: Option<String>,
-    #[serde(default)]
     log_daily: bool,
     smoke_url: Option<String>,
-    #[serde(default)]
     maintenance: bool,
     timezone: Option<String>,
-    #[serde(default)]
     logs: BTreeMap<String, ChannelSettings>,
+}
+
+impl RawEnvironment {
+    fn classify(self, name: &str) -> Result<Environment, ConfigError> {
+        let RawEnvironment {
+            ssh_alias,
+            path,
+            branch,
+            production,
+            cloud_environment,
+            log,
+            log_daily,
+            smoke_url,
+            maintenance,
+            timezone,
+            logs,
+        } = self;
+        let server_fields: Vec<&str> = [
+            ("ssh", ssh_alias.is_some()),
+            ("path", path.is_some()),
+            ("branch", branch.is_some()),
+            ("log", log.is_some()),
+            ("log_daily", log_daily.is_some()),
+            ("smoke_url", smoke_url.is_some()),
+            ("maintenance", maintenance.is_some()),
+            ("timezone", timezone.is_some()),
+            ("logs", logs.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(field, set)| set.then_some(field))
+        .collect();
+        if let Some(cloud_environment) = cloud_environment {
+            if !server_fields.is_empty() {
+                let fields = server_fields
+                    .iter()
+                    .map(|field| format!("`{field}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(ConfigError::Invalid(format!(
+                    "env.{name} mixes server settings ({fields}) with `cloud_environment`; \
+                     a Cloud target holds only `cloud_environment` and `production`"
+                )));
+            }
+            return Ok(Environment::Cloud {
+                cloud_environment,
+                production,
+            });
+        }
+        let (ssh_alias, path, branch) = match (ssh_alias, path, branch) {
+            (Some(ssh_alias), Some(path), Some(branch)) => (ssh_alias, path, branch),
+            (None, None, None) => {
+                return Err(ConfigError::Invalid(format!(
+                    "env.{name} needs `ssh`, `path` and `branch` for a server, \
+                     or `cloud_environment` for a Laravel Cloud environment"
+                )))
+            }
+            (ssh_alias, path, _) => {
+                let missing = if ssh_alias.is_none() {
+                    "ssh"
+                } else if path.is_none() {
+                    "path"
+                } else {
+                    "branch"
+                };
+                return Err(ConfigError::Invalid(format!(
+                    "env.{name}.{missing} is required for a server"
+                )));
+            }
+        };
+        Ok(Environment::Server(ServerEnvironment {
+            ssh_alias,
+            path,
+            branch,
+            production,
+            log,
+            log_daily: log_daily.unwrap_or_default(),
+            smoke_url,
+            maintenance: maintenance.unwrap_or_default(),
+            timezone,
+            logs: logs.unwrap_or_default(),
+        }))
+    }
+}
+
+/// An environment that points at one Laravel Cloud environment. Shipslip
+/// only reads it (ADR 0006): it never becomes a [`TrustedTarget`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CloudTarget {
+    pub env: String,
+    pub cloud_environment: String,
+    pub production: bool,
+}
+
+/// Why a Cloud target cannot be deployed, rerun, run from a step, brought up
+/// or have its lock broken. One message for every such refusal.
+pub const RECORD_ONLY: &str = "Cloud targets are record-only: Shipslip reads the \
+    deployments Laravel Cloud ran and never deploys, reruns, runs steps, brings \
+    an app up or breaks a lock on one.";
+
+/// Why a read that needs a server cannot use an environment.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TargetError {
+    #[error("environment `{0}` is not in the config")]
+    Unknown(String),
+    #[error("`{env}` is a Cloud target; {feature} does not support Cloud targets yet")]
+    CloudNotSupported { env: String, feature: &'static str },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -189,18 +318,29 @@ impl LoadedConfig {
                 "recipe.deploy.steps must not be empty".into(),
             ));
         }
-        for (name, env) in &config.env {
-            validate_environment(name, env)?;
-            for (index, step) in steps.iter().enumerate() {
-                check_step_syntax(name, index + 1, &env.path, step)?;
+        let mut envs = BTreeMap::new();
+        for (name, raw) in config.env {
+            validate_env_name(&name)?;
+            let env = raw.classify(&name)?;
+            match &env {
+                Environment::Server(server) => {
+                    validate_environment(&name, server)?;
+                    for (index, step) in steps.iter().enumerate() {
+                        check_step_syntax(&name, index + 1, &server.path, step)?;
+                    }
+                }
+                Environment::Cloud {
+                    cloud_environment, ..
+                } => validate_cloud_environment(&name, cloud_environment)?,
             }
+            envs.insert(name, env);
         }
 
         Ok(Self {
             path,
             repo_root,
             project_name: config.project.name,
-            envs: config.env,
+            envs,
             steps,
             default_recipe,
         })
@@ -226,10 +366,11 @@ impl LoadedConfig {
         self.envs.keys().map(String::as_str)
     }
 
-    // Both destructure `Environment` without `..`, so a new setting must be
-    // added to the deploy target and to the approved snapshot.
+    /// The server target for `name`; `None` for a Cloud target.
+    // Both destructure `ServerEnvironment` without `..`, so a new setting
+    // must be added to the deploy target and to the approved snapshot.
     pub fn target(&self, name: &str) -> Option<DeployTarget> {
-        let Environment {
+        let Environment::Server(ServerEnvironment {
             ssh_alias,
             path,
             branch,
@@ -240,7 +381,10 @@ impl LoadedConfig {
             maintenance,
             timezone,
             logs,
-        } = self.envs.get(name)?.clone();
+        }) = self.envs.get(name)?.clone()
+        else {
+            return None;
+        };
         Some(DeployTarget {
             env: name.to_string(),
             production,
@@ -258,13 +402,62 @@ impl LoadedConfig {
         })
     }
 
+    pub fn cloud_target(&self, name: &str) -> Option<CloudTarget> {
+        match self.envs.get(name)? {
+            Environment::Cloud {
+                cloud_environment,
+                production,
+            } => Some(CloudTarget {
+                env: name.to_string(),
+                cloud_environment: cloud_environment.clone(),
+                production: *production,
+            }),
+            Environment::Server(_) => None,
+        }
+    }
+
+    /// The server target for a read that cannot use a Cloud target yet;
+    /// `feature` names that read in the refusal.
+    pub fn server_target(
+        &self,
+        name: &str,
+        feature: &'static str,
+    ) -> Result<DeployTarget, TargetError> {
+        if let Some(target) = self.target(name) {
+            return Ok(target);
+        }
+        Err(match self.cloud_target(name) {
+            Some(_) => TargetError::CloudNotSupported {
+                env: name.to_string(),
+                feature,
+            },
+            None => TargetError::Unknown(name.to_string()),
+        })
+    }
+
+    /// Whether the current settings for `name`, server or Cloud, are the
+    /// ones the user approved; `None` when `name` is not in the config.
+    pub fn approval_status(
+        &self,
+        name: &str,
+        trust_path: &Path,
+    ) -> Result<Option<TrustStatus>, ConfigError> {
+        let Some(snapshot) = self.trust_snapshot(name) else {
+            return Ok(None);
+        };
+        trust_status(trust_path, &self.repo_root, name, &snapshot).map(Some)
+    }
+
     /// The target for `name`, only if its current settings are the ones the
-    /// user approved with `slip trust`.
+    /// user approved with `slip trust`. A Cloud target is always refused.
     pub fn trusted_target(
         &self,
         name: &str,
         trust_path: &Path,
     ) -> Result<TrustedTarget, TrustError> {
+        if self.cloud_target(name).is_some() {
+            return Err(TrustError::CloudTarget(name.to_string()));
+        }
         let (Some(target), Some(snapshot)) = (self.target(name), self.trust_snapshot(name)) else {
             return Err(TrustError::UnknownEnvironment(name.to_string()));
         };
@@ -279,7 +472,20 @@ impl LoadedConfig {
     }
 
     pub fn trust_snapshot(&self, name: &str) -> Option<TrustSnapshot> {
-        let Environment {
+        let server = match self.envs.get(name)?.clone() {
+            Environment::Server(server) => server,
+            Environment::Cloud {
+                cloud_environment,
+                production,
+            } => {
+                return Some(TrustSnapshot {
+                    production,
+                    cloud_environment: Some(cloud_environment),
+                    ..TrustSnapshot::default()
+                })
+            }
+        };
+        let ServerEnvironment {
             ssh_alias,
             path,
             branch,
@@ -290,7 +496,7 @@ impl LoadedConfig {
             maintenance,
             timezone,
             logs,
-        } = self.envs.get(name)?.clone();
+        } = server;
         Some(TrustSnapshot {
             ssh_alias,
             path,
@@ -303,6 +509,7 @@ impl LoadedConfig {
             timezone,
             logs: log_channels(logs),
             steps: self.steps.clone(),
+            cloud_environment: None,
         })
     }
 }
@@ -334,12 +541,33 @@ fn config_path(start: &Path, root: &Path) -> Option<PathBuf> {
     None
 }
 
-fn validate_environment(name: &str, env: &Environment) -> Result<(), ConfigError> {
+fn validate_env_name(name: &str) -> Result<(), ConfigError> {
     if name.is_empty() || name.chars().any(char::is_whitespace) {
         return Err(ConfigError::Invalid(format!(
             "environment name `{name}` must not be empty or contain whitespace"
         )));
     }
+    Ok(())
+}
+
+/// The ID becomes a path segment of a fixed-host API URL, so it is kept to
+/// characters that cannot change the path.
+fn validate_cloud_environment(name: &str, id: &str) -> Result<(), ConfigError> {
+    let plain = !id.is_empty()
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'));
+    if !plain {
+        return Err(ConfigError::Invalid(format!(
+            "env.{name}.cloud_environment must be a Laravel Cloud environment ID \
+             (letters, digits, `-` and `_`)"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_environment(name: &str, env: &ServerEnvironment) -> Result<(), ConfigError> {
     if !is_ssh_alias(&env.ssh_alias) {
         return Err(ConfigError::Invalid(format!(
             "env.{name}.ssh must be an SSH host alias"
@@ -829,6 +1057,9 @@ pub struct TrustSnapshot {
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub logs: BTreeMap<String, LogChannel>,
     pub steps: Vec<String>,
+    /// Set only for a Cloud target, whose snapshot holds this and `production`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud_environment: Option<String>,
 }
 
 /// A deploy target whose settings the user approved. Built only by
@@ -871,10 +1102,14 @@ pub enum TrustError {
     UnknownEnvironment(String),
     #[error("config for `{0}` is untrusted; run `slip trust {0}` first")]
     Untrusted(String),
+    #[error("`{0}` is a Cloud target. {RECORD_ONLY}")]
+    CloudTarget(String),
     #[error(transparent)]
     Store(#[from] ConfigError),
 }
 
+// Built once per check, never stored in bulk; boxing would only add noise.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrustStatus {
     Trusted,
@@ -954,8 +1189,8 @@ pub fn approve_trust(
 }
 
 /// Every approval record: checkout path to each env approved there and its
-/// approved `ssh_alias:path`. Approval only means a record exists, not that
-/// the current config matches.
+/// approved `ssh_alias:path`, or `Laravel Cloud ID` for a Cloud target.
+/// Approval only means a record exists, not that the current config matches.
 pub fn approved_envs(
     path: &Path,
 ) -> Result<BTreeMap<String, BTreeMap<String, String>>, ConfigError> {
@@ -966,7 +1201,11 @@ pub fn approved_envs(
             let envs = envs
                 .into_iter()
                 .map(|(env, record)| {
-                    let target = format!("{}:{}", record.snapshot.ssh_alias, record.snapshot.path);
+                    let snapshot = record.snapshot;
+                    let target = match snapshot.cloud_environment {
+                        Some(id) => format!("Laravel Cloud {id}"),
+                        None => format!("{}:{}", snapshot.ssh_alias, snapshot.path),
+                    };
                     (env, target)
                 })
                 .collect();
@@ -1085,6 +1324,22 @@ pub fn trust_settings(
     previous: Option<&TrustSnapshot>,
     current: &TrustSnapshot,
 ) -> Vec<TrustSetting> {
+    if let Some(id) = &current.cloud_environment {
+        let previous_production = previous.map(|old| old.production.to_string());
+        return vec![
+            TrustSetting {
+                name: "cloud_environment",
+                previous: previous
+                    .map(|old| TrustValue::One(setting(&old.cloud_environment, "not set"))),
+                proposed: TrustValue::One(id.clone()),
+            },
+            TrustSetting {
+                name: "production",
+                previous: previous_production.map(TrustValue::One),
+                proposed: TrustValue::One(current.production.to_string()),
+            },
+        ];
+    }
     // Destructured without `..` so a new setting must be shown here.
     let TrustSnapshot {
         ssh_alias,
@@ -1098,6 +1353,7 @@ pub fn trust_settings(
         timezone,
         logs,
         steps,
+        cloud_environment: _,
     } = current;
     let log_setting = |log: &Option<String>| setting(log, "not set (Laravel default)");
     let smoke_setting = |url: &Option<String>| setting(url, "not set");
@@ -1693,6 +1949,7 @@ mod tests {
             timezone: None,
             logs: BTreeMap::new(),
             steps: vec!["php artisan migrate --force".into()],
+            cloud_environment: None,
         };
         assert_eq!(
             snapshot_hash(&snapshot).unwrap(),
@@ -1948,6 +2205,7 @@ mod tests {
             timezone: None,
             logs: BTreeMap::new(),
             steps: vec!["php artisan migrate --force".into()],
+            cloud_environment: None,
         };
         let lines = trust_changes(None, &snapshot);
         for expected in [
@@ -1995,6 +2253,195 @@ mod tests {
                 "    1. php artisan migrate --force",
                 "    2. php artisan optimize",
             ]
+        );
+    }
+
+    const CLOUD_CONFIG: &str = "[project]\nname = \"example\"\nstack = \"laravel\"\n\n\
+        [env.production]\ncloud_environment = \"env-9f2c41d0\"\nproduction = true\n";
+
+    fn write_raw(fixture: &Fixture, raw: &str) {
+        fs::write(fixture.root.join(".shipslip.toml"), raw).unwrap();
+    }
+
+    fn invalid_message(result: Result<LoadedConfig, ConfigError>) -> String {
+        match result {
+            Err(ConfigError::Invalid(message)) => message,
+            other => panic!("expected an invalid config, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cloud_target_parses_with_only_its_id_and_production() {
+        let fixture = Fixture::new();
+        write_raw(&fixture, CLOUD_CONFIG);
+        let config = fixture.load().unwrap();
+        assert_eq!(
+            config.environment_names().collect::<Vec<_>>(),
+            ["production"]
+        );
+        assert_eq!(
+            config.cloud_target("production"),
+            Some(CloudTarget {
+                env: "production".into(),
+                cloud_environment: "env-9f2c41d0".into(),
+                production: true,
+            })
+        );
+        assert_eq!(config.target("production"), None);
+        let snapshot = config.trust_snapshot("production").unwrap();
+        assert_eq!(snapshot.cloud_environment.as_deref(), Some("env-9f2c41d0"));
+        assert!(snapshot.production);
+        assert!(snapshot.steps.is_empty());
+    }
+
+    #[test]
+    fn server_and_cloud_targets_live_in_one_config() {
+        let fixture = Fixture::new();
+        fixture.write_config(
+            "\n[env.cloud]\ncloud_environment = \"env-1\"\nproduction = false\n",
+            "staging-host",
+            "echo ok",
+        );
+        let config = fixture.load().unwrap();
+        assert!(config.target("staging").is_some());
+        assert_eq!(config.cloud_target("staging"), None);
+        assert!(config.cloud_target("cloud").is_some());
+        let snapshot = config.trust_snapshot("staging").unwrap();
+        assert_eq!(snapshot.cloud_environment, None);
+    }
+
+    #[test]
+    fn mixed_or_empty_environments_are_refused_naming_the_environment() {
+        let fixture = Fixture::new();
+        for extra in [
+            "ssh = \"cloud-host\"\n",
+            "path = \"/srv/app\"\n",
+            "maintenance = false\n",
+            "log_daily = false\n",
+            "[env.production.logs.worker]\nhide = true\n",
+        ] {
+            write_raw(&fixture, &format!("{CLOUD_CONFIG}{extra}"));
+            let message = invalid_message(fixture.load());
+            assert!(
+                message.starts_with("env.production mixes server settings"),
+                "{message}"
+            );
+            assert!(message.contains("`cloud_environment`"), "{message}");
+        }
+
+        write_raw(
+            &fixture,
+            "[project]\nname = \"example\"\nstack = \"laravel\"\n\n[env.production]\nproduction = true\n",
+        );
+        assert_eq!(
+            invalid_message(fixture.load()),
+            "env.production needs `ssh`, `path` and `branch` for a server, \
+             or `cloud_environment` for a Laravel Cloud environment"
+        );
+
+        for (fields, missing) in [
+            ("path = \"/srv/app\"\nbranch = \"main\"\n", "ssh"),
+            ("ssh = \"host\"\nbranch = \"main\"\n", "path"),
+            ("ssh = \"host\"\npath = \"/srv/app\"\n", "branch"),
+        ] {
+            write_raw(
+                &fixture,
+                &format!(
+                    "[project]\nname = \"example\"\nstack = \"laravel\"\n\n\
+                     [env.staging]\n{fields}production = false\n"
+                ),
+            );
+            assert_eq!(
+                invalid_message(fixture.load()),
+                format!("env.staging.{missing} is required for a server")
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_environment_id_must_be_a_plain_id() {
+        let fixture = Fixture::new();
+        for id in ["", "env/../x", "env 1", "-env", "env?x"] {
+            write_raw(&fixture, &CLOUD_CONFIG.replace("env-9f2c41d0", id));
+            assert_eq!(
+                invalid_message(fixture.load()),
+                "env.production.cloud_environment must be a Laravel Cloud environment ID \
+                 (letters, digits, `-` and `_`)",
+                "{id:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloud_target_needs_approval_and_again_after_its_id_changes() {
+        let fixture = Fixture::new();
+        let store = fixture.root.join("trust.json");
+        write_raw(&fixture, CLOUD_CONFIG);
+        let config = fixture.load().unwrap();
+        let snapshot = config.trust_snapshot("production").unwrap();
+        assert_eq!(
+            config.approval_status("production", &store).unwrap(),
+            Some(TrustStatus::Untrusted { previous: None })
+        );
+        assert_eq!(
+            trust_changes(None, &snapshot),
+            ["  cloud_environment: env-9f2c41d0", "  production: true"]
+        );
+        approve_trust(&store, config.repo_root(), "production", snapshot.clone()).unwrap();
+        assert_eq!(
+            config.approval_status("production", &store).unwrap(),
+            Some(TrustStatus::Trusted)
+        );
+
+        write_raw(&fixture, &CLOUD_CONFIG.replace("env-9f2c41d0", "env-other"));
+        let changed = fixture.load().unwrap();
+        let Some(TrustStatus::Untrusted { previous }) =
+            changed.approval_status("production", &store).unwrap()
+        else {
+            panic!("a changed Cloud environment ID must need approval again");
+        };
+        assert_eq!(
+            trust_changes(
+                previous.as_ref(),
+                &changed.trust_snapshot("production").unwrap()
+            ),
+            ["  cloud_environment: env-9f2c41d0 -> env-other"]
+        );
+        assert_eq!(changed.approval_status("missing", &store).unwrap(), None);
+    }
+
+    #[test]
+    fn cloud_target_is_refused_by_every_server_entry_point() {
+        let fixture = Fixture::new();
+        let store = fixture.root.join("trust.json");
+        write_raw(&fixture, CLOUD_CONFIG);
+        let config = fixture.load().unwrap();
+        approve_trust(
+            &store,
+            config.repo_root(),
+            "production",
+            config.trust_snapshot("production").unwrap(),
+        )
+        .unwrap();
+        // Deploy, rerun, run from step, Up and break-lock all need a
+        // TrustedTarget, and a Cloud target never becomes one.
+        let error = config.trusted_target("production", &store).unwrap_err();
+        assert!(matches!(&error, TrustError::CloudTarget(env) if env == "production"));
+        assert_eq!(
+            error.to_string(),
+            format!("`production` is a Cloud target. {RECORD_ONLY}")
+        );
+
+        let error = config
+            .server_target("production", "the connection check")
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "`production` is a Cloud target; the connection check does not support Cloud targets yet"
+        );
+        assert_eq!(
+            config.server_target("staging", "slip logs").unwrap_err(),
+            TargetError::Unknown("staging".into())
         );
     }
 }
