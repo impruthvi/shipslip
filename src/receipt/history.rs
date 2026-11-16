@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::cloud::{read_cloud, CloudReceipt};
 use super::{io_error, read_receipt, safe_component, Receipt, ReceiptError};
 use crate::DeployOutcome;
 
@@ -24,6 +25,12 @@ pub enum Listed {
         id: String,
         path: PathBuf,
         receipt: Box<Receipt>,
+    },
+    /// A deployment Laravel Cloud ran; Shipslip did not start it.
+    Cloud {
+        id: String,
+        path: PathBuf,
+        receipt: Box<CloudReceipt>,
     },
     /// Written by a newer Shipslip; only its file name can be interpreted.
     Newer {
@@ -142,19 +149,29 @@ fn listed(entry: &Entry, id: &str) -> Listed {
         path: entry.path.clone(),
         reason,
     };
+    let newer = |version| Listed::Newer {
+        id: id.into(),
+        env: entry.env.clone(),
+        started_at_ms: entry.started_at_ms,
+        version,
+        path: entry.path.clone(),
+    };
     match read_receipt(&entry.path) {
         Ok(receipt) => Listed::Receipt {
             id: id.into(),
             path: entry.path.clone(),
             receipt: Box::new(receipt),
         },
-        Err(ReceiptError::Version(version)) => Listed::Newer {
-            id: id.into(),
-            env: entry.env.clone(),
-            started_at_ms: entry.started_at_ms,
-            version,
-            path: entry.path.clone(),
+        Err(ReceiptError::Cloud(_)) => match read_cloud(&entry.path) {
+            Ok(receipt) => Listed::Cloud {
+                id: id.into(),
+                path: entry.path.clone(),
+                receipt: Box::new(receipt),
+            },
+            Err(ReceiptError::Version(version)) => newer(version),
+            Err(error) => unreadable(error.to_string()),
         },
+        Err(ReceiptError::Version(version)) => newer(version),
         Err(ReceiptError::Parse { source, .. }) => unreadable(source.to_string()),
         Err(ReceiptError::Io { source, .. }) => unreadable(source.to_string()),
         Err(error) => unreadable(error.to_string()),

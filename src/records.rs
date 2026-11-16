@@ -25,8 +25,8 @@ pub use receipt::{
     Watch,
 };
 pub use receipts::{
-    checkout_receipts, receipts, CheckoutReceiptList, ReceiptList, ReceiptListRow, ReceiptSummary,
-    DEFAULT_RECEIPTS_LIMIT,
+    checkout_receipts, receipts, CheckoutReceiptList, CloudReceiptSummary, ReceiptList,
+    ReceiptListRow, ReceiptSummary, DEFAULT_RECEIPTS_LIMIT,
 };
 pub use status::{
     env_order, status, AttemptSummary, CellRef, CodeState, EnvCell, Evidence, Mark, NewerElsewhere,

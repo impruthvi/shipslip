@@ -134,6 +134,7 @@ production = true
 Cloud targets are record-only ([ADR 0006](adr/0006-cloud-targets-are-record-only.md)):
 `slip deploy`, `rerun`, `from-step`, `attach`, `up` and `break-lock` refuse
 them, and `slip logs` and the app's connection check do not support them yet.
+`slip pull ENV` pulls its deployments into receipts; see [Laravel Cloud targets](cloud.md).
 An environment that sets `cloud_environment` together with any server setting
 (`ssh`, `path`, `branch`, `log`, `maintenance` and the rest), or sets neither,
 is refused when the config loads.

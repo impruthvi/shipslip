@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use super::{Flag, Outcome, ReceiptQueryError, StepRow, Untrusted};
+use super::{Flag, Outcome, OutcomeKind, ReceiptQueryError, StepRow, Untrusted};
+use crate::receipt::cloud::CloudReceipt;
 use crate::receipt::{self, Listed, Receipt, ReceiptKind, UnfinishedCause};
 use crate::RunPlan;
 
@@ -21,6 +22,13 @@ pub enum ReceiptListRow {
         id: Untrusted,
         path: Untrusted,
         receipt: Box<ReceiptSummary>,
+    },
+    /// A deployment Laravel Cloud ran. Shipslip did not start it, and every
+    /// string in it came from Laravel Cloud.
+    Cloud {
+        id: Untrusted,
+        path: Untrusted,
+        receipt: Box<CloudReceiptSummary>,
     },
     Newer {
         id: Untrusted,
@@ -80,6 +88,59 @@ impl From<&Receipt> for ReceiptSummary {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CloudReceiptSummary {
+    pub deployment_id: Untrusted,
+    pub env: Untrusted,
+    pub cloud_environment: Untrusted,
+    pub cloud_status: Untrusted,
+    pub outcome: Outcome,
+    pub branch: Untrusted,
+    pub commit_hash: Untrusted,
+    pub commit_message: Untrusted,
+    pub commit_author: Option<Untrusted>,
+    /// Laravel Cloud's clock, as it reported it.
+    pub reported_started_at: Option<Untrusted>,
+    pub reported_finished_at: Option<Untrusted>,
+    /// [`Self::reported_started_at`] in milliseconds, when it could be read.
+    pub reported_started_at_ms: Option<u128>,
+    pub pulled_at_ms: u128,
+}
+
+impl From<&CloudReceipt> for CloudReceiptSummary {
+    fn from(receipt: &CloudReceipt) -> Self {
+        Self {
+            deployment_id: receipt.deployment_id.clone().into(),
+            env: receipt.env.clone().into(),
+            cloud_environment: receipt.cloud_environment.clone().into(),
+            cloud_status: receipt.cloud_status.clone().into(),
+            outcome: cloud_outcome(&receipt.cloud_status),
+            branch: receipt.branch.clone().into(),
+            commit_hash: receipt.commit_hash.clone().into(),
+            commit_message: receipt.commit_message.clone().into(),
+            commit_author: receipt.commit_author.clone().map(Into::into),
+            reported_started_at: receipt.reported.started_at.clone().map(Into::into),
+            reported_finished_at: receipt.reported.finished_at.clone().map(Into::into),
+            reported_started_at_ms: receipt.reported_started_at_ms(),
+            pulled_at_ms: receipt.pulled_at_ms,
+        }
+    }
+}
+
+/// The outcome comes from the deployment status alone.
+fn cloud_outcome(status: &str) -> Outcome {
+    match status {
+        crate::cloud::SUCCEEDED => Outcome {
+            kind: OutcomeKind::Succeeded,
+            unfinished: false,
+        },
+        _ => Outcome {
+            kind: OutcomeKind::NotRecorded,
+            unfinished: true,
+        },
+    }
+}
+
 impl From<receipt::Listing> for ReceiptList {
     fn from(listing: receipt::Listing) -> Self {
         Self {
@@ -96,6 +157,11 @@ impl From<Listed> for ReceiptListRow {
                 id: id.into(),
                 path: path.to_string_lossy().into_owned().into(),
                 receipt: Box::new(ReceiptSummary::from(receipt.as_ref())),
+            },
+            Listed::Cloud { id, path, receipt } => Self::Cloud {
+                id: id.into(),
+                path: path.to_string_lossy().into_owned().into(),
+                receipt: Box::new(CloudReceiptSummary::from(receipt.as_ref())),
             },
             Listed::Newer {
                 id,
@@ -174,6 +240,8 @@ pub fn receipts(
             }
             match row {
                 Listed::Receipt { receipt, .. } => receipt.repo_root == checkout,
+                // Pulled, not run from any checkout.
+                Listed::Cloud { .. } => false,
                 _ => {
                     blocked = true;
                     true

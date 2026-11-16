@@ -471,6 +471,28 @@ impl LoadedConfig {
         }
     }
 
+    /// The Cloud target for `name`, only if its current settings are the ones
+    /// the user approved. A server target is refused.
+    pub fn approved_cloud_target(
+        &self,
+        name: &str,
+        trust_path: &Path,
+    ) -> Result<ApprovedCloudTarget, CloudTargetError> {
+        let Some(target) = self.cloud_target(name) else {
+            return Err(match self.target(name) {
+                Some(_) => CloudTargetError::ServerTarget(name.to_string()),
+                None => CloudTargetError::Unknown(name.to_string()),
+            });
+        };
+        match self.approval_status(name, trust_path)? {
+            Some(TrustStatus::Trusted) => Ok(ApprovedCloudTarget {
+                target,
+                project: self.project_name.clone(),
+            }),
+            _ => Err(CloudTargetError::Untrusted(name.to_string())),
+        }
+    }
+
     pub fn trust_snapshot(&self, name: &str) -> Option<TrustSnapshot> {
         let server = match self.envs.get(name)?.clone() {
             Environment::Server(server) => server,
@@ -1106,6 +1128,44 @@ pub enum TrustError {
     CloudTarget(String),
     #[error(transparent)]
     Store(#[from] ConfigError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum CloudTargetError {
+    #[error("environment `{0}` is not in the config")]
+    Unknown(String),
+    #[error("`{0}` is a server target; only a Cloud target can be pulled")]
+    ServerTarget(String),
+    #[error("config for `{0}` is untrusted; run `slip trust {0}` first")]
+    Untrusted(String),
+    #[error(transparent)]
+    Store(#[from] ConfigError),
+}
+
+/// A Cloud target whose settings the user approved. Built only by
+/// [`LoadedConfig::approved_cloud_target`].
+#[derive(Debug, Clone)]
+pub struct ApprovedCloudTarget {
+    target: CloudTarget,
+    project: String,
+}
+
+impl ApprovedCloudTarget {
+    pub fn target(&self) -> &CloudTarget {
+        &self.target
+    }
+
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(target: CloudTarget, project: &str) -> Self {
+        Self {
+            target,
+            project: project.to_string(),
+        }
+    }
 }
 
 // Built once per check, never stored in bulk; boxing would only add noise.
@@ -2443,5 +2503,41 @@ mod tests {
             config.server_target("staging", "slip logs").unwrap_err(),
             TargetError::Unknown("staging".into())
         );
+    }
+
+    #[test]
+    fn only_an_approved_cloud_target_can_be_pulled() {
+        let fixture = Fixture::new();
+        let store = fixture.root.join("trust.json");
+        fixture.write_config(
+            "\n[env.cloud]\ncloud_environment = \"env-9f2c41d0\"\nproduction = true\n",
+            "staging-host",
+            "echo ok",
+        );
+        let config = fixture.load().unwrap();
+        let error = config.approved_cloud_target("cloud", &store).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "config for `cloud` is untrusted; run `slip trust cloud` first"
+        );
+        let error = config.approved_cloud_target("staging", &store).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "`staging` is a server target; only a Cloud target can be pulled"
+        );
+        assert!(matches!(
+            config.approved_cloud_target("missing", &store),
+            Err(CloudTargetError::Unknown(_))
+        ));
+        approve_trust(
+            &store,
+            config.repo_root(),
+            "cloud",
+            config.trust_snapshot("cloud").unwrap(),
+        )
+        .unwrap();
+        let approved = config.approved_cloud_target("cloud", &store).unwrap();
+        assert_eq!(approved.target().cloud_environment, "env-9f2c41d0");
+        assert_eq!(approved.project(), "example");
     }
 }

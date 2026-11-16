@@ -10,6 +10,7 @@
 //! 2. [`execute`] runs the deploy, and only accepts a [`Confirmation`]
 //!    built from that exact preview.
 
+pub mod cloud;
 pub mod config;
 pub mod connection_check;
 pub mod create;

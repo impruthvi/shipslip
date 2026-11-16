@@ -48,6 +48,8 @@ mod mcp;
 mod new;
 #[path = "slip/publish.rs"]
 mod publish;
+#[path = "slip/pull.rs"]
+mod pull;
 #[path = "slip/receipts.rs"]
 mod receipts;
 #[path = "slip/setup.rs"]
@@ -224,6 +226,15 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
     if let Action::Receipts(args) = action {
         return receipts::run(&config, &default_receipts_root()?, args);
     }
+    if let Action::Pull { environment } = action {
+        return pull::run(
+            &config,
+            &default_trust_path()?,
+            &default_receipts_root()?,
+            &environment,
+        )
+        .await;
+    }
     if config.uses_default_recipe() {
         eprintln!("Using the default Laravel deploy recipe; add [recipe.deploy] to customize it.");
     }
@@ -253,6 +264,7 @@ async fn run(mut local_tokens: LocalTokens) -> Result<ExitCode, Box<dyn Error>> 
         }
         Action::Logs { .. } => unreachable!("logs runs before deploy setup"),
         Action::Receipts(_) => unreachable!("receipts runs before deploy setup"),
+        Action::Pull { .. } => unreachable!("pull runs before deploy setup"),
         Action::Run {
             environment,
             plan,
@@ -877,6 +889,14 @@ fn parse_args_from(args: Vec<String>) -> Result<Option<Command>, Box<dyn Error>>
             },
         }));
     }
+    if action == "pull" {
+        return Ok(Some(Command {
+            config,
+            action: Action::Pull {
+                environment: pull::parse(&args[index..])?,
+            },
+        }));
+    }
     if action == "receipts" {
         return Ok(Some(Command {
             config,
@@ -1225,6 +1245,7 @@ fn print_help() {
          \x20 slip [--config FILE] break-lock ENV\n\
          \x20 slip [--config FILE] up ENV\n\
          \x20 slip [--config FILE] logs ENV [ID|ROW] [OPTIONS]\n\
+         \x20 slip [--config FILE] pull ENV\n\
          \x20 slip [--config FILE] receipts [ENV] [--all] [--json]\n\
          \x20 slip [--config FILE] receipts show ID [--json | --md [--with-details]]\n\
          \x20 slip status [--json | --compare ENV ENV]\n\
@@ -1244,6 +1265,7 @@ fn print_help() {
          \x20 break-lock ENV     Clear a stale deploy lock after checking the old run\n\
          \x20 up ENV             Run `php artisan up` under a new deploy lock\n\
          \x20 logs ENV           Group recent log errors; read-only\n\
+         \x20 pull ENV           Pull a Cloud target's deployments into receipts; read-only\n\
          \x20 receipts [ENV]     List saved deploy receipts, newest first; read-only\n\
          \x20 status             Last recorded code of every app and env; read-only\n\
          \x20 mcp                Serve records over MCP stdio; --read-logs opts into approved log reads\n\n\
@@ -1947,6 +1969,9 @@ enum Action {
         options: LogsOptions,
     },
     Receipts(receipts::Args),
+    Pull {
+        environment: String,
+    },
     Status(status::Args),
     Mcp {
         read_logs: bool,

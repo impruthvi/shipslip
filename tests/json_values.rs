@@ -616,6 +616,28 @@ fn serialized_fixed_values_match_the_json_reference() {
                 path: "x".into(),
                 receipt: Box::new(summary),
             },
+            Cloud {
+                id: "x".into(),
+                path: "x".into(),
+                receipt: Box::new(CloudReceiptSummary {
+                    deployment_id: "x".into(),
+                    env: "x".into(),
+                    cloud_environment: "x".into(),
+                    cloud_status: "x".into(),
+                    outcome: Outcome {
+                        kind: OutcomeKind::Succeeded,
+                        unfinished: false,
+                    },
+                    branch: "x".into(),
+                    commit_hash: "x".into(),
+                    commit_message: "x".into(),
+                    commit_author: None,
+                    reported_started_at: None,
+                    reported_finished_at: None,
+                    reported_started_at_ms: None,
+                    pulled_at_ms: 0,
+                }),
+            },
             Newer {
                 id: "x".into(),
                 env: "x".into(),

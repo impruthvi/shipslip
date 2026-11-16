@@ -142,11 +142,25 @@ async fn hidden_token(interrupts: &mut Interrupts) -> io::Result<Option<GitHubTo
     if !io::stdin().is_terminal() {
         return Err(invalid_input("hidden token entry needs an interactive terminal; select --github-token-source env or gh explicitly"));
     }
+    let Some(answer) = hidden_secret("GitHub token", interrupts).await? else {
+        return Ok(None);
+    };
+    GitHubToken::new(answer.to_string())
+        .map(Some)
+        .map_err(io::Error::other)
+}
+
+/// Reads one line with echo off. `None` when the line is empty or Ctrl-C
+/// came first. The caller checks that stdin is a terminal.
+pub(super) async fn hidden_secret(
+    label: &str,
+    interrupts: &mut Interrupts,
+) -> io::Result<Option<Zeroizing<String>>> {
     // Duplicate the actual terminal fd. On macOS the /dev/tty alias does not
     // reliably support poll, while the terminal's own device does.
     let terminal = File::from(io::stdin().as_fd().try_clone_to_owned()?);
     let guard = EchoGuard::new(terminal)?;
-    print!("GitHub token (hidden; Enter cancels): ");
+    print!("{label} (hidden; Enter cancels): ");
     io::stdout().flush()?;
     let answer = read_hidden(guard, interrupts).await;
     println!();
@@ -154,12 +168,7 @@ async fn hidden_token(interrupts: &mut Interrupts) -> io::Result<Option<GitHubTo
         return Ok(None);
     };
     let answer = Zeroizing::new(answer);
-    if answer.is_empty() {
-        return Ok(None);
-    }
-    GitHubToken::new(answer.to_string())
-        .map(Some)
-        .map_err(io::Error::other)
+    Ok((!answer.is_empty()).then_some(answer))
 }
 
 async fn auth_answer(

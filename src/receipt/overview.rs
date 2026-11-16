@@ -109,7 +109,9 @@ pub fn overview(receipts_root: &Path, trust_path: &Path) -> Result<Overview, Rec
                 continue;
             };
             match read_summary(&path) {
-                Ok(summary) => {
+                // A Cloud deployment holds no checkout or run to place.
+                Ok(None) => {}
+                Ok(Some(summary)) => {
                     let row = rows.entry(summary.repo_root).or_default();
                     if row.project.is_none() {
                         row.project = summary.project;
@@ -312,12 +314,17 @@ fn project_dirs(root: &Path) -> Result<Vec<PathBuf>, ReceiptError> {
     Ok(dirs)
 }
 
-fn read_summary(path: &Path) -> Result<ReceiptSummary, ReceiptError> {
+fn read_summary(path: &Path) -> Result<Option<ReceiptSummary>, ReceiptError> {
     let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
-    serde_json::from_slice(&bytes).map_err(|source| ReceiptError::Parse {
-        path: path.to_path_buf(),
-        source,
-    })
+    if super::cloud::is_cloud(&bytes) {
+        return Ok(None);
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|source| ReceiptError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })
 }
 
 fn build_cell(
