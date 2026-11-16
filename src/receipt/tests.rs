@@ -129,6 +129,7 @@ fn ids(listing: &Listing) -> Vec<String> {
         .iter()
         .map(|row| match row {
             Listed::Receipt { id, .. }
+            | Listed::Cloud { id, .. }
             | Listed::Newer { id, .. }
             | Listed::Unreadable { id, .. } => id.clone(),
         })

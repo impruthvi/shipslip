@@ -15,6 +15,7 @@ use crate::{
     SmokeResult, StepStatus, StepTimes, WatchResult,
 };
 
+pub mod cloud;
 mod history;
 pub(crate) mod markdown;
 mod overview;
@@ -55,6 +56,8 @@ pub enum ReceiptError {
     MultipleOpen(String),
     #[error("another process is already using receipt `{0}`")]
     Claimed(PathBuf),
+    #[error("`{0}` is a Cloud deployment receipt, not a run")]
+    Cloud(PathBuf),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1028,6 +1031,9 @@ struct VersionProbe {
 
 fn read_receipt(path: &Path) -> Result<Receipt, ReceiptError> {
     let bytes = fs::read(path).map_err(|source| io_error(path, source))?;
+    if cloud::is_cloud(&bytes) {
+        return Err(ReceiptError::Cloud(path.to_path_buf()));
+    }
     // Check the version first so a newer receipt reports its version
     // instead of a field error.
     let probe: VersionProbe =

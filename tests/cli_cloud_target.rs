@@ -154,3 +154,92 @@ fn slip_logs_says_it_does_not_support_cloud_targets_yet() {
     );
     assert!(!fixture.ssh_called());
 }
+
+#[test]
+fn pull_refuses_a_server_target_and_an_unapproved_cloud_target_before_asking_for_a_token() {
+    let fixture = Fixture::new("pull-refusals");
+    fs::write(
+        fixture.root.join("app/.shipslip.toml"),
+        format!("{CONFIG}\n[env.staging]\nssh = \"staging-host\"\npath = \"/srv/app\"\nbranch = \"main\"\nproduction = false\n"),
+    )
+    .unwrap();
+    for (env, message) in [
+        (
+            "staging",
+            "`staging` is a server target; only a Cloud target can be pulled",
+        ),
+        (
+            "production",
+            "config for `production` is untrusted; run `slip trust production` first",
+        ),
+    ] {
+        let output = fixture.slip(&["pull", env], "");
+        let stderr = text(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{env}: {stderr}");
+        assert!(stderr.contains(message), "{env}: {stderr}");
+        assert!(!text(&output.stdout).contains("token"), "{env}");
+    }
+    assert!(!fixture.ssh_called());
+}
+
+#[test]
+fn pull_asks_for_the_token_only_at_a_hidden_prompt() {
+    let fixture = Fixture::new("pull-prompt");
+    fixture.slip(&["trust", "production"], "production\n");
+    let curl = fixture.root.join("bin/curl");
+    fs::write(
+        &curl,
+        format!(
+            "#!/bin/sh\necho called >> '{}'\nexit 7\n",
+            fixture.root.join("curl-called").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&curl, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = fixture.slip(&["pull", "production"], "7|piped-token\n");
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("hidden prompt, which needs an interactive terminal"),
+        "{stderr}"
+    );
+    assert!(!fixture.root.join("curl-called").exists());
+}
+
+#[test]
+fn receipts_lists_cloud_deployments_marked_as_not_run_by_shipslip() {
+    let fixture = Fixture::new("pull-receipts");
+    let receipts = if cfg!(target_os = "macos") {
+        "home/Library/Application Support/Shipslip/receipts"
+    } else {
+        "home/.local/share/shipslip/receipts"
+    };
+    let dir = fixture.root.join(receipts).join("cloud-test/production");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("1763285400000-depl-9a1b2c3d.json"),
+        r#"{"version": 3, "kind": "cloud", "project": "cloud-test", "env": "production",
+            "cloud_environment": "env-9f2c41d0", "deployment_id": "depl-9a1b2c3d",
+            "cloud_status": "deployment.succeeded", "branch": "main",
+            "commit_hash": "4f9e2a1c0b7d4f9e2a1c0b7d4f9e2a1c0b7d4f9e",
+            "commit_message": "Ship it", "commit_author": "Taylor", "failure_reason": null,
+            "reported": {"started_at": "2025-11-16T09:30:00Z", "finished_at": "2025-11-16T09:31:00Z"},
+            "pulled_at_ms": 1763285500000}"#,
+    )
+    .unwrap();
+    let output = fixture.slip(&["receipts"], "");
+    let stdout = text(&output.stdout);
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(stdout.contains("depl-9a1  "), "{stdout}");
+    assert!(stdout.contains("(Cloud)"), "{stdout}");
+    assert!(stdout.contains("Cloud deployed 4f9e2a1c0b7d"), "{stdout}");
+    assert!(
+        stdout.contains("Succeeded  ⓘ Laravel Cloud ran it, not Shipslip"),
+        "{stdout}"
+    );
+
+    let output = fixture.slip(&["receipts", "--json"], "");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["rows"][0]["state"], "cloud");
+    assert_eq!(json["rows"][0]["receipt"]["commit_author"], "Taylor");
+}

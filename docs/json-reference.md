@@ -95,6 +95,18 @@ former `log_not_fully_observed` flag. A complete watch and `NotRun` without
 a skip reason add no log watch flag. New errors and other run problems still
 need attention independently of the log watch result.
 
+## Cloud deployments
+
+A receipt list row with `state: "cloud"` is a deployment Laravel Cloud ran on
+a Cloud target; Shipslip did not start it. Its `receipt` holds
+`deployment_id`, `env`, `cloud_environment`, `cloud_status` (as Laravel Cloud
+reported it), `outcome`, `branch`, `commit_hash`, `commit_message`,
+`commit_author`, `reported_started_at` and `reported_finished_at` (Laravel
+Cloud's own times, as it wrote them), `reported_started_at_ms` (the start in
+milliseconds, `null` when it could not be read) and `pulled_at_ms` (this
+Mac's clock). Every string in it, including `cloud_status`, is server text.
+A checkout-filtered list leaves Cloud rows out.
+
 ## MCP
 
 Launch `slip mcp` for local records only, or `slip mcp --read-logs` to also
@@ -187,7 +199,7 @@ including `anchor.plan`, `server_marker_outcome`, and `check.reason`.
   "cli.early_error.kind": ["invalid_input", "unreadable"],
   "receipt.kind": ["deploy", "up"],
   "receipt.run_plan": ["Deploy", "Rerun", "FromStep"],
-  "receipt.row.state": ["receipt", "newer", "unreadable"],
+  "receipt.row.state": ["receipt", "cloud", "newer", "unreadable"],
   "receipt.outcome.kind": ["succeeded", "failed_at_step", "stopped_after_step", "stopped_in_maintenance", "unknown", "cancelled_before_changes", "aborted_before_changes", "not_recorded"],
   "receipt.flag.kind": ["new_errors", "log_watch_interrupted", "log_unreadable", "no_log_file_yet", "log_watch_stopped_early", "log_watch_skipped_in_maintenance", "log_not_recorded", "smoke_failed", "smoke_not_recorded", "app_left_down"],
   "receipt.step.kind": ["maintenance_down", "step", "maintenance_up"],

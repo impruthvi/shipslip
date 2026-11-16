@@ -842,3 +842,119 @@ fn receipt_query_reports_a_file_without_read_permission_as_unreadable() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn receipt_list_rows_carry_cloud_deployments_as_their_own_state() {
+    use crate::receipt::cloud::{write_cloud, CloudKind, CloudReceipt, CloudReportedTimes};
+    let root = TempRoot::new();
+    write_receipt(&root.0, &deploy());
+    write_cloud(
+        &root.0,
+        &CloudReceipt {
+            version: 3,
+            kind: CloudKind::Cloud,
+            project: "app".into(),
+            env: "production".into(),
+            cloud_environment: "env-1".into(),
+            deployment_id: "depl-1".into(),
+            cloud_status: "deployment.succeeded".into(),
+            branch: "main".into(),
+            commit_hash: "abc".into(),
+            commit_message: "a\u{1b}[2J".into(),
+            commit_author: None,
+            failure_reason: None,
+            reported: CloudReportedTimes {
+                started_at: Some("1970-01-01T00:00:02Z".into()),
+                finished_at: None,
+            },
+            pulled_at_ms: 5000,
+        },
+    )
+    .unwrap();
+    let list = to_json(versioned(
+        receipts(&root.0, "app", None, None, None).unwrap(),
+    ));
+    let path = list["rows"][0]["path"].clone();
+    assert_eq!(
+        list["rows"][0],
+        json!({
+            "state": "cloud",
+            "id": "depl-1",
+            "path": path,
+            "receipt": {
+                "deployment_id": "depl-1",
+                "env": "production",
+                "cloud_environment": "env-1",
+                "cloud_status": "deployment.succeeded",
+                "outcome": {"kind": "succeeded", "unfinished": false},
+                "branch": "main",
+                "commit_hash": "abc",
+                "commit_message": "a\u{1b}[2J",
+                "commit_author": null,
+                "reported_started_at": "1970-01-01T00:00:02Z",
+                "reported_finished_at": null,
+                "reported_started_at_ms": 2000,
+                "pulled_at_ms": 5000
+            }
+        })
+    );
+    assert_eq!(list["rows"][1]["state"], "receipt");
+    let checkout = Some(std::path::Path::new("/repo"));
+    let mine = to_json(receipts(&root.0, "app", None, None, checkout).unwrap());
+    assert_eq!(mine["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(mine["rows"][0]["receipt"]["run_id"], "aaaa0001-0");
+    let error = to_json(versioned_error(
+        receipt(&root.0, "app", "depl-1").unwrap_err(),
+    ));
+    assert_eq!(error["error"]["kind"], "unreadable");
+}
+
+#[test]
+fn a_cloud_receipt_is_not_a_release_map_problem() {
+    let root = TempRoot::new();
+    let dir = root.0.join("app/production");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("2000-depl-1.json"),
+        json!({"version": 3, "kind": "cloud", "status": "deployment.succeeded"}).to_string(),
+    )
+    .unwrap();
+    assert_eq!(
+        to_json(versioned(
+            status(&root.0, &root.0.join("trust.json")).unwrap()
+        )),
+        json!({"schema": 1, "repos": [], "problems": []})
+    );
+}
+
+#[test]
+fn a_cloud_receipt_from_a_newer_or_broken_shipslip_is_listed_as_such() {
+    let root = TempRoot::new();
+    let dir = root.0.join("app/production");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("2000-depl-2.json"),
+        r#"{"version": 4, "kind": "cloud"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("1000-depl-1.json"),
+        r#"{"version": 3, "kind": "cloud"}"#,
+    )
+    .unwrap();
+    let list = to_json(receipts(&root.0, "app", None, None, None).unwrap());
+    assert_eq!(list["rows"][0]["state"], "unreadable");
+    assert_eq!(list["rows"][1]["state"], "unreadable");
+    std::fs::write(
+        dir.join("2000-depl-2.json"),
+        r#"{"version": 4, "kind": "cloud", "project": "app", "env": "production",
+            "cloud_environment": "e", "deployment_id": "depl-2", "cloud_status": "s",
+            "branch": "b", "commit_hash": "c", "commit_message": "m", "commit_author": null,
+            "failure_reason": null, "reported": {"started_at": null, "finished_at": null},
+            "pulled_at_ms": 1}"#,
+    )
+    .unwrap();
+    let list = to_json(receipts(&root.0, "app", None, None, None).unwrap());
+    assert_eq!(list["rows"][0]["state"], "newer");
+    assert_eq!(list["rows"][0]["version"], 4);
+}

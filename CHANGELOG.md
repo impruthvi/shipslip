@@ -14,6 +14,12 @@ change the library API.
   are record-only: deploy, rerun, from-step, attach, up and break-lock refuse
   one, and `slip logs` and the connection check say they do not support Cloud
   targets yet. See [configuration](docs/config.md#cloud-targets).
+- `slip pull ENV` pulls a Cloud target's deployments into receipts: it asks for a
+  Laravel Cloud API token at a hidden prompt, reads the ten most recent
+  deployments and writes a receipt for each that succeeded. `slip receipts`
+  lists Cloud receipts next to server runs, marked as run by Laravel Cloud,
+  and its JSON gains the row state `cloud`. See [Laravel Cloud
+  targets](docs/cloud.md).
 
 ## [0.14.0] - 2026-11-14
 

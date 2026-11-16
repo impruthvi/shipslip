@@ -223,6 +223,19 @@ fn render_list(project: &str, env: Option<&str>, listing: &ReceiptList) -> Strin
                     escape_field(&outcome),
                 ]
             }
+            ReceiptListRow::Cloud { id, receipt, .. } => [
+                id.field(),
+                receipt
+                    .reported_started_at_ms
+                    .map(|ms| format!("{} (Cloud)", local_time(ms, false)))
+                    .unwrap_or_default(),
+                receipt.env.field(),
+                format!("Cloud deployed {}", short(receipt.commit_hash.raw())),
+                format!(
+                    "{}  ⓘ Laravel Cloud ran it, not Shipslip",
+                    headline(receipt.outcome)
+                ),
+            ],
             ReceiptListRow::Newer {
                 id,
                 env,
